@@ -1,8 +1,7 @@
 {
-  "name": "@reorderjs/reorder",
-  "version": "1.0.5",
-  "description": "Open Source Subscription Medusa Plugin.",
-  "author": "Reorder (https://reorderjs.com)",
+  "name": "@bethinkpl/reorder",
+  "version": "1.0.0",
+  "description": "Customized version of @reorderjs/reorder.",
   "license": "MIT",
   "files": [
     ".medusa/server"
@@ -20,14 +19,6 @@
       "default": "./.medusa/server/src/admin/index.js"
     }
   },
-  "keywords": [
-    "medusa",
-    "plugin",
-    "medusa-plugin-other",
-    "medusa-plugin",
-    "medusa-plugin-integration",
-    "medusa-v2"
-  ],
   "scripts": {
     "build": "medusa plugin:build",
     "dev": "medusa plugin:develop",

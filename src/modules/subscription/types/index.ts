@@ -1,3 +1,8 @@
+import type { InferTypeOf } from "@medusajs/framework/types"
+import Subscription from "./../models/subscription"
+
+type Override<T, U> = Omit<T, keyof U> & U
+
 export enum SubscriptionStatus {
   ACTIVE = "active",
   PAUSED = "paused",
@@ -22,6 +27,29 @@ export type SubscriptionProductSnapshot = {
   variant_id: string
   variant_title: string
   sku: string | null
+}
+
+export type SubscriptionSourceSnapshot = {
+  product_id: string
+  variant_id: string | null
+  title: string
+  quantity: number
+  unit_price: number
+  subtitle: string | null
+  sku: string | null
+  is_discountable: boolean | null
+  is_tax_inclusive: boolean | null
+  requires_shipping: boolean | null
+  tax_lines: {
+    code: string
+    rate: number
+    description: string | null
+  }[] | null
+  adjustments: {
+    amount: number
+    code: string | null
+    description: string | null
+  }[] | null
 }
 
 export type SubscriptionPricingSnapshot = {
@@ -61,3 +89,27 @@ export type SubscriptionPendingUpdateData = {
   requested_at: string
   requested_by: string | null
 }
+
+export type SubscriptionType = Override<InferTypeOf<typeof Subscription>, {
+  customer_snapshot: SubscriptionCustomerSnapshot | null
+  product_snapshot: SubscriptionProductSnapshot
+  pricing_snapshot: SubscriptionPricingSnapshot | null
+  source_snapshot: SubscriptionSourceSnapshot
+  shipping_address: SubscriptionShippingAddress
+  payment_context: SubscriptionPaymentContext | null
+  pending_update_data: SubscriptionPendingUpdateData | null
+  metadata: Record<string, unknown> | null
+
+}>
+
+export type SubscriptionQueryType = Override<SubscriptionType, {
+  started_at: string
+  next_renewal_at: string | null
+  last_renewal_at: string | null
+  paused_at: string | null
+  cancelled_at: string | null
+  cancel_effective_at: string | null
+  trial_ends_at: string | null
+  created_at: string
+  updated_at: string
+}>

@@ -641,6 +641,9 @@ export const CreatePlanOfferModal = ({
                                         <Select.Value />
                                       </Select.Trigger>
                                       <Select.Content>
+                                        <Select.Item value={PlanOfferFrequencyInterval.DAY}>
+                                          Daily
+                                        </Select.Item>
                                         <Select.Item value={PlanOfferFrequencyInterval.WEEK}>
                                           Weekly
                                         </Select.Item>

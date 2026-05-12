@@ -64,6 +64,7 @@ const scopeFilterOptions = [
 ] as const
 
 const frequencyFilterOptions = [
+  { label: "Daily", value: PlanOfferFrequencyInterval.DAY },
   { label: "Weekly", value: PlanOfferFrequencyInterval.WEEK },
   { label: "Monthly", value: PlanOfferFrequencyInterval.MONTH },
   { label: "Yearly", value: PlanOfferFrequencyInterval.YEAR },
@@ -939,6 +940,8 @@ function formatStatusFilter(status: PlanOfferAdminStatus) {
 
 function formatFrequencyFilter(frequency: PlanOfferFrequencyInterval) {
   switch (frequency) {
+    case PlanOfferFrequencyInterval.DAY:
+      return "Daily"
     case PlanOfferFrequencyInterval.WEEK:
       return "Weekly"
     case PlanOfferFrequencyInterval.MONTH:

@@ -53,6 +53,7 @@ const frequencyFilterOptions: Array<{
   label: string
   value: AnalyticsFrequencyFilter
 }> = [
+  { label: "Daily", value: { interval: "day", value: 1 } },
   { label: "Weekly", value: { interval: "week", value: 1 } },
   { label: "Every 2 weeks", value: { interval: "week", value: 2 } },
   { label: "Monthly", value: { interval: "month", value: 1 } },
@@ -875,6 +876,8 @@ function formatGroupBy(value: AnalyticsGroupBy) {
 
 function formatFrequency(value: AnalyticsFrequencyFilter) {
   switch (value.interval) {
+    case "day":
+      return value.value === 1 ? "Daily" : `Every ${value.value} days`
     case "week":
       return value.value === 1 ? "Weekly" : `Every ${value.value} weeks`
     case "month":

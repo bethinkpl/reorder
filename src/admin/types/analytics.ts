@@ -17,7 +17,7 @@ export type AnalyticsSubscriptionStatus =
   | "cancelled"
   | "past_due"
 
-export type AnalyticsFrequencyInterval = "week" | "month" | "year"
+export type AnalyticsFrequencyInterval = "day" | "week" | "month" | "year"
 
 export type AnalyticsFrequencyFilter = {
   interval: AnalyticsFrequencyInterval

@@ -9,6 +9,7 @@ export enum PlanOfferScope {
 }
 
 export enum PlanOfferFrequencyInterval {
+  DAY = "day",
   WEEK = "week",
   MONTH = "month",
   YEAR = "year",

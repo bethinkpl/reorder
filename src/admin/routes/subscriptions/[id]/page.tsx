@@ -72,6 +72,7 @@ const scheduleableStatuses = new Set<SubscriptionAdminStatus>([
 ])
 
 const intervalOptions = [
+  { label: "Daily", value: SubscriptionFrequencyInterval.DAY },
   { label: "Weekly", value: SubscriptionFrequencyInterval.WEEK },
   { label: "Monthly", value: SubscriptionFrequencyInterval.MONTH },
   { label: "Yearly", value: SubscriptionFrequencyInterval.YEAR },
@@ -2060,6 +2061,10 @@ function formatFrequency(
   interval: SubscriptionFrequencyInterval,
   value: number
 ) {
+  if (interval === SubscriptionFrequencyInterval.DAY) {
+    return value === 1 ? "Every day" : `Every ${value} days`
+  }
+
   if (value === 1) {
     return `Every ${interval}`
   }

@@ -197,7 +197,7 @@ function parseFrequencyToken(token: string): AnalyticsFrequencyFilter {
 
   if (
     !interval ||
-    !["week", "month", "year"].includes(interval) ||
+    !["day", "week", "month", "year"].includes(interval) ||
     !Number.isFinite(parsedValue) ||
     parsedValue <= 0
   ) {
@@ -226,7 +226,7 @@ function normalizeFrequencyFilters(
     }
 
     if (
-      !["week", "month", "year"].includes(filter.interval) ||
+      !["day", "week", "month", "year"].includes(filter.interval) ||
       !Number.isFinite(filter.value) ||
       filter.value <= 0
     ) {

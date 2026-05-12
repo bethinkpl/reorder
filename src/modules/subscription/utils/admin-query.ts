@@ -43,7 +43,7 @@ type SubscriptionRecord = {
   customer_id: string
   product_id: string
   variant_id: string
-  frequency_interval: "week" | "month" | "year"
+  frequency_interval: "day" | "week" | "month" | "year"
   frequency_value: number
   started_at: string
   next_renewal_at: string | null
@@ -75,7 +75,7 @@ type SubscriptionRecord = {
     variant_id: string
     variant_title: string
     sku: string | null
-    frequency_interval: "week" | "month" | "year"
+    frequency_interval: "day" | "week" | "month" | "year"
     frequency_value: number
     effective_at: string | null
     requested_at: string
@@ -90,7 +90,7 @@ type SubscriptionOrderLinkRecord = {
     id?: string | null
     reference?: string | null
     status?: string | null
-    frequency_interval?: "week" | "month" | "year" | null
+    frequency_interval?: "day" | "week" | "month" | "year" | null
     frequency_value?: number | null
     next_renewal_at?: string | null
     skip_next_cycle?: boolean | null
@@ -219,11 +219,13 @@ function mapPendingUpdateData(
     variant_id: pendingUpdateData.variant_id,
     variant_title: pendingUpdateData.variant_title,
     frequency_interval:
-      pendingUpdateData.frequency_interval === "week"
-        ? SubscriptionFrequencyInterval.WEEK
-        : pendingUpdateData.frequency_interval === "month"
-          ? SubscriptionFrequencyInterval.MONTH
-          : SubscriptionFrequencyInterval.YEAR,
+      pendingUpdateData.frequency_interval === "day"
+        ? SubscriptionFrequencyInterval.DAY
+        : pendingUpdateData.frequency_interval === "week"
+          ? SubscriptionFrequencyInterval.WEEK
+          : pendingUpdateData.frequency_interval === "month"
+            ? SubscriptionFrequencyInterval.MONTH
+            : SubscriptionFrequencyInterval.YEAR,
     frequency_value: pendingUpdateData.frequency_value,
     effective_at: pendingUpdateData.effective_at,
   }
@@ -235,11 +237,13 @@ function mapListItem(record: SubscriptionQueryType): SubscriptionAdminListItem {
 
   const frequency: SubscriptionAdminFrequency = {
     interval:
-      record.frequency_interval === "week"
-        ? SubscriptionFrequencyInterval.WEEK
-        : record.frequency_interval === "month"
-          ? SubscriptionFrequencyInterval.MONTH
-          : SubscriptionFrequencyInterval.YEAR,
+      record.frequency_interval === "day"
+        ? SubscriptionFrequencyInterval.DAY
+        : record.frequency_interval === "week"
+          ? SubscriptionFrequencyInterval.WEEK
+          : record.frequency_interval === "month"
+            ? SubscriptionFrequencyInterval.MONTH
+            : SubscriptionFrequencyInterval.YEAR,
     value: record.frequency_value,
     label: formatFrequencyLabel(
       record.frequency_interval,

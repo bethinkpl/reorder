@@ -37,7 +37,7 @@ export type ListAdminPlanOffersInput = {
   scope?: "product" | "variant"
   product_id?: string
   variant_id?: string
-  frequency?: "week" | "month" | "year"
+  frequency?: "day" | "week" | "month" | "year"
   discount_min?: number
   discount_max?: number
   order?: string
@@ -131,11 +131,13 @@ function mapFrequencyOption(
 ): PlanOfferAdminFrequencyOption {
   return {
     interval:
-      frequency.interval === "week"
-        ? PlanOfferFrequencyInterval.WEEK
-        : frequency.interval === "month"
-          ? PlanOfferFrequencyInterval.MONTH
-          : PlanOfferFrequencyInterval.YEAR,
+      frequency.interval === "day"
+        ? PlanOfferFrequencyInterval.DAY
+        : frequency.interval === "week"
+          ? PlanOfferFrequencyInterval.WEEK
+          : frequency.interval === "month"
+            ? PlanOfferFrequencyInterval.MONTH
+            : PlanOfferFrequencyInterval.YEAR,
     value: frequency.value,
     label: formatFrequencyLabel(frequency.interval, frequency.value),
   }
@@ -151,11 +153,13 @@ function mapDiscountValue(
 
   return {
     interval:
-      discount.interval === "week"
-        ? PlanOfferFrequencyInterval.WEEK
-        : discount.interval === "month"
-          ? PlanOfferFrequencyInterval.MONTH
-          : PlanOfferFrequencyInterval.YEAR,
+      discount.interval === "day"
+        ? PlanOfferFrequencyInterval.DAY
+        : discount.interval === "week"
+          ? PlanOfferFrequencyInterval.WEEK
+          : discount.interval === "month"
+            ? PlanOfferFrequencyInterval.MONTH
+            : PlanOfferFrequencyInterval.YEAR,
     frequency_value: discount.value,
     type:
       discount.discount_type === "percentage"

@@ -10,6 +10,7 @@ export enum SubscriptionStatus {
 }
 
 export enum SubscriptionFrequencyInterval {
+  DAY = "day",
   WEEK = "week",
   MONTH = "month",
   YEAR = "year",

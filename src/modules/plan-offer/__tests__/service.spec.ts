@@ -95,6 +95,32 @@ moduleIntegrationTestRunner<PlanOfferModuleService>({
         expect(updated.is_enabled).toBe(false)
         expect(updated.frequency_intervals).toEqual(["month", "year"])
       })
+
+      it("creates a plan offer with DAY frequency interval", async () => {
+        const created = await service.createPlanOffers({
+          name: "PLAN-MODULE-DAY-001",
+          scope: PlanOfferScope.PRODUCT,
+          product_id: "prod_module_day_001",
+          variant_id: null,
+          is_enabled: true,
+          allowed_frequencies: [
+            {
+              interval: PlanOfferFrequencyInterval.DAY,
+              value: 1,
+            },
+          ] as any,
+          frequency_intervals: ["day"],
+          discount_per_frequency: [] as any,
+          rules: null,
+          metadata: null,
+        } as any)
+
+        const retrieved = await service.retrievePlanOffer(created.id)
+
+        expect(retrieved.id).toEqual(created.id)
+        expect(retrieved.name).toEqual("PLAN-MODULE-DAY-001")
+        expect(retrieved.frequency_intervals).toEqual(["day"])
+      })
     })
   },
 })

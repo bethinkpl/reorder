@@ -1,3 +1,4 @@
+import { DateTime } from "luxon"
 import { SubscriptionFrequencyInterval } from "../types"
 
 function toValidDate(value: string | Date | null | undefined) {
@@ -19,20 +20,18 @@ export function addSubscriptionCadence(
   interval: SubscriptionFrequencyInterval,
   value: number
 ) {
-  const next = new Date(anchor)
+  const dt = DateTime.fromJSDate(anchor, { zone: "utc" })
 
-  if (interval === SubscriptionFrequencyInterval.WEEK) {
-    next.setUTCDate(next.getUTCDate() + value * 7)
-    return next
+  switch (interval) {
+    case SubscriptionFrequencyInterval.DAY:
+      return dt.plus({ days: value }).toJSDate()
+    case SubscriptionFrequencyInterval.WEEK:
+      return dt.plus({ weeks: value }).toJSDate()
+    case SubscriptionFrequencyInterval.MONTH:
+      return dt.plus({ months: value }).toJSDate()
+    case SubscriptionFrequencyInterval.YEAR:
+      return dt.plus({ years: value }).toJSDate()
   }
-
-  if (interval === SubscriptionFrequencyInterval.MONTH) {
-    next.setUTCMonth(next.getUTCMonth() + value)
-    return next
-  }
-
-  next.setUTCFullYear(next.getUTCFullYear() + value)
-  return next
 }
 
 export function getEffectiveNextRenewalAt(input: {

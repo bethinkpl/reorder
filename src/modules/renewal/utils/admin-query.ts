@@ -78,7 +78,7 @@ type SubscriptionRecord = {
   reference: string
   status: "active" | "paused" | "cancelled" | "past_due"
   next_renewal_at: string | null
-  frequency_interval: "week" | "month" | "year"
+  frequency_interval: "day" | "week" | "month" | "year"
   frequency_value: number
   skip_next_cycle: boolean
   customer_snapshot: {
@@ -169,7 +169,7 @@ const subscriptionFields = [
 type RenewalAdminSubscriptionProjection = {
   summary: RenewalAdminSubscriptionSummary
   next_renewal_at: string | null
-  frequency_interval: "week" | "month" | "year"
+  frequency_interval: "day" | "week" | "month" | "year"
   frequency_value: number
   skip_next_cycle: boolean
 }

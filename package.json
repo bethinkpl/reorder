@@ -1,6 +1,6 @@
 {
   "name": "@bethinkpl/reorder",
-  "version": "1.1.0",
+  "version": "1.2.0",
   "description": "Customized version of @reorderjs/reorder.",
   "license": "MIT",
   "files": [

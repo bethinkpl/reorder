@@ -6,6 +6,9 @@
   "author": {
     "name": "Bethink"
   },
+  "repository": {
+    "url": "https://github.com/bethinkpl/reorder"
+  },
   "files": [
     ".medusa/server"
   ],

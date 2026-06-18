@@ -24,17 +24,14 @@ import {
 import { calculateNextRetryAt } from "../../modules/dunning/utils/retry-schedule"
 import { SUBSCRIPTION_MODULE } from "../../modules/subscription"
 import type SubscriptionModuleService from "../../modules/subscription/service"
-import { SubscriptionStatus } from "../../modules/subscription/types"
+import { type SubscriptionPaymentContext, SubscriptionStatus } from "../../modules/subscription/types"
 import { subscriptionErrors } from "../../modules/subscription/utils/errors"
 
 type SubscriptionRecord = {
   id: string
   status: SubscriptionStatus
   customer_id: string
-  payment_context: {
-    payment_provider_id: string | null
-    payment_method_id: string | null
-  } | null
+  payment_context: SubscriptionPaymentContext | null
 }
 
 type DunningCaseRecord = {

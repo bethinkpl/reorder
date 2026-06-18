@@ -8,7 +8,7 @@ export const CartCompleteAllowedMetadataKey = "_completeAllowed" as const
  * This is used to prevent completing carts which contain subscription items outside of flows
  * that can handle those items.
  * Returns `true` when:
- *  - cart does doesn't contain subscription items
+ *  - cart doesn't contain subscription items
  *  - cart contains subscription items AND has special metadata property present
  */
 export const canCompleteCart = (cart: CartWorkflowDTO): boolean => {

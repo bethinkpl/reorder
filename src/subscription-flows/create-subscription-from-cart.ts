@@ -114,10 +114,11 @@ export const createSubscriptionFromCartWorkflow = createWorkflow(
     })
 
     const subscriptionId = transform({ existingSubscriptionId, createdSubscription }, ({ existingSubscriptionId, createdSubscription }) => {
-      if (existingSubscriptionId === undefined && createdSubscription?.id === undefined) {
+      const id = existingSubscriptionId ?? createdSubscription?.id
+      if (id === undefined) {
         throw new Error("Subscription create flow did not resolve existing subscription neither created new")
       }
-      return existingSubscriptionId ?? createdSubscription!.id
+      return id
     })
 
     const subscriptionQuery = useQueryGraphStep({

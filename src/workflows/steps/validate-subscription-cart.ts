@@ -12,6 +12,7 @@ import {
 } from "../../modules/subscription/types"
 import { subscriptionErrors } from "../../modules/subscription/utils/errors"
 import { FrequencyInterval, isFrequencyInterval } from "../../common/types/frequency-interval"
+import { isSubscriptionItem } from "../../common/utils/is-subscription-item"
 
 export type ValidateSubscriptionCartStepInput = {
   cart_id: string
@@ -104,7 +105,7 @@ export const validateSubscriptionCartStep = createStep(
 
     const items = cart.items ?? []
     const subscriptionItems = items.filter((item: any) =>
-      isSubscriptionItem(item!.metadata)
+      isSubscriptionItem(item)
     ) as NonNullable<(typeof items)[number]>[]
 
     if (!subscriptionItems.length) {
@@ -266,10 +267,6 @@ async function loadCart(
   return data[0]
 }
 
-function isSubscriptionItem(metadata?: Record<string, unknown> | null) {
-  return readBoolean(metadata?.is_subscription)
-}
-
 function validateCartPurchaseMode(metadata?: Record<string, unknown> | null) {
   const purchaseMode = metadata?.purchase_mode
 
@@ -282,18 +279,6 @@ function validateCartPurchaseMode(metadata?: Record<string, unknown> | null) {
       "Cart metadata 'purchase_mode' must be 'subscription' for subscription checkout"
     )
   }
-}
-
-function readBoolean(value: unknown) {
-  if (typeof value === "boolean") {
-    return value
-  }
-
-  if (typeof value === "string") {
-    return value === "true"
-  }
-
-  return false
 }
 
 function readFrequencyInterval(metadata?: Record<string, unknown> | null) {

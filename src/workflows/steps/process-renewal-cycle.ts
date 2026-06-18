@@ -105,10 +105,7 @@ type SubscriptionRecord = {
   }
   shipping_address: Record<string, unknown>
   pending_update_data: SubscriptionPendingUpdateData | null
-  payment_context: {
-    payment_provider_id: string | null
-    payment_method_id: string | null
-  } | null
+  payment_context: SubscriptionPaymentContext | null
   metadata: Record<string, unknown> | null
 }
 

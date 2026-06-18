@@ -1,5 +1,5 @@
 import type { MedusaContainer } from "@medusajs/framework/types"
-import { ContainerRegistrationKeys, Modules } from "@medusajs/framework/utils"
+import { ContainerRegistrationKeys } from "@medusajs/framework/utils"
 import { createStep, StepResponse } from "@medusajs/framework/workflows-sdk"
 import type { PlanOfferDiscountPerFrequency } from "../../modules/plan-offer/types"
 import { resolveProductSubscriptionConfig } from "../../modules/plan-offer/utils/effective-config"
@@ -58,7 +58,6 @@ type CartRecord = {
     payment_sessions?: Array<{
       id: string
       provider_id?: string | null
-      data?: Record<string, unknown> | null
     }> | null
   } | null
   items?: CartLineItemRecord[] | null
@@ -173,7 +172,7 @@ export const validateSubscriptionCartStep = createStep(
       frequencyValue
     )
 
-    const paymentContext = await buildPaymentContext(container, cart as CartRecord)
+    const paymentContext = buildPaymentContext(cart as CartRecord)
 
     const requiresShippingAddress = items.some((item: any) => item?.requires_shipping)
 
@@ -400,57 +399,31 @@ function buildShippingAddress(
   }
 }
 
-async function buildPaymentContext(
-  container: MedusaContainer,
-  cart: CartRecord
-): Promise<SubscriptionPaymentContext> {
-  const paymentCollectionId = cart.payment_collection?.id ?? null
+export function buildPaymentContext(cart: CartRecord): SubscriptionPaymentContext {
   const session =
-    cart.payment_collection?.payment_sessions?.find((entry) => {
-      const data = entry.data ?? {}
-
-      return typeof data.payment_method === "string" && !!data.payment_method
-    }) ??
+    cart.payment_collection?.payment_sessions?.find((entry) => !!entry.provider_id) ??
     cart.payment_collection?.payment_sessions?.[0] ??
     null
 
-  if (!paymentCollectionId || !session?.id || !session.provider_id) {
+  if (!cart.payment_collection?.id || !session?.id || !session.provider_id) {
     throw subscriptionErrors.invalidData(
       "Subscription checkout requires an initialized payment session"
     )
   }
 
-  const paymentMethodReference =
-    readNullableString(session.data?.payment_method) ??
-    (await resolveSavedPaymentMethodReference(
-      container,
-      cart.customer,
-      session.provider_id
-    ))
-
-  if (!paymentMethodReference) {
-    throw subscriptionErrors.invalidData(
-      "Subscription checkout requires a reusable payment method reference"
-    )
-  }
+  const account_holder_id = resolveAccountHolderId(cart.customer, session.provider_id)
 
   return {
     payment_provider_id: session.provider_id,
-    source_payment_collection_id: paymentCollectionId,
-    source_payment_session_id: session.id,
-    payment_method_reference: paymentMethodReference,
-    customer_payment_reference:
-      readNullableString(session.data?.customer) ??
-      readNullableString(session.data?.customer_id) ??
-      null,
+    account_holder_id,
+    payment_method_id: null,
   }
 }
 
-async function resolveSavedPaymentMethodReference(
-  container: MedusaContainer,
+function resolveAccountHolderId(
   customer: CartRecord["customer"],
   providerId: string
-) {
+): string {
   if (!customer?.id) {
     throw subscriptionErrors.invalidData(
       "Subscription checkout requires a customer record to resolve a reusable payment method"
@@ -467,49 +440,7 @@ async function resolveSavedPaymentMethodReference(
     )
   }
 
-  const paymentModule =
-    container.resolve(Modules.PAYMENT)
-  const paymentMethods = await paymentModule.listPaymentMethods({
-    provider_id: providerId,
-    context: {
-      account_holder: {
-        ...accountHolder,
-        data: accountHolder.data ?? {},
-      },
-    },
-  })
-  const latestPaymentMethod = paymentMethods
-    .slice()
-    .sort((left, right) => {
-      const leftCreated = readNumericTimestamp(left.data?.created)
-      const rightCreated = readNumericTimestamp(right.data?.created)
-
-      return rightCreated - leftCreated
-    })[0]
-
-  if (!latestPaymentMethod?.id) {
-    throw subscriptionErrors.invalidData(
-      `Subscription checkout requires at least one saved payment method for provider '${providerId}'`
-    )
-  }
-
-  return latestPaymentMethod.id
-}
-
-function readNumericTimestamp(value: unknown) {
-  if (typeof value === "number" && Number.isFinite(value)) {
-    return value
-  }
-
-  if (typeof value === "string") {
-    const parsed = Number.parseInt(value, 10)
-
-    if (Number.isFinite(parsed)) {
-      return parsed
-    }
-  }
-
-  return 0
+  return accountHolder.id
 }
 
 function readString(value: unknown) {

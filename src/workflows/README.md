@@ -93,7 +93,7 @@ import { StepResponse } from "@medusajs/framework/workflows-sdk"
 processRenewalCycleWorkflow.hooks.setPaymentSessionData(
   ({ payment_collections, subscription, order }) => {
     return new StepResponse({
-      payment_method: subscription.payment_context?.payment_method_reference,
+      payment_method: subscription.payment_context?.payment_method_id,
       off_session: true,
       confirm: true,
       capture_method: "automatic",

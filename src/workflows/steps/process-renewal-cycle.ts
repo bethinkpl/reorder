@@ -1,5 +1,5 @@
 import { IPaymentModuleService, MedusaContainer } from "@medusajs/framework/types"
-import { BigNumberInput } from "@medusajs/types"
+import { type OrderDTO, type PaymentCollectionDTO, BigNumberInput } from "@medusajs/types"
 import { ContainerRegistrationKeys, Modules } from "@medusajs/framework/utils"
 import { createStep, StepResponse } from "@medusajs/framework/workflows-sdk"
 import {
@@ -107,10 +107,7 @@ type SubscriptionRecord = {
   pending_update_data: SubscriptionPendingUpdateData | null
   payment_context: {
     payment_provider_id: string | null
-    source_payment_collection_id: string | null
-    source_payment_session_id: string | null
-    payment_method_reference: string | null
-    customer_payment_reference: string | null
+    payment_method_id: string | null
   } | null
   metadata: Record<string, unknown> | null
 }
@@ -175,14 +172,14 @@ export type RenewalExecutionContext = {
 }
 
 export type RenewalOrderStepResult = {
-  order: { id: string } | null
-  payment_collections: Array<{ id: string }> | null
+  order: OrderDTO | null
+  payment_collections: PaymentCollectionDTO[] | null
   generated_order_id: string | null
   resolved_source_snapshot: SubscriptionSourceSnapshot | null
   payment: {
     payment_collection_id: string
     payment_provider_id: string
-    payment_method_reference: string
+    payment_method_id: string
     customer_id: string
   } | null
 }
@@ -580,7 +577,7 @@ async function createRenewalOrder(
   const order = orderResult.result
   const total = await loadOrderTotal(container, order.id)
 
-  let paymentCollections: Array<{ id: string }> | null = null
+  let paymentCollections: PaymentCollectionDTO[] | null = null
   let payment: RenewalOrderStepResult["payment"] = null
 
   if (total > 0) {
@@ -588,7 +585,7 @@ async function createRenewalOrder(
 
     if (
       !paymentContext?.payment_provider_id ||
-      !paymentContext.payment_method_reference
+      !paymentContext.payment_method_id
     ) {
       throw renewalErrors.renewalOrderCreationFailed(
         cycle.id,
@@ -617,7 +614,7 @@ async function createRenewalOrder(
     payment = {
       payment_collection_id: paymentCollection.id,
       payment_provider_id: paymentContext.payment_provider_id,
-      payment_method_reference: paymentContext.payment_method_reference,
+      payment_method_id: paymentContext.payment_method_id,
       customer_id: subscription.customer_id,
     }
   }
@@ -1019,7 +1016,7 @@ export const authorizeRenewalPaymentStep = createStep(
     try {
       const data =
         payment_session_data ?? {
-          payment_method: order_result.payment.payment_method_reference,
+          payment_method: order_result.payment.payment_method_id,
           off_session: true,
           confirm: true,
           capture_method: "automatic",

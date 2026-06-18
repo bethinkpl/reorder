@@ -33,7 +33,7 @@ type SubscriptionRecord = {
   customer_id: string
   payment_context: {
     payment_provider_id: string | null
-    payment_method_reference: string | null
+    payment_method_id: string | null
   } | null
 }
 
@@ -424,7 +424,7 @@ async function executePaymentRetry(
 
     if (
       !paymentContext?.payment_provider_id ||
-      !paymentContext.payment_method_reference
+      !paymentContext.payment_method_id
     ) {
       throw dunningErrors.invalidData(
         `Subscription '${subscription.id}' is missing payment retry context`
@@ -461,7 +461,7 @@ async function executePaymentRetry(
         provider_id: paymentContext.payment_provider_id,
         customer_id: subscription.customer_id,
         data: {
-          payment_method: paymentContext.payment_method_reference,
+          payment_method: paymentContext.payment_method_id,
           off_session: true,
           confirm: true,
           capture_method: "automatic",

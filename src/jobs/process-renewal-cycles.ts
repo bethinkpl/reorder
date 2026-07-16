@@ -88,18 +88,16 @@ async function processCycle(
   } catch (error) {
     const message = getRenewalErrorMessage(error)
     const failureKind = classifyRenewalFailure(error)
-    const level =
-      failureKind === "already_processing" || failureKind === "duplicate_execution"
-        ? "warn"
-        : "error"
+    const isBlockedKind =
+      failureKind === "already_processing" ||
+      failureKind === "duplicate_execution" ||
+      failureKind === "cycle_superseded"
+    const level = isBlockedKind ? "warn" : "error"
 
     logRenewalEvent(logger, level, {
       event: "renewal.job.cycle",
       job_name: JOB_NAME,
-      outcome:
-        failureKind === "already_processing" || failureKind === "duplicate_execution"
-          ? "blocked"
-          : "failed",
+      outcome: isBlockedKind ? "blocked" : "failed",
       correlation_id: cycleCorrelationId,
       renewal_cycle_id: cycle.id,
       subscription_id: cycle.subscription_id,
@@ -112,10 +110,7 @@ async function processCycle(
       message,
     })
 
-    return failureKind === "already_processing" ||
-      failureKind === "duplicate_execution"
-      ? ("blocked" as const)
-      : ("failed" as const)
+    return isBlockedKind ? ("blocked" as const) : ("failed" as const)
   }
 }
 

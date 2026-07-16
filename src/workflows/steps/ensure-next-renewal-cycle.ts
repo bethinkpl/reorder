@@ -27,42 +27,38 @@ type EnsureNextRenewalCycleStepOutput = {
   renewal_cycle_id: string | null
 }
 
-type EnsureNextRenewalCycleCompensation =
-  | {
-    action: "created"
-    renewal_cycle_id: string
+type RenewalCycleSnapshot = {
+  id: string
+  subscription_id: string
+  scheduled_for: Date
+  processed_at: Date | null
+  status: RenewalCycleStatus
+  approval_required: boolean
+  approval_status: RenewalApprovalStatus | null
+  approval_decided_at: Date | null
+  approval_decided_by: string | null
+  approval_reason: string | null
+  generated_order_id: string | null
+  applied_pending_update_data: Record<string, unknown> | null
+  last_error: string | null
+  attempt_count: number
+  metadata: Record<string, unknown> | null
+}
+
+// Composite (not a union): a single run may delete stale SCHEDULED siblings
+// AND create/update the upcoming cycle; compensation must undo all of it.
+type EnsureNextRenewalCycleCompensation = {
+  created_renewal_cycle_id?: string
+  updated_previous?: {
+    id: string
+    approval_required: boolean
+    approval_status: RenewalApprovalStatus | null
+    approval_decided_at: Date | null
+    approval_decided_by: string | null
+    approval_reason: string | null
   }
-  | {
-    action: "updated"
-    previous: {
-      id: string
-      approval_required: boolean
-      approval_status: RenewalApprovalStatus | null
-      approval_decided_at: Date | null
-      approval_decided_by: string | null
-      approval_reason: string | null
-    }
-  }
-  | {
-    action: "deleted"
-    previous: Array<{
-      id: string
-      subscription_id: string
-      scheduled_for: Date
-      processed_at: Date | null
-      status: RenewalCycleStatus
-      approval_required: boolean
-      approval_status: RenewalApprovalStatus | null
-      approval_decided_at: Date | null
-      approval_decided_by: string | null
-      approval_reason: string | null
-      generated_order_id: string | null
-      applied_pending_update_data: Record<string, unknown> | null
-      last_error: string | null
-      attempt_count: number
-      metadata: Record<string, unknown> | null
-    }>
-  }
+  deleted_previous?: RenewalCycleSnapshot[]
+}
 
 export const ensureNextRenewalCycleStep = createStep(
   "ensure-next-renewal-cycle",
@@ -81,7 +77,7 @@ export const ensureNextRenewalCycleStep = createStep(
 
     const existingCycles = (await renewalModule.listRenewalCycles({
       subscription_id: subscription.id,
-    } as any)) as UpcomingRenewalCycleRecord[]
+    })) as UpcomingRenewalCycleRecord[]
 
     if (!shouldSubscriptionHaveUpcomingRenewalCycle(subscription)) {
       const scheduledCycles = existingCycles.filter(
@@ -103,8 +99,7 @@ export const ensureNextRenewalCycleStep = createStep(
             renewal_cycle_id: null,
           },
           {
-            action: "deleted",
-            previous: scheduledCycles.map((cycle) => ({
+            deleted_previous: scheduledCycles.map((cycle) => ({
               id: cycle.id,
               subscription_id: cycle.subscription_id,
               scheduled_for: cycle.scheduled_for,
@@ -139,6 +134,44 @@ export const ensureNextRenewalCycleStep = createStep(
 
     const scheduledFor = subscription.next_renewal_at!
     const settings = await getEffectiveSubscriptionSettings(container)
+
+    // A subscription must never carry more than one upcoming SCHEDULED cycle:
+    // stale placeholders at other dates (e.g. left behind by a resume with a
+    // custom resume_at) would each be due and each charge. Delete them here;
+    // FAILED (history) and PROCESSING (in-flight) siblings are never touched —
+    // the superseded guard in the execution workflow keeps those inert.
+    const staleScheduled = existingCycles.filter(
+      (cycle) =>
+        cycle.status === RenewalCycleStatus.SCHEDULED &&
+        cycle.scheduled_for.getTime() !== scheduledFor.getTime()
+    )
+
+    if (staleScheduled.length) {
+      await renewalModule.deleteRenewalCycles(
+        staleScheduled.map((cycle) => cycle.id)
+      )
+    }
+
+    const staleSnapshots = staleScheduled.length
+      ? staleScheduled.map((cycle) => ({
+          id: cycle.id,
+          subscription_id: cycle.subscription_id,
+          scheduled_for: cycle.scheduled_for,
+          processed_at: cycle.processed_at,
+          status: cycle.status,
+          approval_required: cycle.approval_required,
+          approval_status: cycle.approval_status,
+          approval_decided_at: cycle.approval_decided_at,
+          approval_decided_by: cycle.approval_decided_by,
+          approval_reason: cycle.approval_reason,
+          generated_order_id: cycle.generated_order_id,
+          applied_pending_update_data: cycle.applied_pending_update_data,
+          last_error: cycle.last_error,
+          attempt_count: cycle.attempt_count,
+          metadata: cycle.metadata,
+        }))
+      : undefined
+
     const existingCycle = findUpcomingRenewalCycle(existingCycles, scheduledFor)
 
     if (!existingCycle) {
@@ -163,7 +196,7 @@ export const ensureNextRenewalCycleStep = createStep(
           },
         },
         ...approvalState,
-      } as any)
+      })
 
       return new StepResponse<
         EnsureNextRenewalCycleStepOutput,
@@ -175,8 +208,8 @@ export const ensureNextRenewalCycleStep = createStep(
           renewal_cycle_id: created.id,
         },
         {
-          action: "created",
-          renewal_cycle_id: created.id,
+          created_renewal_cycle_id: created.id,
+          deleted_previous: staleSnapshots,
         }
       )
     }
@@ -211,7 +244,8 @@ export const ensureNextRenewalCycleStep = createStep(
           action: "noop",
           subscription_id: subscription.id,
           renewal_cycle_id: existingCycle.id,
-        }
+        },
+        staleSnapshots ? { deleted_previous: staleSnapshots } : undefined
       )
     }
 
@@ -230,7 +264,8 @@ export const ensureNextRenewalCycleStep = createStep(
           action: "noop",
           subscription_id: subscription.id,
           renewal_cycle_id: existingCycle.id,
-        }
+        },
+        staleSnapshots ? { deleted_previous: staleSnapshots } : undefined
       )
     }
 
@@ -259,7 +294,7 @@ export const ensureNextRenewalCycleStep = createStep(
             )?.is_persisted ?? settings.is_persisted,
         },
       },
-    } as any)
+    })
 
     return new StepResponse<
       EnsureNextRenewalCycleStepOutput,
@@ -271,8 +306,7 @@ export const ensureNextRenewalCycleStep = createStep(
         renewal_cycle_id: updated.id,
       },
       {
-        action: "updated",
-        previous: {
+        updated_previous: {
           id: existingCycle.id,
           approval_required: existingCycle.approval_required,
           approval_status: existingCycle.approval_status,
@@ -280,6 +314,7 @@ export const ensureNextRenewalCycleStep = createStep(
           approval_decided_by: existingCycle.approval_decided_by,
           approval_reason: existingCycle.approval_reason,
         },
+        deleted_previous: staleSnapshots,
       }
     )
   },
@@ -293,19 +328,20 @@ export const ensureNextRenewalCycleStep = createStep(
 
     const renewalModule = container.resolve<RenewalModuleService>(RENEWAL_MODULE)
 
-    if (compensation.action === "created") {
-      await renewalModule.deleteRenewalCycles(compensation.renewal_cycle_id)
-      return
+    if (compensation.created_renewal_cycle_id) {
+      await renewalModule.deleteRenewalCycles(
+        compensation.created_renewal_cycle_id
+      )
     }
 
-    if (compensation.action === "deleted") {
-      for (const cycle of compensation.previous) {
-        await renewalModule.createRenewalCycles(cycle as any)
+    if (compensation.deleted_previous?.length) {
+      for (const cycle of compensation.deleted_previous) {
+        await renewalModule.createRenewalCycles(cycle)
       }
-
-      return
     }
 
-    await renewalModule.updateRenewalCycles(compensation.previous as any)
+    if (compensation.updated_previous) {
+      await renewalModule.updateRenewalCycles(compensation.updated_previous)
+    }
   }
 )

@@ -7,6 +7,7 @@ import {
 import { acquireLockStep, releaseLockStep } from "@medusajs/medusa/core-flows"
 import { z } from "zod"
 import { ensureNextRenewalCycleStep } from "./steps/ensure-next-renewal-cycle"
+import { resolveRenewalCycleSubscriptionStep } from "./steps/resolve-renewal-cycle-subscription"
 import { rebuildAnalyticsDailySnapshotsWorkflow } from "./rebuild-analytics-daily-snapshots"
 import {
   authorizeRenewalPaymentStep,
@@ -24,8 +25,10 @@ export const setPaymentSessionDataResult = z
 export const processRenewalCycleWorkflow = createWorkflow(
   "process-renewal-cycle",
   function (input: ProcessRenewalCycleStepInput) {
-    const lockKey = transform({ input }, function ({ input }) {
-      return `renewal:${input.renewal_cycle_id}`
+    const scope = resolveRenewalCycleSubscriptionStep(input)
+
+    const lockKey = transform({ scope }, function ({ scope }) {
+      return `renewal:subscription:${scope.subscription_id}`
     })
 
     acquireLockStep({

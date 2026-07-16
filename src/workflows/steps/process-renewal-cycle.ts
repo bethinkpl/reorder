@@ -331,6 +331,17 @@ async function validateSubscriptionEligibility(
       `subscription is still in trial for renewal date '${cycle.scheduled_for.toISOString()}'`
     )
   }
+
+  const nextRenewalAt = subscription.next_renewal_at
+    ? new Date(subscription.next_renewal_at)
+    : null
+
+  if (
+    !nextRenewalAt ||
+    nextRenewalAt.getTime() !== new Date(cycle.scheduled_for).getTime()
+  ) {
+    throw renewalErrors.cycleSuperseded(cycle.id, cycle.scheduled_for, nextRenewalAt)
+  }
 }
 
 async function resolveAppliedPendingChanges(

@@ -44,47 +44,55 @@ medusaIntegrationTestRunner({
           container.resolve<RenewalModuleService>(RENEWAL_MODULE)
 
         // (a) SCHEDULED, due today -> should be renewed (SUCCEEDED)
+        const today = new Date()
         const subToday = await createSubscriptionSeed(container, {
           reference: "SUB-REN-SCHED-001",
           status: SubscriptionStatus.ACTIVE,
           skip_next_cycle: true,
+          next_renewal_at: today,
         })
         const cycleToday = await createRenewalCycleSeed(container, {
           subscription_id: subToday.id,
-          scheduled_for: new Date(),
+          scheduled_for: today,
         })
 
         // (b) SCHEDULED, due yesterday -> catch-up: should be renewed (SUCCEEDED)
+        const yesterday = new Date(Date.now() - DAY_MS)
         const subYesterday = await createSubscriptionSeed(container, {
           reference: "SUB-REN-SCHED-002",
           status: SubscriptionStatus.ACTIVE,
           skip_next_cycle: true,
+          next_renewal_at: yesterday,
         })
         const cycleYesterday = await createRenewalCycleSeed(container, {
           subscription_id: subYesterday.id,
-          scheduled_for: new Date(Date.now() - DAY_MS),
+          scheduled_for: yesterday,
         })
 
         // (c) SCHEDULED, due two days ahead -> excluded (>= start of next UTC day)
+        const future = new Date(Date.now() + 2 * DAY_MS)
         const subFuture = await createSubscriptionSeed(container, {
           reference: "SUB-REN-SCHED-003",
           status: SubscriptionStatus.ACTIVE,
           skip_next_cycle: true,
+          next_renewal_at: future,
         })
         const cycleFuture = await createRenewalCycleSeed(container, {
           subscription_id: subFuture.id,
-          scheduled_for: new Date(Date.now() + 2 * DAY_MS),
+          scheduled_for: future,
         })
 
         // (d) already SUCCEEDED, due today -> excluded by status filter, untouched
+        const done = new Date()
         const subDone = await createSubscriptionSeed(container, {
           reference: "SUB-REN-SCHED-004",
           status: SubscriptionStatus.ACTIVE,
           skip_next_cycle: true,
+          next_renewal_at: done,
         })
         const cycleDone = await createRenewalCycleSeed(container, {
           subscription_id: subDone.id,
-          scheduled_for: new Date(),
+          scheduled_for: done,
           status: RenewalCycleStatus.SUCCEEDED,
         })
         const doneUpdatedAtBefore = new Date(cycleDone.updated_at).getTime()
@@ -133,14 +141,16 @@ medusaIntegrationTestRunner({
           container.resolve<RenewalModuleService>(RENEWAL_MODULE)
         const locking = container.resolve(Modules.LOCKING)
 
+        const lockDue = new Date()
         const subscription = await createSubscriptionSeed(container, {
           reference: "SUB-REN-SCHED-LOCK-001",
           status: SubscriptionStatus.ACTIVE,
           skip_next_cycle: true,
+          next_renewal_at: lockDue,
         })
         const cycle = await createRenewalCycleSeed(container, {
           subscription_id: subscription.id,
-          scheduled_for: new Date(),
+          scheduled_for: lockDue,
         })
 
         let lockHeld = false

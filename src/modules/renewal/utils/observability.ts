@@ -11,6 +11,7 @@ type LogLevel = "info" | "warn" | "error"
 export type RenewalFailureKind =
   | "already_processing"
   | "duplicate_execution"
+  | "cycle_superseded"
   | "subscription_not_eligible"
   | "approval_blocked"
   | "offer_policy_blocked"
@@ -55,6 +56,10 @@ export function classifyRenewalFailure(error: unknown): RenewalFailureKind {
     return "duplicate_execution"
   }
 
+  if (message.includes("is superseded")) {
+    return "cycle_superseded"
+  }
+
   if (message.includes("isn't eligible for renewal")) {
     return "subscription_not_eligible"
   }
@@ -88,7 +93,7 @@ export function classifyRenewalFailure(error: unknown): RenewalFailureKind {
 }
 
 export function isAlertableRenewalFailure(kind: RenewalFailureKind) {
-  return !["already_processing", "duplicate_execution"].includes(kind)
+  return !["already_processing", "duplicate_execution", "cycle_superseded"].includes(kind)
 }
 
 export function getRenewalErrorMessage(error: unknown) {

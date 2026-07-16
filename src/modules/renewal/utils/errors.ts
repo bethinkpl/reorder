@@ -57,4 +57,12 @@ export const renewalErrors = {
       `Renewal order creation failed for renewal '${renewalCycleId}'`
     )
   },
+  cycleSuperseded(renewalCycleId: string, scheduledFor: Date, nextRenewalAt: Date | null) {
+    return new MedusaError(
+      MedusaError.Types.CONFLICT,
+      `Renewal '${renewalCycleId}' is superseded: cycle is scheduled for '${scheduledFor.toISOString()}' but the subscription's next renewal is ${
+        nextRenewalAt ? `'${nextRenewalAt.toISOString()}'` : "not set"
+      }. Only the cycle matching the subscription's 'next_renewal_at' can execute; adjust the subscription (or delete the stale cycle) if this renewal is intended.`
+    )
+  },
 }

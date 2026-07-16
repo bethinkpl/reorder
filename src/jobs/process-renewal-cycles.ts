@@ -26,18 +26,42 @@ const LOCK_KEY = "jobs:renewal-cycles"
 const LOCK_TTL_SECONDS = 600
 // Reads a positive-integer override from the environment. Env files are
 // loaded by the consuming app via Medusa's loadEnv before job files are
-// evaluated, so reading process.env at module scope is safe. Unset, non-numeric,
-// zero, or negative values fall back to the default.
-function positiveIntFromEnv(name: string, fallback: number): number {
+// evaluated, so reading process.env at module scope is safe. Unset
+// values fall back to the default, invalid ones cause an error
+function positiveIntFromEnv(name: string, fallback?: number): number {
   const raw = process.env[name]
 
   if (!raw) {
-    return fallback
+    if (typeof fallback === "number") {
+      console.warn(`Missing env value for "${name}" - using ${fallback} as fallback`)
+      return fallback
+    } else {
+      throw new Error(`Unable to extract positive integer from env "${name}" - missing value (no fallback value provided)`)
+    }
   }
 
   const parsed = Number.parseInt(raw, 10)
 
-  return Number.isSafeInteger(parsed) && parsed > 0 ? parsed : fallback
+  if (Number.isSafeInteger(parsed) && parsed > 0) {
+    return parsed
+  } else {
+    throw new Error(`Unable to extract positive integer from env "${name}" - invalid value (fallback not applicable)`)
+  }
+}
+
+function valueFromEnv(name: string, fallback?: any): unknown {
+  const raw = process.env[name]
+
+  if (!raw) {
+    if (fallback !== "undefined") {
+      console.warn(`Missing env value for "${name}" - using ${fallback} as fallback`)
+      return fallback
+    } else {
+      throw new Error(`Unable to extract positive integer from env "${name}" - missing value (no fallback value provided)`)
+    }
+  } else {
+    return raw
+  }
 }
 
 // Records fetched per run (one keyset page), NOT the number of renewals done.
@@ -268,5 +292,5 @@ export const config = {
   // land the window where you want relative to UTC. Default: every 5 min in the
   // 05:00-08:55 hour range, i.e. the half-open [05:00, 09:00) UTC window when
   // the process runs in UTC.
-  schedule: process.env.SUBSCRIPTION_RENEWAL_CRON ?? "*/5 5-8 * * *",
+  schedule: valueFromEnv("SUBSCRIPTION_RENEWAL_CRON", "*/5 5-8 * * *"),
 }

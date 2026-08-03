@@ -43,6 +43,7 @@ medusaIntegrationTestRunner({
           reference: "SUB-REN-SMOKE-STATE-001",
           status: SubscriptionStatus.ACTIVE,
           skip_next_cycle: true,
+          next_renewal_at: scheduledFor,
         })
         const activeCycle = await createRenewalCycleSeed(container, {
           subscription_id: activeSubscription.id,
@@ -60,11 +61,11 @@ medusaIntegrationTestRunner({
           activeCycle.id
         )
         expect(processedActiveCycle.status).toEqual(RenewalCycleStatus.SUCCEEDED)
-
         const pausedSubscription = await createSubscriptionSeed(container, {
           reference: "SUB-REN-SMOKE-STATE-002",
           status: SubscriptionStatus.ACTIVE,
           skip_next_cycle: true,
+          next_renewal_at: scheduledFor,
         })
         await subscriptionModule.updateSubscriptions({
           id: pausedSubscription.id,
@@ -94,11 +95,11 @@ medusaIntegrationTestRunner({
           RenewalCycleStatus.SCHEDULED
         )
         expect(processedPausedCycle.attempt_count).toEqual(0)
-
         const cancelledSubscription = await createSubscriptionSeed(container, {
           reference: "SUB-REN-SMOKE-STATE-003",
           status: SubscriptionStatus.ACTIVE,
           skip_next_cycle: true,
+          next_renewal_at: scheduledFor,
         })
         await subscriptionModule.updateSubscriptions({
           id: cancelledSubscription.id,
@@ -137,11 +138,13 @@ medusaIntegrationTestRunner({
         const renewalModule =
           container.resolve<RenewalModuleService>(RENEWAL_MODULE)
 
+        const scheduledForPending = new Date("2026-04-15T10:00:00.000Z")
         const subscription = await createSubscriptionSeed(container, {
           reference: "SUB-REN-SMOKE-PENDING-001",
           skip_next_cycle: true,
           frequency_interval: FrequencyInterval.MONTH,
           frequency_value: 1,
+          next_renewal_at: scheduledForPending,
         })
 
         await createPlanOfferSeed(container, {
@@ -174,7 +177,7 @@ medusaIntegrationTestRunner({
 
         const cycle = await createRenewalCycleSeed(container, {
           subscription_id: subscription.id,
-          scheduled_for: new Date("2026-04-15T10:00:00.000Z"),
+          scheduled_for: scheduledForPending,
           approval_required: true,
           approval_status: RenewalApprovalStatus.PENDING,
         })
@@ -224,11 +227,13 @@ medusaIntegrationTestRunner({
         const renewalModule =
           container.resolve<RenewalModuleService>(RENEWAL_MODULE)
 
+        const offerScheduledFor = new Date("2026-04-15T10:00:00.000Z")
         const subscription = await createSubscriptionSeed(container, {
           reference: "SUB-REN-SMOKE-OFFER-001",
           skip_next_cycle: true,
           frequency_interval: FrequencyInterval.MONTH,
           frequency_value: 1,
+          next_renewal_at: offerScheduledFor,
         })
 
         await createPlanOfferSeed(container, {
@@ -261,7 +266,7 @@ medusaIntegrationTestRunner({
 
         const cycle = await createRenewalCycleSeed(container, {
           subscription_id: subscription.id,
-          scheduled_for: new Date("2026-04-15T10:00:00.000Z"),
+          scheduled_for: offerScheduledFor,
           approval_required: true,
           approval_status: RenewalApprovalStatus.PENDING,
         })

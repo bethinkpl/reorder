@@ -249,6 +249,31 @@ Current implementation detail:
 - the current lock settings are `timeout = 10` seconds and `ttl = 120` seconds
 - this shared lock protects both scheduler execution and manual force execution
 
+### Renewal Order Pricing and Discounts
+
+Renewal orders are created cart-lessly through `createOrderWorkflow`, so nothing recomputes
+promotions or plan pricing for them by default. The renewal item build works as follows:
+
+- items are built from `source_snapshot` (`unit_price`, quantity, flags); snapshot
+  `adjustments` and `tax_lines` are **deliberately not replayed** — they are stale by design,
+  code-bearing adjustments would be deleted by `createOrderWorkflow`'s REPLACE promotion
+  refresh, and replayed tax lines would be added to (not replaced by) freshly calculated ones
+- the **plan discount is recomputed each cycle**: the frozen `pricing_snapshot` is the deal
+  agreed at signup; an applied plan change (and any subscription without a snapshot) re-reads
+  the live `Plans & Offers` config for the effective variant and frequency
+- on a pending plan change, the line gross comes from the variant's live `calculated_price`
+  in the source cart's region/currency; if that lookup fails, discounts are skipped for the
+  cycle with a warning
+- the host app can contribute additional discounts via the `resolveRenewalAdjustments`
+  workflow hook (see `src/workflows/README.md`); all renewal adjustments are written
+  **code-less** so they survive the promotion refresh, and the combined discount is clamped
+  to the line gross (plan discount first, hook adjustments consume the remainder)
+- renewals register **no promotion usage** — a promotion redeemed at signup is counted once,
+  by the checkout; recurring application is an app-level replay of frozen terms
+- a failure between `prepare-renewal-cycle` and the failure-recording steps (e.g. a hook
+  handler throw) reverts the workflow; a compensation handler on `prepare-renewal-cycle`
+  marks the cycle and attempt FAILED so the cycle never strands in PROCESSING
+
 ### Approval Workflows
 
 `approve-renewal-changes` and `reject-renewal-changes` are the mutation boundary for approval decisions.

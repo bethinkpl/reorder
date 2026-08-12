@@ -15,6 +15,7 @@ Current adjustment semantics:
 - it uses `description = "Subscription discount"`
 - it is marked `is_tax_inclusive = true`
 - the cart adjustment intentionally does not use `code`, so Medusa promotion flows do not treat it as a promo code
+- the adjustment amount is clamped so that, combined with discounts applied by other actors (e.g. promotion adjustments already on the line), it never exceeds the line gross total
 
 Current route behavior:
 - returns whether subscription items were found
@@ -50,3 +51,4 @@ Checkout sequencing:
 - subscription pricing is synchronized before `completeCartWorkflow`
 - the cart is refreshed before completion so payment collection and order totals use the discounted amount
 - after order creation, the order adjustment may be labeled with `subscription_discount` for Medusa Admin display
+- when a subscription is genuinely created (not on the idempotent replay path), the `subscriptionCreated` workflow hook fires with `{ subscription_id, order_id, cart_id, customer_id }` — see `src/workflows/README.md` for the registration contract

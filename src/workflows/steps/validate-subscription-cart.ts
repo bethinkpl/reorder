@@ -229,6 +229,40 @@ export const validateSubscriptionCartStep = createStep(
   }
 )
 
+// Exported so tests can pin the field list against a real cart — a missing
+// child-relation field here silently produces snapshots with absent data.
+export const SUBSCRIPTION_CART_QUERY_FIELDS = [
+  "id",
+  "completed_at",
+  "email",
+  "customer_id",
+  "metadata",
+  "customer.id",
+  "customer.email",
+  "customer.first_name",
+  "customer.last_name",
+  "customer.account_holders.*",
+  "shipping_address.*",
+  "payment_collection.id",
+  "payment_collection.payment_sessions.*",
+  "items.*",
+  // `items.*` does not expand child relations — adjustments and tax lines must
+  // be requested explicitly or the source snapshot records them as absent.
+  "items.adjustments.amount",
+  "items.adjustments.code",
+  "items.adjustments.description",
+  "items.adjustments.provider_id",
+  "items.adjustments.promotion_id",
+  "items.tax_lines.code",
+  "items.tax_lines.rate",
+  "items.tax_lines.description",
+  "items.variant.id",
+  "items.variant.title",
+  "items.variant.sku",
+  "items.variant.product.id",
+  "items.variant.product.title",
+]
+
 async function loadCart(
   container: MedusaContainer,
   cartId: string
@@ -236,37 +270,7 @@ async function loadCart(
   const query = container.resolve(ContainerRegistrationKeys.QUERY)
   const { data } = await query.graph({
     entity: "cart",
-    fields: [
-      "id",
-      "completed_at",
-      "email",
-      "customer_id",
-      "metadata",
-      "customer.id",
-      "customer.email",
-      "customer.first_name",
-      "customer.last_name",
-      "customer.account_holders.*",
-      "shipping_address.*",
-      "payment_collection.id",
-      "payment_collection.payment_sessions.*",
-      "items.*",
-      // `items.*` does not expand child relations — adjustments and tax lines must
-      // be requested explicitly or the source snapshot records them as absent.
-      "items.adjustments.amount",
-      "items.adjustments.code",
-      "items.adjustments.description",
-      "items.adjustments.provider_id",
-      "items.adjustments.promotion_id",
-      "items.tax_lines.code",
-      "items.tax_lines.rate",
-      "items.tax_lines.description",
-      "items.variant.id",
-      "items.variant.title",
-      "items.variant.sku",
-      "items.variant.product.id",
-      "items.variant.product.title",
-    ],
+    fields: SUBSCRIPTION_CART_QUERY_FIELDS,
     filters: {
       id: [cartId],
     },

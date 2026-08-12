@@ -630,7 +630,7 @@ async function computeRenewalPlanAdjustment(
   appliedPendingChanges: RenewalAppliedPendingUpdateData | null,
   lineGrossTotal: number
 ): Promise<RenewalAdjustmentSpec | null> {
-  let discount: { discount_type: "percentage" | "fixed"; discount_value: number } | null = null
+  let discount: { discount_type: "percentage" | "fixed", discount_value: number } | null = null
 
   // The plan discount agreed at signup is frozen in `pricing_snapshot`; an
   // applied plan change re-negotiates the deal, so it re-reads the live plan
@@ -751,9 +751,12 @@ function mergeRenewalAdjustments(
     return []
   }
 
+  // Guard with Array.isArray rather than `?? []`: a hook handler that returns
+  // `StepResponse(undefined)` surfaces here as a framework wrapper object, not
+  // `undefined` — anything that isn't a plain array means "no app adjustments".
   const candidates = [
     ...(buildResult.plan_adjustment ? [buildResult.plan_adjustment] : []),
-    ...(extraAdjustments ?? []),
+    ...(Array.isArray(extraAdjustments) ? extraAdjustments : []),
   ]
 
   const merged: RenewalAdjustmentSpec[] = []

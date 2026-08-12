@@ -58,6 +58,7 @@ medusaIntegrationTestRunner({
 
         const subscription = await createSubscriptionSeed(container, {
           reference: "SUB-SNAP-NORMAL-001",
+          next_renewal_at: new Date("2026-05-01T10:00:00.000Z"),
           skip_next_cycle: false,
           product_id: productId,
           variant_id: variantId,
@@ -183,6 +184,7 @@ medusaIntegrationTestRunner({
 
         const subscription = await createSubscriptionSeed(container, {
           reference: "SUB-SNAP-PENDING-001",
+          next_renewal_at: new Date("2026-05-01T10:00:00.000Z"),
           skip_next_cycle: false,
           product_id: productId,
           variant_id: oldVariantId,
@@ -337,6 +339,7 @@ medusaIntegrationTestRunner({
 
         const subscription = await createSubscriptionSeed(container, {
           reference: "SUB-SNAP-POST-CHANGE-001",
+          next_renewal_at: new Date("2026-06-01T10:00:00.000Z"),
           skip_next_cycle: false,
           source_snapshot: {
             product_id: "prod_post_change",

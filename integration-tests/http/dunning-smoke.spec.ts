@@ -85,6 +85,7 @@ medusaIntegrationTestRunner({
           reference,
           status: SubscriptionStatus.ACTIVE,
           cart_id: `cart_${reference}`,
+          next_renewal_at: new Date("2026-04-20T10:00:00.000Z"),
         })
         const cycle = await createRenewalCycleSeed(container, {
           subscription_id: subscription.id,

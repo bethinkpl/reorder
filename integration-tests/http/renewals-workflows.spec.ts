@@ -174,6 +174,7 @@ medusaIntegrationTestRunner({
         const subscription = await createSubscriptionSeed(container, {
           reference: "SUB-REN-WF-001",
           skip_next_cycle: true,
+          next_renewal_at: new Date("2026-03-30T12:00:00.000Z"),
         })
         const cycle = await createRenewalCycleSeed(container, {
           subscription_id: subscription.id,
@@ -448,9 +449,11 @@ medusaIntegrationTestRunner({
           reference: "SUB-REN-WF-FAIL-001",
           cart_id: null,
           skip_next_cycle: false,
+          next_renewal_at: new Date("2026-05-02T10:00:00.000Z"),
         })
         const cycle = await createRenewalCycleSeed(container, {
           subscription_id: subscription.id,
+          scheduled_for: new Date("2026-05-02T10:00:00.000Z"),
           status: RenewalCycleStatus.SCHEDULED,
         })
 
@@ -502,9 +505,11 @@ medusaIntegrationTestRunner({
           reference: "SUB-REN-RETRY-001",
           cart_id: null,
           skip_next_cycle: false,
+          next_renewal_at: new Date("2026-05-03T10:00:00.000Z"),
         })
         const cycle = await createRenewalCycleSeed(container, {
           subscription_id: subscription.id,
+          scheduled_for: new Date("2026-05-03T10:00:00.000Z"),
           status: RenewalCycleStatus.SCHEDULED,
         })
 
@@ -562,9 +567,11 @@ medusaIntegrationTestRunner({
         const subscription = await createSubscriptionSeed(container, {
           reference: "SUB-REN-IDEMP-001",
           skip_next_cycle: true,
+          next_renewal_at: new Date("2026-05-04T10:00:00.000Z"),
         })
         const cycle = await createRenewalCycleSeed(container, {
           subscription_id: subscription.id,
+          scheduled_for: new Date("2026-05-04T10:00:00.000Z"),
         })
 
         await processRenewalCycleWorkflow(container).run({
@@ -641,6 +648,7 @@ medusaIntegrationTestRunner({
         const approvedSubscription = await createSubscriptionSeed(container, {
           reference: "SUB-REN-APPROVAL-001",
           skip_next_cycle: true,
+          next_renewal_at: new Date("2026-05-05T10:00:00.000Z"),
         })
         await createPlanOfferSeed(container, {
           name: "PLAN-REN-APPROVAL-001",
@@ -669,6 +677,7 @@ medusaIntegrationTestRunner({
 
         const approvedCycle = await createRenewalCycleSeed(container, {
           subscription_id: approvedSubscription.id,
+          scheduled_for: new Date("2026-05-05T10:00:00.000Z"),
           approval_required: true,
           approval_status: RenewalApprovalStatus.PENDING,
         })
@@ -723,9 +732,11 @@ medusaIntegrationTestRunner({
         const rejectedSubscription = await createSubscriptionSeed(container, {
           reference: "SUB-REN-APPROVAL-002",
           skip_next_cycle: true,
+          next_renewal_at: new Date("2026-05-06T10:00:00.000Z"),
         })
         const rejectedCycle = await createRenewalCycleSeed(container, {
           subscription_id: rejectedSubscription.id,
+          scheduled_for: new Date("2026-05-06T10:00:00.000Z"),
           approval_required: true,
           approval_status: RenewalApprovalStatus.PENDING,
         })

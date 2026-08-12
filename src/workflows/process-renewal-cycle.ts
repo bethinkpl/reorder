@@ -11,15 +11,34 @@ import { resolveRenewalCycleSubscriptionStep } from "./steps/resolve-renewal-cyc
 import { rebuildAnalyticsDailySnapshotsWorkflow } from "./rebuild-analytics-daily-snapshots"
 import {
   authorizeRenewalPaymentStep,
+  buildRenewalOrderItemsStep,
   createRenewalOrderStep,
   finalizeRenewalCycleStep,
   prepareRenewalCycleStep,
   ProcessRenewalCycleStepInput,
 } from "./steps/process-renewal-cycle"
+import { labelSubscriptionOrderAdjustmentsStep } from "./steps/label-subscription-order-adjustments"
 import { buildAnalyticsIncrementalRebuildInput } from "./utils/analytics-incremental"
 
 export const setPaymentSessionDataResult = z
   .record(z.string(), z.unknown())
+  .optional()
+
+/**
+ * Discounts the host app wants applied to the renewal order's line item.
+ * `code` is intentionally not part of the contract: code-bearing adjustments
+ * are deleted by `createOrderWorkflow`'s promotion refresh. Unknown keys are
+ * stripped by zod, so a handler cannot smuggle one in.
+ */
+export const resolveRenewalAdjustmentsResult = z
+  .array(
+    z.object({
+      amount: z.number().positive(),
+      description: z.string().nullish(),
+      provider_id: z.string().nullish(),
+      promotion_id: z.string().nullish(),
+    })
+  )
   .optional()
 
 export const processRenewalCycleWorkflow = createWorkflow(
@@ -38,7 +57,32 @@ export const processRenewalCycleWorkflow = createWorkflow(
     })
 
     const context = prepareRenewalCycleStep(input)
-    const orderResult = createRenewalOrderStep(context)
+    const buildResult = buildRenewalOrderItemsStep(context)
+
+    const resolveRenewalAdjustments = createHook(
+      "resolveRenewalAdjustments",
+      {
+        subscription: context.subscription,
+        renewal_cycle_id: context.renewal_cycle_id,
+        currency_code: buildResult.currency_code,
+        line_gross_total: buildResult.line_gross_total,
+        items: buildResult.items,
+      },
+      {
+        resultValidator: resolveRenewalAdjustmentsResult,
+      }
+    )
+    const extraAdjustments = resolveRenewalAdjustments.getResult()
+
+    const orderResult = createRenewalOrderStep({
+      context,
+      build_result: buildResult,
+      extra_adjustments: extraAdjustments,
+    })
+
+    labelSubscriptionOrderAdjustmentsStep({
+      order_id: orderResult.generated_order_id,
+    })
 
     const setPaymentSessionData = createHook(
       "setPaymentSessionData",
@@ -89,7 +133,7 @@ export const processRenewalCycleWorkflow = createWorkflow(
     })
 
     return new WorkflowResponse(result, {
-      hooks: [setPaymentSessionData],
+      hooks: [setPaymentSessionData, resolveRenewalAdjustments],
     })
   }
 )

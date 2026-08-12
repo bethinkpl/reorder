@@ -1,6 +1,6 @@
 import { IPaymentModuleService, MedusaContainer } from "@medusajs/framework/types"
 import { type OrderDTO, type PaymentCollectionDTO, BigNumberInput } from "@medusajs/types"
-import { ContainerRegistrationKeys, Modules } from "@medusajs/framework/utils"
+import { ContainerRegistrationKeys, Modules, QueryContext } from "@medusajs/framework/utils"
 import { createStep, StepResponse } from "@medusajs/framework/workflows-sdk"
 import {
   createOrderWorkflow,
@@ -44,6 +44,10 @@ import { subscriptionErrors } from "../../modules/subscription/utils/errors"
 import { startDunningWorkflow } from "../start-dunning"
 import { persistSubscriptionLogEvent } from "./create-subscription-log-event"
 import { toISOStringOrNull } from "../utils/date-output"
+import {
+  computeSubscriptionDiscountAmount,
+  roundCurrency,
+} from "../utils/subscription-discount"
 import type { FrequencyInterval } from "../../common/types/frequency-interval"
 
 type CartRecord = {
@@ -166,6 +170,32 @@ export type RenewalExecutionContext = {
     generated_order_id: string | null
     last_error: string | null
   }
+}
+
+/**
+ * A discount to apply to the renewal order's line item. Deliberately has no
+ * `code` field: `createOrderWorkflow` unconditionally refreshes promotions with
+ * `PromotionActions.REPLACE`, and that refresh deletes every adjustment carrying
+ * a string `code` — only code-less adjustments survive order creation.
+ */
+export type RenewalAdjustmentSpec = {
+  amount: number
+  description?: string | null
+  provider_id?: string | null
+  promotion_id?: string | null
+}
+
+export type RenewalOrderBuildResult = {
+  cart: CartRecord | null
+  items: Record<string, unknown>[] | null
+  /**
+   * Pre-discount gross for the (single) renewal line. `null` when it cannot be
+   * determined (pending plan change whose live price lookup failed) — in that
+   * case no adjustments are applied to the renewal order.
+   */
+  line_gross_total: number | null
+  currency_code: string | null
+  plan_adjustment: RenewalAdjustmentSpec | null
 }
 
 export type RenewalOrderStepResult = {
@@ -511,6 +541,12 @@ function buildOrderItems(
     ] as any[]
   }
 
+  // Snapshot `adjustments` and `tax_lines` are deliberately NOT replayed:
+  // adjustments are stale by design (the deal is recomputed each cycle — plan
+  // discount here, app discounts via the `resolveRenewalAdjustments` hook) and
+  // code-bearing ones would be deleted by `createOrderWorkflow`'s promotion
+  // refresh anyway; provided tax lines are ADDED TO (not replaced by) the ones
+  // the tax provider calculates, so replaying them would double-tax the line.
   return [
     {
       product_id: sourceSnapshot.product_id,
@@ -521,10 +557,6 @@ function buildOrderItems(
       unit_price: sourceSnapshot.unit_price,
       requires_shipping: sourceSnapshot.requires_shipping ?? true,
       is_discountable: sourceSnapshot.is_discountable ?? true,
-      // TODO: to consider whether we should rerun tax calculation here?
-      tax_lines: sourceSnapshot.tax_lines,
-      // TODO: should all/some/any adjustments be preserved?
-      adjustments: sourceSnapshot.adjustments,
       metadata: {
         renewal_source_cart_id: cart.id,
       },
@@ -544,12 +576,214 @@ function buildShippingMethods(cart: CartRecord) {
   ) as any[]
 }
 
+async function resolveRenewalLineGross(
+  container: MedusaContainer,
+  cart: CartRecord,
+  subscription: SubscriptionType,
+  appliedPendingChanges: RenewalAppliedPendingUpdateData | null
+): Promise<number | null> {
+  const sourceSnapshot = subscription.source_snapshot as SubscriptionSourceSnapshot
+
+  if (!appliedPendingChanges) {
+    return roundCurrency(sourceSnapshot.unit_price * sourceSnapshot.quantity)
+  }
+
+  // A pending plan change is priced live by `createOrderWorkflow` (the item is
+  // built without `unit_price`), so the gross has to come from the variant's
+  // current calculated price in the source cart's region and currency.
+  const logger = container.resolve("logger")
+
+  try {
+    const query = container.resolve(ContainerRegistrationKeys.QUERY)
+    const { data } = await query.graph({
+      entity: "variants",
+      fields: ["id", "calculated_price.calculated_amount"],
+      filters: { id: [appliedPendingChanges.variant_id] },
+      context: {
+        calculated_price: QueryContext({
+          region_id: cart.region_id,
+          currency_code: cart.currency_code,
+        }),
+      },
+    })
+
+    const calculatedAmount = (data as Array<{
+      calculated_price?: { calculated_amount?: number | null } | null
+    }>)[0]?.calculated_price?.calculated_amount
+
+    if (calculatedAmount == null) {
+      throw new Error("variant has no calculated price for the cart context")
+    }
+
+    return roundCurrency(Number(calculatedAmount) * sourceSnapshot.quantity)
+  } catch (error) {
+    logger.warn(
+      `Skipping renewal discounts for subscription '${subscription.id}': could not price pending variant '${appliedPendingChanges.variant_id}' (${getRenewalErrorMessage(error)})`
+    )
+    return null
+  }
+}
+
+async function computeRenewalPlanAdjustment(
+  container: MedusaContainer,
+  subscription: SubscriptionType,
+  appliedPendingChanges: RenewalAppliedPendingUpdateData | null,
+  lineGrossTotal: number
+): Promise<RenewalAdjustmentSpec | null> {
+  let discount: { discount_type: "percentage" | "fixed"; discount_value: number } | null = null
+
+  // The plan discount agreed at signup is frozen in `pricing_snapshot`; an
+  // applied plan change re-negotiates the deal, so it re-reads the live plan
+  // config for the new variant and frequency (as does a subscription that
+  // predates pricing snapshots).
+  if (!appliedPendingChanges && subscription.pricing_snapshot) {
+    discount = subscription.pricing_snapshot
+  } else {
+    const effectiveConfig = await resolveProductSubscriptionConfig(container, {
+      product_id: subscription.product_id,
+      variant_id: appliedPendingChanges?.variant_id ?? subscription.variant_id,
+    })
+
+    if (!effectiveConfig.is_enabled) {
+      return null
+    }
+
+    const interval =
+      appliedPendingChanges?.frequency_interval ?? subscription.frequency_interval
+    const value =
+      appliedPendingChanges?.frequency_value ?? subscription.frequency_value
+
+    discount =
+      effectiveConfig.discount_per_frequency.find(
+        (record) =>
+          String(record.interval) === String(interval) && record.value === value
+      ) ?? null
+  }
+
+  if (!discount) {
+    return null
+  }
+
+  const amount = computeSubscriptionDiscountAmount({
+    discount_type: discount.discount_type,
+    discount_value: discount.discount_value,
+    line_gross_total: lineGrossTotal,
+  })
+
+  if (amount <= 0) {
+    return null
+  }
+
+  return {
+    amount,
+    description: "Subscription discount",
+    provider_id: "subscription_discount",
+  }
+}
+
+export const buildRenewalOrderItemsStep = createStep(
+  "build-renewal-order-items",
+  async function (context: RenewalExecutionContext, { container }) {
+    const subscription = context.subscription
+
+    if (subscription.skip_next_cycle) {
+      return new StepResponse<RenewalOrderBuildResult>({
+        cart: null,
+        items: null,
+        line_gross_total: null,
+        currency_code: null,
+        plan_adjustment: null,
+      })
+    }
+
+    try {
+      if (!subscription.cart_id) {
+        throw renewalErrors.invalidData(
+          `Subscription '${subscription.id}' is missing 'cart_id' required for renewal order creation`
+        )
+      }
+
+      const cart = await loadCart(container, subscription.cart_id)
+      const items = buildOrderItems(cart, subscription, context.applied_pending_changes)
+      const lineGrossTotal = await resolveRenewalLineGross(
+        container,
+        cart,
+        subscription,
+        context.applied_pending_changes
+      )
+      const planAdjustment =
+        lineGrossTotal != null && lineGrossTotal > 0
+          ? await computeRenewalPlanAdjustment(
+              container,
+              subscription,
+              context.applied_pending_changes,
+              lineGrossTotal
+            )
+          : null
+
+      return new StepResponse<RenewalOrderBuildResult>({
+        cart,
+        items,
+        line_gross_total: lineGrossTotal,
+        currency_code: cart.currency_code,
+        plan_adjustment: planAdjustment,
+      })
+    } catch (error) {
+      await recordRenewalFailure(container, context, error)
+      throw error
+    }
+  }
+)
+
+/**
+ * Clamp the plan and hook adjustments so their combined amount never exceeds
+ * the line gross. Order matters: the plan discount is applied first, app
+ * adjustments consume what remains. `code` is never forwarded — see
+ * {@link RenewalAdjustmentSpec}.
+ */
+function mergeRenewalAdjustments(
+  buildResult: RenewalOrderBuildResult,
+  extraAdjustments: RenewalAdjustmentSpec[] | undefined
+): RenewalAdjustmentSpec[] {
+  const gross = buildResult.line_gross_total
+
+  if (gross == null || gross <= 0) {
+    return []
+  }
+
+  const candidates = [
+    ...(buildResult.plan_adjustment ? [buildResult.plan_adjustment] : []),
+    ...(extraAdjustments ?? []),
+  ]
+
+  const merged: RenewalAdjustmentSpec[] = []
+  let remaining = gross
+
+  for (const candidate of candidates) {
+    const amount = roundCurrency(Math.min(Number(candidate.amount), remaining))
+
+    if (!(amount > 0)) {
+      continue
+    }
+
+    merged.push({
+      amount,
+      description: candidate.description ?? null,
+      provider_id: candidate.provider_id ?? null,
+      promotion_id: candidate.promotion_id ?? null,
+    })
+    remaining = roundCurrency(remaining - amount)
+  }
+
+  return merged
+}
+
 async function createRenewalOrder(
   container: MedusaContainer,
   cycle: { id: string },
   subscription: SubscriptionType,
   cart: CartRecord,
-  appliedPendingChanges: RenewalAppliedPendingUpdateData | null
+  items: Record<string, unknown>[]
 ) {
   if (!cart.region_id) {
     throw renewalErrors.invalidData(
@@ -572,7 +806,7 @@ async function createRenewalOrder(
       currency_code: cart.currency_code,
       shipping_address: cart.shipping_address ?? subscription.shipping_address,
       billing_address: cart.billing_address ?? undefined,
-      items: buildOrderItems(cart, subscription, appliedPendingChanges),
+      items,
       shipping_methods: buildShippingMethods(cart),
       metadata: {
         renewal_cycle_id: cycle.id,
@@ -939,16 +1173,65 @@ export const prepareRenewalCycleStep = createStep(
       },
     }
 
-    return new StepResponse(context)
+    return new StepResponse(context, context)
+  },
+  // Later steps record their own failures via `recordRenewalFailure`, but a
+  // throw from anything they don't wrap (e.g. a workflow hook handler) would
+  // otherwise strand the cycle in PROCESSING — unretryable, since this step
+  // rejects PROCESSING cycles with `alreadyProcessing` on the next attempt.
+  async function (context, { container }) {
+    if (!context) {
+      return
+    }
+
+    const logger = container.resolve("logger")
+    const renewalModule = container.resolve<RenewalModuleService>(RENEWAL_MODULE)
+
+    try {
+      const cycle = await renewalModule.retrieveRenewalCycle(context.renewal_cycle_id)
+
+      if (cycle.status !== RenewalCycleStatus.PROCESSING) {
+        return
+      }
+
+      const finishedAt = new Date()
+      const message = "Renewal workflow aborted before completing"
+
+      await renewalModule.updateRenewalAttempts({
+        id: context.attempt_id,
+        status: RenewalAttemptStatus.FAILED,
+        finished_at: finishedAt,
+        error_code: "renewal_failed",
+        error_message: message,
+      })
+
+      await renewalModule.updateRenewalCycles({
+        id: context.renewal_cycle_id,
+        status: RenewalCycleStatus.FAILED,
+        processed_at: finishedAt,
+        last_error: message,
+      })
+    } catch (error) {
+      logger.warn(
+        `Failed to mark aborted renewal cycle '${context.renewal_cycle_id}' as failed: ${getRenewalErrorMessage(error)}`
+      )
+    }
   }
 )
+
+export type CreateRenewalOrderStepInput = {
+  context: RenewalExecutionContext
+  build_result: RenewalOrderBuildResult
+  extra_adjustments: RenewalAdjustmentSpec[] | undefined
+}
 
 export const createRenewalOrderStep = createStep(
   "create-renewal-order",
   async function (
-    context: RenewalExecutionContext,
+    input: CreateRenewalOrderStepInput,
     { container }
   ) {
+    const { context, build_result: buildResult, extra_adjustments: extraAdjustments } = input
     const subscription = context.subscription
     const appliedPendingChanges = context.applied_pending_changes
 
@@ -963,19 +1246,38 @@ export const createRenewalOrderStep = createStep(
     }
 
     try {
-      if (!subscription.cart_id) {
+      const cart = buildResult.cart
+      const builtItems = buildResult.items
+
+      if (!cart || !builtItems?.length) {
         throw renewalErrors.invalidData(
-          `Subscription '${subscription.id}' is missing 'cart_id' required for renewal order creation`
+          `Renewal order build for subscription '${subscription.id}' produced no cart or items`
         )
       }
 
-      const cart = await loadCart(container, subscription.cart_id)
+      const adjustments = mergeRenewalAdjustments(buildResult, extraAdjustments)
+      const items = builtItems.map((item, index) =>
+        index === 0 && adjustments.length
+          ? {
+              ...item,
+              adjustments: adjustments.map((adjustment) => ({
+                amount: adjustment.amount,
+                description: adjustment.description ?? undefined,
+                provider_id: adjustment.provider_id ?? undefined,
+                promotion_id: adjustment.promotion_id ?? undefined,
+                // Same convention as the checkout subscription adjustment.
+                is_tax_inclusive: true,
+              })),
+            }
+          : item
+      )
+
       const { order, payment_collections, payment } = await createRenewalOrder(
         container,
         { id: context.renewal_cycle_id },
         subscription,
         cart,
-        appliedPendingChanges
+        items
       )
 
       let resolvedSourceSnapshot: SubscriptionSourceSnapshot | null = null

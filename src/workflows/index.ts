@@ -98,4 +98,8 @@ export {
   updateSubscriptionSettingsWorkflow,
   default as updateSubscriptionSettingsWorkflowDefault,
 } from "./update-subscription-settings"
+export {
+  createSubscriptionFromCartWorkflow,
+  default as createSubscriptionFromCartWorkflowDefault,
+} from "../subscription-flows/create-subscription-from-cart"
 export { validateNoSubscriptionItemsInCart } from "./hooks/complete-cart-validate"

@@ -1,9 +1,11 @@
 import {
+  createHook,
   createWorkflow,
   transform,
   when,
   WorkflowResponse,
 } from "@medusajs/framework/workflows-sdk"
+import { z } from "zod"
 import {
   acquireLockStep,
   completeCartWorkflow,
@@ -28,6 +30,8 @@ import { addCompleteAllowedMetadataEntryStep } from "./steps/add-complete-allowe
 export type CreateSubscriptionFromCartWorkflowInput =
   ValidateSubscriptionCartStepInput
 
+export const subscriptionCreatedResult = z.void().optional()
+
 export const createSubscriptionFromCartWorkflow = createWorkflow(
   "create-subscription-from-cart",
   function (input: CreateSubscriptionFromCartWorkflowInput) {
@@ -50,6 +54,9 @@ export const createSubscriptionFromCartWorkflow = createWorkflow(
 
     const validatedCart = validateSubscriptionCartStep(input)
     addCompleteAllowedMetadataEntryStep({ cartId: input.cart_id })
+
+    let subscriptionCreated!: ReturnType<typeof createHook>
+
 
     const completedCart = completeCartWorkflow.runAsStep({
       input: transform({ refreshedCart, input }, ({ input }) => ({
@@ -110,6 +117,26 @@ export const createSubscriptionFromCartWorkflow = createWorkflow(
         subscription_id: createdSubscription.id,
       })
 
+      // Declared inside the `when` branch so it fires only when a subscription
+      // was genuinely created — never on the idempotent replay path for a cart
+      // that already has one (core does the same with `completeCartWorkflow`'s
+      // `orderCreated`). Handlers use it to react to the new subscription, e.g.
+      // capturing discount terms from the initial order. The handle is hoisted
+      // out of the branch (assigned at composition time) so the hook is part of
+      // the workflow's typed `hooks` surface.
+      subscriptionCreated = createHook(
+        "subscriptionCreated",
+        {
+          subscription_id: createdSubscription.id,
+          order_id: orderId,
+          cart_id: validatedCart.cart_id,
+          customer_id: validatedCart.customer_id,
+        },
+        {
+          resultValidator: subscriptionCreatedResult,
+        }
+      )
+
       return createdSubscription
     })
 
@@ -163,11 +190,16 @@ export const createSubscriptionFromCartWorkflow = createWorkflow(
 
     releaseLockStep({ key: input.cart_id })
 
-    return new WorkflowResponse({
-      type: "order" as const,
-      order: orderQuery.data,
-      subscription: subscriptionQuery.data,
-    })
+    return new WorkflowResponse(
+      {
+        type: "order" as const,
+        order: orderQuery.data,
+        subscription: subscriptionQuery.data,
+      },
+      {
+        hooks: [subscriptionCreated],
+      }
+    )
   }
 )
 

@@ -43,6 +43,8 @@ export type SubscriptionSourceSnapshot = {
     amount: number
     code: string | null
     description: string | null
+    provider_id?: string | null
+    promotion_id?: string | null
   }[] | null
 }
 

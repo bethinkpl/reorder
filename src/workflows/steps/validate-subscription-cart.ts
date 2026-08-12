@@ -209,6 +209,8 @@ export const validateSubscriptionCartStep = createStep(
           amount: v!.amount,
           code: v!.code,
           description: v!.description,
+          provider_id: v!.provider_id ?? null,
+          promotion_id: v!.promotion_id ?? null,
         })),
         tax_lines: subscriptionItem.tax_lines?.filter(Boolean).map((v: any) => ({
           rate: v!.rate,
@@ -249,6 +251,16 @@ async function loadCart(
       "payment_collection.id",
       "payment_collection.payment_sessions.*",
       "items.*",
+      // `items.*` does not expand child relations — adjustments and tax lines must
+      // be requested explicitly or the source snapshot records them as absent.
+      "items.adjustments.amount",
+      "items.adjustments.code",
+      "items.adjustments.description",
+      "items.adjustments.provider_id",
+      "items.adjustments.promotion_id",
+      "items.tax_lines.code",
+      "items.tax_lines.rate",
+      "items.tax_lines.description",
       "items.variant.id",
       "items.variant.title",
       "items.variant.sku",

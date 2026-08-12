@@ -4,6 +4,10 @@ import { createStep, StepResponse } from "@medusajs/framework/workflows-sdk"
 import { MedusaError } from "@medusajs/framework/utils"
 import { resolveProductSubscriptionConfig } from "../../modules/plan-offer/utils/effective-config"
 import { isSubscriptionItem } from "../../common/utils/is-subscription-item"
+import {
+  computeSubscriptionDiscountAmount,
+  roundCurrency,
+} from "../utils/subscription-discount"
 
 type SyncSubscriptionCartPricingStepInput = {
   cart_id: string
@@ -144,10 +148,23 @@ export const syncSubscriptionCartPricingStep = createStep(
         continue
       }
 
-      const amount =
-        discount.discount_type === "percentage"
-          ? roundCurrency((lineGrossTotal * discount.discount_value) / 100)
-          : roundCurrency(Math.min(discount.discount_value, lineGrossTotal))
+      // Promotions and the subscription discount are both computed off the same
+      // pre-adjustment gross; without accounting for what other adjustments have
+      // already taken, the combined discount could exceed the line total.
+      const alreadyDiscountedTotal = (item.adjustments ?? [])
+        .filter(
+          (adjustment) =>
+            adjustment.code !== "subscription_discount" &&
+            adjustment.provider_id !== "subscription_discount"
+        )
+        .reduce((sum, adjustment) => sum + Number(adjustment.amount ?? 0), 0)
+
+      const amount = computeSubscriptionDiscountAmount({
+        discount_type: discount.discount_type,
+        discount_value: discount.discount_value,
+        line_gross_total: lineGrossTotal,
+        already_discounted_total: alreadyDiscountedTotal,
+      })
 
       if (amount <= 0) {
         if (existingSubscriptionAdjustment) {
@@ -224,8 +241,4 @@ async function loadCart(
   }
 
   return cart
-}
-
-function roundCurrency(amount: number) {
-  return Math.round(amount * 100) / 100
 }

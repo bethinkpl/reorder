@@ -27,6 +27,8 @@ if (process.env.TEST_TYPE === "integration:http") {
   config.testMatch = ["**/integration-tests/http/*.spec.[jt]s"]
 } else if (process.env.TEST_TYPE === "integration:modules") {
   config.testMatch = ["**/src/modules/*/__tests__/**/*.spec.[jt]s"]
+} else if (process.env.TEST_TYPE === "unit") {
+  config.testMatch = ["**/src/**/__tests__/**/*.unit.spec.[jt]s"]
 }
 
 module.exports = config

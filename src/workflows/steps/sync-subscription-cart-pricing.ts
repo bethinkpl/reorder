@@ -30,6 +30,9 @@ type CartLineItemRecord = {
     is_tax_inclusive?: boolean | null
     provider_id?: string | null
   }> | null
+  tax_lines?: Array<{
+    rate?: number | null
+  }> | null
   variant?: {
     id?: string | null
     product?: {
@@ -151,13 +154,30 @@ export const syncSubscriptionCartPricingStep = createStep(
       // Promotions and the subscription discount are both computed off the same
       // pre-adjustment gross; without accounting for what other adjustments have
       // already taken, the combined discount could exceed the line total.
+      //
+      // Amounts must be compared in the same unit as `lineGrossTotal` (which is
+      // tax-inclusive). A promotion adjustment defaults to
+      // `is_tax_inclusive: false`, meaning its amount is a NET reduction whose
+      // real effect on the line total is `amount * (1 + taxRate)` — summing raw
+      // amounts would understate it and let the combined discount exceed the
+      // line, driving the total negative.
+      const taxRateSum = (item.tax_lines ?? []).reduce(
+        (sum, taxLine) => sum + Number(taxLine.rate ?? 0),
+        0
+      )
       const alreadyDiscountedTotal = (item.adjustments ?? [])
         .filter(
           (adjustment) =>
             adjustment.code !== "subscription_discount" &&
             adjustment.provider_id !== "subscription_discount"
         )
-        .reduce((sum, adjustment) => sum + Number(adjustment.amount ?? 0), 0)
+        .reduce(
+          (sum, adjustment) =>
+            sum +
+            Number(adjustment.amount ?? 0) *
+            (adjustment.is_tax_inclusive ? 1 : 1 + taxRateSum / 100),
+          0
+        )
 
       const amount = computeSubscriptionDiscountAmount({
         discount_type: discount.discount_type,
@@ -226,6 +246,7 @@ async function loadCart(
       "items.adjustments.amount",
       "items.adjustments.is_tax_inclusive",
       "items.adjustments.provider_id",
+      "items.tax_lines.rate",
       "items.variant.id",
       "items.variant.product.id",
     ],

@@ -2,6 +2,7 @@ import { medusaIntegrationTestRunner } from "@medusajs/test-utils"
 import path from "path"
 import { ContainerRegistrationKeys, Modules } from "@medusajs/framework/utils"
 import { RENEWAL_MODULE } from "../../src/modules/renewal"
+import { SUBSCRIPTION_MODULE } from "../../src/modules/subscription"
 import type RenewalModuleService from "../../src/modules/renewal/service"
 import {
   RenewalAttemptStatus,
@@ -451,6 +452,115 @@ medusaIntegrationTestRunner({
         const updatedCycle = await renewalModule.retrieveRenewalCycle(cycle.id)
         expect(updatedCycle.status).toBe(RenewalCycleStatus.SUCCEEDED)
         expect(updatedCycle.generated_order_id).toBe(existingOrderId)
+      })
+
+      it("finalizes without re-charging when the reused order was already paid", async () => {
+        const container = getContainer()
+        const query = container.resolve<any>(ContainerRegistrationKeys.QUERY)
+        const renewalModule = container.resolve<RenewalModuleService>(RENEWAL_MODULE)
+
+        const subscription = await createSubscriptionSeed(container, {
+          reference: "SUB-DISC-PAID-001",
+          next_renewal_at: new Date("2026-05-01T10:00:00.000Z"),
+        })
+
+        // A previous attempt created the order AND captured payment, then died
+        // before finalizing: the order still has a non-zero total but nothing
+        // outstanding.
+        const paidOrderId = "ord_disc_paid_001"
+        const cycle = await createRenewalCycleSeed(container, {
+          subscription_id: subscription.id,
+          status: RenewalCycleStatus.FAILED,
+          scheduled_for: new Date("2026-05-01T10:00:00.000Z"),
+          generated_order_id: paidOrderId,
+          attempt_count: 1,
+        })
+
+        jest.spyOn(query, "graph").mockImplementation(async (input: any) => {
+          if (input.entity === "cart") {
+            return {
+              data: [
+                {
+                  id: subscription.cart_id,
+                  region_id: "reg_test",
+                  sales_channel_id: "sc_test",
+                  currency_code: "pln",
+                  email: "customer@example.com",
+                  customer_id: subscription.customer_id,
+                  shipping_address: { country_code: "PL" },
+                  billing_address: null,
+                  items: [{ variant_id: subscription.variant_id, quantity: 1, unit_price: 5000 }],
+                  shipping_methods: [],
+                },
+              ],
+            }
+          }
+
+          if (input.entity === "order") {
+            // Fully paid: total stands, pending difference is zero.
+            return {
+              data: [{ id: paidOrderId, total: 5000, summary: { pending_difference: 0 } }],
+            }
+          }
+
+          return { data: [] }
+        })
+
+        await processRenewalCycleWorkflow(container).run({
+          input: { renewal_cycle_id: cycle.id, trigger_type: "scheduler" },
+        })
+
+        // No duplicate order, and crucially no second payment collection for an
+        // order that owes nothing (which would throw and wedge the cycle).
+        expect(mockCreateOrderRun).not.toHaveBeenCalled()
+        expect(mockCreateOrUpdateOrderPaymentCollectionRun).not.toHaveBeenCalled()
+        expect(mockCreatePaymentSessionsRun).not.toHaveBeenCalled()
+
+        const updatedCycle = await renewalModule.retrieveRenewalCycle(cycle.id)
+        expect(updatedCycle.status).toBe(RenewalCycleStatus.SUCCEEDED)
+
+        // The subscription actually advanced instead of being wedged.
+        const updatedSubscription = await container
+          .resolve<any>(SUBSCRIPTION_MODULE)
+          .retrieveSubscription(subscription.id)
+        expect(new Date(updatedSubscription.next_renewal_at).toISOString()).toEqual(
+          "2026-06-01T10:00:00.000Z"
+        )
+      })
+
+      it("applies no plan discount when the subscription signed up without one", async () => {
+        const container = getContainer()
+        const query = container.resolve<any>(ContainerRegistrationKeys.QUERY)
+
+        // No pricing snapshot = full price agreed at signup. An admin adding a
+        // plan discount later must NOT retroactively discount this subscriber.
+        const subscription = await createSubscriptionSeed(container, {
+          reference: "SUB-DISC-NOPLAN-001",
+          next_renewal_at: new Date("2026-05-01T10:00:00.000Z"),
+          pricing_snapshot: null,
+        })
+
+        const cycle = await createRenewalCycleSeed(container, {
+          subscription_id: subscription.id,
+          status: RenewalCycleStatus.SCHEDULED,
+          scheduled_for: new Date("2026-05-01T10:00:00.000Z"),
+        })
+
+        mockRenewalQueries(query, {
+          cart_id: subscription.cart_id,
+          customer_id: subscription.customer_id,
+          variant_id: subscription.variant_id,
+          order_id: "ord_disc_noplan_001",
+        })
+        mockCreateOrderRun.mockResolvedValue({ result: { id: "ord_disc_noplan_001" } })
+
+        await processRenewalCycleWorkflow(container).run({
+          input: { renewal_cycle_id: cycle.id, trigger_type: "scheduler" },
+        })
+
+        expect(
+          mockCreateOrderRun.mock.calls[0][0].input.items[0].adjustments
+        ).toBeUndefined()
       })
 
       it("passes a null pricing payload to the hook and creates no order on skip_next_cycle", async () => {

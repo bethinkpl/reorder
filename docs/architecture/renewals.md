@@ -258,9 +258,15 @@ promotions or plan pricing for them by default. The renewal item build works as 
   `adjustments` and `tax_lines` are **deliberately not replayed** — they are stale by design,
   code-bearing adjustments would be deleted by `createOrderWorkflow`'s REPLACE promotion
   refresh, and replayed tax lines would be added to (not replaced by) freshly calculated ones
-- the **plan discount is recomputed each cycle**: the frozen `pricing_snapshot` is the deal
-  agreed at signup; an applied plan change (and any subscription without a snapshot) re-reads
-  the live `Plans & Offers` config for the effective variant and frequency
+- the **plan discount is recomputed each cycle** from the frozen `pricing_snapshot` — the deal
+  agreed at signup, rebuilt from the live `Plans & Offers` config only when a plan change is
+  applied (a plan change re-negotiates the deal). A **null snapshot means "no plan discount was
+  agreed"** and never falls back to the live config: otherwise a customer who signed up at full
+  price would start receiving a discount the moment an admin configures one
+- discount bases are **tax-inclusive gross** on both sides, matching the checkout adjustment
+  (`is_tax_inclusive: true`). Renewal gross is derived from the snapshot's `unit_price`, grossed
+  up by its tax lines when the price is tax-exclusive; the checkout clamp likewise converts other
+  actors' (default tax-exclusive) promotion amounts before subtracting them
 - a cycle that applies a pending plan change carries **no discounts** (logged): the item is
   priced by `createOrderWorkflow`'s calculated-price path, which rebuilds the line item and
   discards input adjustments; the following cycle (with the post-change snapshot) discounts
@@ -274,6 +280,11 @@ promotions or plan pricing for them by default. The renewal item build works as 
 - a failure between `prepare-renewal-cycle` and the failure-recording steps (e.g. a hook
   handler throw) reverts the workflow; a compensation handler on `prepare-renewal-cycle`
   marks the cycle and attempt FAILED so the cycle never strands in PROCESSING
+- the generated order id is persisted on the cycle as soon as the order exists, and a retry
+  **reuses** it instead of creating a duplicate order for the same billing period. Retries
+  collect the order's `summary.pending_difference`, not its total — an attempt that captured
+  payment before aborting leaves nothing outstanding, so the retry skips payment and proceeds
+  straight to finalizing (advancing the subscription) rather than double-charging or wedging
 
 ### Approval Workflows
 

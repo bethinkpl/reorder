@@ -1,6 +1,6 @@
 import { IPaymentModuleService, MedusaContainer } from "@medusajs/framework/types"
 import { type OrderDTO, type PaymentCollectionDTO, BigNumberInput } from "@medusajs/types"
-import { ContainerRegistrationKeys, Modules } from "@medusajs/framework/utils"
+import { ContainerRegistrationKeys, Modules, QueryContext } from "@medusajs/framework/utils"
 import { createStep, StepResponse } from "@medusajs/framework/workflows-sdk"
 import {
   createOrderWorkflow,
@@ -67,6 +67,9 @@ type CartRecord = {
 type OrderRecord = {
   id: string
   total?: number | string | null
+  summary?: {
+    pending_difference?: number | string | null
+  } | null
 }
 
 type PaymentSessionRecord = {
@@ -297,14 +300,23 @@ async function loadCart(
   return cart
 }
 
-async function loadOrderTotal(
+/**
+ * The order's total and the amount still owed on it.
+ *
+ * `pending_difference` (total minus what has already been paid) is what may be
+ * collected: passing the full total for an order that was already (partly) paid
+ * makes `createOrUpdateOrderPaymentCollectionWorkflow` throw
+ * "Amount cannot be greater than ...". That matters on the retry path, where an
+ * attempt may have captured payment before aborting.
+ */
+async function loadOrderAmounts(
   container: MedusaContainer,
   id: string
-): Promise<number> {
+): Promise<{ total: number, pending: number }> {
   const query = container.resolve(ContainerRegistrationKeys.QUERY)
   const { data } = await query.graph({
     entity: "order",
-    fields: ["id", "total"],
+    fields: ["id", "total", "summary.*"],
     filters: {
       id: [id],
     },
@@ -316,7 +328,13 @@ async function loadOrderTotal(
     throw renewalErrors.notFound("Order", id)
   }
 
-  return Number(order.total ?? 0)
+  const total = Number(order.total ?? 0)
+  const pendingDifference = order.summary?.pending_difference
+
+  return {
+    total,
+    pending: pendingDifference == null ? total : Number(pendingDifference),
+  }
 }
 
 async function validateSubscriptionEligibility(
@@ -502,10 +520,64 @@ async function loadOrderItemSnapshot(
   }
 }
 
+/**
+ * Whether the snapshot's `unit_price` already includes tax.
+ *
+ * Renewal items must carry a DEFINED `is_tax_inclusive` (see `buildOrderItems`),
+ * and the value decides whether tax is added on top of `unit_price` — guessing
+ * it wrong either swallows VAT or charges it twice. Snapshots normally record
+ * it; older ones may not, in which case the variant's own pricing is the
+ * authority.
+ */
+async function resolveSnapshotTaxInclusive(
+  container: MedusaContainer,
+  cart: CartRecord,
+  subscription: SubscriptionType
+): Promise<boolean> {
+  const sourceSnapshot = subscription.source_snapshot as SubscriptionSourceSnapshot
+
+  if (typeof sourceSnapshot.is_tax_inclusive === "boolean") {
+    return sourceSnapshot.is_tax_inclusive
+  }
+
+  const logger = container.resolve("logger")
+
+  try {
+    const query = container.resolve(ContainerRegistrationKeys.QUERY)
+    const { data } = await query.graph({
+      entity: "variants",
+      fields: ["id", "calculated_price.is_calculated_price_tax_inclusive"],
+      filters: { id: [sourceSnapshot.variant_id ?? subscription.variant_id] },
+      context: {
+        calculated_price: QueryContext({
+          region_id: cart.region_id,
+          currency_code: cart.currency_code,
+        }),
+      },
+    })
+
+    const resolved = (data as Array<{
+      calculated_price?: { is_calculated_price_tax_inclusive?: boolean | null } | null
+    }>)[0]?.calculated_price?.is_calculated_price_tax_inclusive
+
+    if (typeof resolved === "boolean") {
+      return resolved
+    }
+
+    throw new Error("variant has no calculated price for the cart context")
+  } catch (error) {
+    logger.warn(
+      `Subscription '${subscription.id}' has no 'is_tax_inclusive' in its source snapshot and the variant's pricing could not be resolved (${getRenewalErrorMessage(error)}); assuming tax-inclusive`
+    )
+    return true
+  }
+}
+
 function buildOrderItems(
   cart: CartRecord,
   subscription: SubscriptionType,
-  appliedPendingChanges: RenewalAppliedPendingUpdateData | null
+  appliedPendingChanges: RenewalAppliedPendingUpdateData | null,
+  isTaxInclusive: boolean
 ) {
   if (!subscription.source_snapshot) {
     throw renewalErrors.invalidData(
@@ -560,7 +632,7 @@ function buildOrderItems(
       subtitle: sourceSnapshot.subtitle,
       quantity: sourceSnapshot.quantity,
       unit_price: sourceSnapshot.unit_price,
-      is_tax_inclusive: sourceSnapshot.is_tax_inclusive ?? true,
+      is_tax_inclusive: isTaxInclusive,
       requires_shipping: sourceSnapshot.requires_shipping ?? true,
       is_discountable: sourceSnapshot.is_discountable ?? true,
       metadata: {
@@ -585,7 +657,8 @@ function buildShippingMethods(cart: CartRecord) {
 function resolveRenewalLineGross(
   container: MedusaContainer,
   subscription: SubscriptionType,
-  appliedPendingChanges: RenewalAppliedPendingUpdateData | null
+  appliedPendingChanges: RenewalAppliedPendingUpdateData | null,
+  isTaxInclusive: boolean
 ): number | null {
   const sourceSnapshot = subscription.source_snapshot as SubscriptionSourceSnapshot
 
@@ -598,13 +671,12 @@ function resolveRenewalLineGross(
     // price and under-discount by the tax factor relative to the first payment.
     // Snapshots predating tax-line capture have `tax_lines: []`/`null` and fall
     // back to the net base.
-    const taxRateSum =
-      sourceSnapshot.is_tax_inclusive === false
-        ? (sourceSnapshot.tax_lines ?? []).reduce(
-            (sum, taxLine) => sum + Number(taxLine.rate ?? 0),
-            0
-          )
-        : 0
+    const taxRateSum = isTaxInclusive
+      ? 0
+      : (sourceSnapshot.tax_lines ?? []).reduce(
+          (sum, taxLine) => sum + Number(taxLine.rate ?? 0),
+          0
+        )
 
     return roundCurrency(netTotal * (1 + taxRateSum / 100))
   }
@@ -626,39 +698,23 @@ function resolveRenewalLineGross(
   return null
 }
 
-async function computeRenewalPlanAdjustment(
-  container: MedusaContainer,
+function computeRenewalPlanAdjustment(
   subscription: SubscriptionType,
   lineGrossTotal: number
-): Promise<RenewalAdjustmentSpec | null> {
-  let discount: { discount_type: "percentage" | "fixed", discount_value: number } | null = null
-
+): RenewalAdjustmentSpec | null {
   // The plan discount is frozen in `pricing_snapshot`: written at signup and
   // REFRESHED by `finalizeRenewalCycleStep` whenever a plan change is applied
   // (a plan change re-negotiates the deal). Cycles that apply a pending change
   // never reach this function (their gross is unknown — see
   // `resolveRenewalLineGross`), so by the time a cycle gets here the snapshot
-  // always describes the subscription's current plan. The live-config fallback
-  // covers subscriptions that predate pricing snapshots.
-  if (subscription.pricing_snapshot) {
-    discount = subscription.pricing_snapshot
-  } else {
-    const effectiveConfig = await resolveProductSubscriptionConfig(container, {
-      product_id: subscription.product_id,
-      variant_id: subscription.variant_id,
-    })
-
-    if (!effectiveConfig.is_enabled) {
-      return null
-    }
-
-    discount =
-      effectiveConfig.discount_per_frequency.find(
-        (record) =>
-          String(record.interval) === String(subscription.frequency_interval) &&
-          record.value === subscription.frequency_value
-      ) ?? null
-  }
+  // always describes the subscription's current plan.
+  //
+  // A NULL snapshot means "no plan discount was agreed" — `buildPricingSnapshot`
+  // returns null when the chosen frequency has no configured discount. It must
+  // NOT fall back to the live plan config: doing so would hand a discount to a
+  // customer who signed up at full price the moment an admin adds one, which is
+  // the opposite of the frozen-at-signup contract.
+  const discount = subscription.pricing_snapshot
 
   if (!discount) {
     return null
@@ -704,15 +760,26 @@ export const buildRenewalOrderItemsStep = createStep(
       }
 
       const cart = await loadCart(container, subscription.cart_id)
-      const items = buildOrderItems(cart, subscription, context.applied_pending_changes)
+      const isTaxInclusive = await resolveSnapshotTaxInclusive(
+        container,
+        cart,
+        subscription
+      )
+      const items = buildOrderItems(
+        cart,
+        subscription,
+        context.applied_pending_changes,
+        isTaxInclusive
+      )
       const lineGrossTotal = resolveRenewalLineGross(
         container,
         subscription,
-        context.applied_pending_changes
+        context.applied_pending_changes,
+        isTaxInclusive
       )
       const planAdjustment =
         lineGrossTotal != null && lineGrossTotal > 0
-          ? await computeRenewalPlanAdjustment(container, subscription, lineGrossTotal)
+          ? computeRenewalPlanAdjustment(subscription, lineGrossTotal)
           : null
 
       return new StepResponse<RenewalOrderBuildResult>({
@@ -837,12 +904,15 @@ async function createRenewalOrder(
     })
   }
 
-  const total = await loadOrderTotal(container, order.id)
+  const { total, pending } = await loadOrderAmounts(container, order.id)
 
   let paymentCollections: PaymentCollectionDTO[] | null = null
   let payment: RenewalOrderStepResult["payment"] = null
 
-  if (total > 0) {
+  // Collect what is still owed, not the gross total: a reused order may already
+  // be (partly) paid by the attempt that aborted, and charging the full total
+  // again would both double-charge and throw.
+  if (pending > 0) {
     const paymentContext = subscription.payment_context as SubscriptionPaymentContext
 
     if (
@@ -859,7 +929,7 @@ async function createRenewalOrder(
       await createOrUpdateOrderPaymentCollectionWorkflow(container).run({
         input: {
           order_id: order.id,
-          amount: total,
+          amount: pending,
         },
       })
 

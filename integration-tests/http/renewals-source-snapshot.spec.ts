@@ -180,6 +180,14 @@ medusaIntegrationTestRunner({
               value: 1,
             },
           ],
+          discount_per_frequency: [
+            {
+              interval: FrequencyInterval.MONTH,
+              value: 1,
+              discount_type: "percentage",
+              discount_value: 25,
+            },
+          ],
         })
 
         const subscription = await createSubscriptionSeed(container, {
@@ -329,6 +337,15 @@ medusaIntegrationTestRunner({
         })
         expect(updatedSubscription.variant_id).toEqual(newVariantId)
         expect(updatedSubscription.pending_update_data).toBeNull()
+
+        // A plan change re-negotiates the deal: the frozen pricing snapshot
+        // must be rebuilt from the NEW plan's live config (the seed froze
+        // "10% off" at signup; the new variant's offer configures 25%), so the
+        // stale signup discount can never keep applying to the new plan.
+        expect(updatedSubscription.pricing_snapshot).toMatchObject({
+          discount_type: "percentage",
+          discount_value: 25,
+        })
       })
 
       it("uses updated source_snapshot for renewals after a plan change was applied", async () => {

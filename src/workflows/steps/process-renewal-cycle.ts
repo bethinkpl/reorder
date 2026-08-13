@@ -43,6 +43,7 @@ import { addSubscriptionCadence } from "../../modules/subscription/utils/effecti
 import { subscriptionErrors } from "../../modules/subscription/utils/errors"
 import { startDunningWorkflow } from "../start-dunning"
 import { persistSubscriptionLogEvent } from "./create-subscription-log-event"
+import { buildPricingSnapshot } from "./validate-subscription-cart"
 import { toISOStringOrNull } from "../utils/date-output"
 import {
   computeSubscriptionDiscountAmount,
@@ -589,7 +590,23 @@ function resolveRenewalLineGross(
   const sourceSnapshot = subscription.source_snapshot as SubscriptionSourceSnapshot
 
   if (!appliedPendingChanges) {
-    return roundCurrency(sourceSnapshot.unit_price * sourceSnapshot.quantity)
+    const netTotal = sourceSnapshot.unit_price * sourceSnapshot.quantity
+
+    // Match the checkout discount base (`item.original_total`, the
+    // tax-INCLUSIVE gross): for a tax-exclusive price the snapshot tax rates
+    // are added on top, otherwise percentage renewals would compute off the net
+    // price and under-discount by the tax factor relative to the first payment.
+    // Snapshots predating tax-line capture have `tax_lines: []`/`null` and fall
+    // back to the net base.
+    const taxRateSum =
+      sourceSnapshot.is_tax_inclusive === false
+        ? (sourceSnapshot.tax_lines ?? []).reduce(
+            (sum, taxLine) => sum + Number(taxLine.rate ?? 0),
+            0
+          )
+        : 0
+
+    return roundCurrency(netTotal * (1 + taxRateSum / 100))
   }
 
   // A pending plan change is priced live by `createOrderWorkflow` — the item is
@@ -612,36 +629,34 @@ function resolveRenewalLineGross(
 async function computeRenewalPlanAdjustment(
   container: MedusaContainer,
   subscription: SubscriptionType,
-  appliedPendingChanges: RenewalAppliedPendingUpdateData | null,
   lineGrossTotal: number
 ): Promise<RenewalAdjustmentSpec | null> {
   let discount: { discount_type: "percentage" | "fixed", discount_value: number } | null = null
 
-  // The plan discount agreed at signup is frozen in `pricing_snapshot`; an
-  // applied plan change re-negotiates the deal, so it re-reads the live plan
-  // config for the new variant and frequency (as does a subscription that
-  // predates pricing snapshots).
-  if (!appliedPendingChanges && subscription.pricing_snapshot) {
+  // The plan discount is frozen in `pricing_snapshot`: written at signup and
+  // REFRESHED by `finalizeRenewalCycleStep` whenever a plan change is applied
+  // (a plan change re-negotiates the deal). Cycles that apply a pending change
+  // never reach this function (their gross is unknown — see
+  // `resolveRenewalLineGross`), so by the time a cycle gets here the snapshot
+  // always describes the subscription's current plan. The live-config fallback
+  // covers subscriptions that predate pricing snapshots.
+  if (subscription.pricing_snapshot) {
     discount = subscription.pricing_snapshot
   } else {
     const effectiveConfig = await resolveProductSubscriptionConfig(container, {
       product_id: subscription.product_id,
-      variant_id: appliedPendingChanges?.variant_id ?? subscription.variant_id,
+      variant_id: subscription.variant_id,
     })
 
     if (!effectiveConfig.is_enabled) {
       return null
     }
 
-    const interval =
-      appliedPendingChanges?.frequency_interval ?? subscription.frequency_interval
-    const value =
-      appliedPendingChanges?.frequency_value ?? subscription.frequency_value
-
     discount =
       effectiveConfig.discount_per_frequency.find(
         (record) =>
-          String(record.interval) === String(interval) && record.value === value
+          String(record.interval) === String(subscription.frequency_interval) &&
+          record.value === subscription.frequency_value
       ) ?? null
   }
 
@@ -697,12 +712,7 @@ export const buildRenewalOrderItemsStep = createStep(
       )
       const planAdjustment =
         lineGrossTotal != null && lineGrossTotal > 0
-          ? await computeRenewalPlanAdjustment(
-              container,
-              subscription,
-              context.applied_pending_changes,
-              lineGrossTotal
-            )
+          ? await computeRenewalPlanAdjustment(container, subscription, lineGrossTotal)
           : null
 
       return new StepResponse<RenewalOrderBuildResult>({
@@ -767,7 +777,7 @@ function mergeRenewalAdjustments(
 
 async function createRenewalOrder(
   container: MedusaContainer,
-  cycle: { id: string },
+  cycle: { id: string, generated_order_id?: string | null },
   subscription: SubscriptionType,
   cart: CartRecord,
   items: Record<string, unknown>[]
@@ -784,26 +794,49 @@ async function createRenewalOrder(
     )
   }
 
-  const orderResult = await createOrderWorkflow(container).run({
-    input: {
-      region_id: cart.region_id,
-      sales_channel_id: cart.sales_channel_id,
-      customer_id: subscription.customer_id,
-      email: cart.email ?? subscription.customer_snapshot?.email ?? undefined,
-      currency_code: cart.currency_code,
-      shipping_address: cart.shipping_address ?? subscription.shipping_address,
-      billing_address: cart.billing_address ?? undefined,
-      items,
-      shipping_methods: buildShippingMethods(cart),
-      metadata: {
-        renewal_cycle_id: cycle.id,
-        subscription_id: subscription.id,
-        renewal_trigger: "automatic",
-      },
-    } as unknown as CreateOrderWorkflowInput,
-  })
+  let order: OrderDTO
 
-  const order = orderResult.result
+  // A retry after a mid-flight abort (e.g. a hook handler threw AFTER the
+  // order was committed) must reuse the already-created order — creating a
+  // fresh one would leave a duplicate live order for the same billing period.
+  // The order id is persisted onto the cycle immediately after creation below,
+  // which is what makes this branch reachable.
+  if (cycle.generated_order_id) {
+    order = { id: cycle.generated_order_id } as OrderDTO
+
+    const logger = container.resolve("logger")
+    logger.info(
+      `Reusing existing renewal order '${cycle.generated_order_id}' for cycle '${cycle.id}' after an aborted attempt`
+    )
+  } else {
+    const orderResult = await createOrderWorkflow(container).run({
+      input: {
+        region_id: cart.region_id,
+        sales_channel_id: cart.sales_channel_id,
+        customer_id: subscription.customer_id,
+        email: cart.email ?? subscription.customer_snapshot?.email ?? undefined,
+        currency_code: cart.currency_code,
+        shipping_address: cart.shipping_address ?? subscription.shipping_address,
+        billing_address: cart.billing_address ?? undefined,
+        items,
+        shipping_methods: buildShippingMethods(cart),
+        metadata: {
+          renewal_cycle_id: cycle.id,
+          subscription_id: subscription.id,
+          renewal_trigger: "automatic",
+        },
+      } as unknown as CreateOrderWorkflowInput,
+    })
+
+    order = orderResult.result
+
+    const renewalModule = container.resolve<RenewalModuleService>(RENEWAL_MODULE)
+    await renewalModule.updateRenewalCycles({
+      id: cycle.id,
+      generated_order_id: order.id,
+    })
+  }
+
   const total = await loadOrderTotal(container, order.id)
 
   let paymentCollections: PaymentCollectionDTO[] | null = null
@@ -923,7 +956,12 @@ async function recordRenewalFailure(
     id: context.renewal_cycle_id,
     status: RenewalCycleStatus.FAILED,
     processed_at: finishedAt,
-    generated_order_id: paymentFailure?.renewal_order_id ?? null,
+    // Never null out a persisted order id: `createRenewalOrder` records it the
+    // moment the order exists so an aborted attempt can reuse (not duplicate)
+    // the order on retry.
+    ...(paymentFailure?.renewal_order_id
+      ? { generated_order_id: paymentFailure.renewal_order_id }
+      : {}),
     last_error: message,
   })
 
@@ -1261,7 +1299,10 @@ export const createRenewalOrderStep = createStep(
 
       const { order, payment_collections, payment } = await createRenewalOrder(
         container,
-        { id: context.renewal_cycle_id },
+        {
+          id: context.renewal_cycle_id,
+          generated_order_id: context.cycle_previous_state.generated_order_id,
+        },
         subscription,
         cart,
         items
@@ -1442,6 +1483,27 @@ export const finalizeRenewalCycleStep = createStep(
           }
         : subscription.product_snapshot
 
+      // A plan change re-negotiates the deal: the frozen pricing snapshot must
+      // be rebuilt from the live plan config for the NEW variant and frequency,
+      // or the signup discount would keep applying to the new plan's price on
+      // every future cycle.
+      let nextPricingSnapshot = subscription.pricing_snapshot
+
+      if (appliedPendingChanges) {
+        const effectiveConfig = await resolveProductSubscriptionConfig(container, {
+          product_id: subscription.product_id,
+          variant_id: appliedPendingChanges.variant_id,
+        })
+
+        nextPricingSnapshot = effectiveConfig.is_enabled
+          ? buildPricingSnapshot(
+              effectiveConfig.discount_per_frequency,
+              nextInterval as FrequencyInterval,
+              nextValue
+            )
+          : null
+      }
+
       await subscriptionModule.updateSubscriptions({
         id: subscription.id,
         variant_id:
@@ -1449,6 +1511,7 @@ export const finalizeRenewalCycleStep = createStep(
         frequency_interval: nextInterval,
         frequency_value: nextValue,
         product_snapshot: nextProductSnapshot,
+        pricing_snapshot: nextPricingSnapshot,
         next_renewal_at: nextRenewalAt,
         last_renewal_at: finishedAt,
         skip_next_cycle: false,

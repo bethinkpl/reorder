@@ -329,7 +329,7 @@ function readFrequencyValue(metadata?: Record<string, unknown> | null) {
   return value
 }
 
-function buildPricingSnapshot(
+export function buildPricingSnapshot(
   discounts: PlanOfferDiscountPerFrequency[],
   interval: FrequencyInterval,
   value: number

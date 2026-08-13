@@ -1,6 +1,6 @@
 import { IPaymentModuleService, MedusaContainer } from "@medusajs/framework/types"
 import { type OrderDTO, type PaymentCollectionDTO, BigNumberInput } from "@medusajs/types"
-import { ContainerRegistrationKeys, Modules, QueryContext } from "@medusajs/framework/utils"
+import { ContainerRegistrationKeys, Modules } from "@medusajs/framework/utils"
 import { createStep, StepResponse } from "@medusajs/framework/workflows-sdk"
 import {
   createOrderWorkflow,
@@ -547,6 +547,10 @@ function buildOrderItems(
   // code-bearing ones would be deleted by `createOrderWorkflow`'s promotion
   // refresh anyway; provided tax lines are ADDED TO (not replaced by) the ones
   // the tax provider calculates, so replaying them would double-tax the line.
+  //
+  // `is_tax_inclusive` MUST be defined alongside `unit_price`: when either is
+  // missing, `createOrderWorkflow` routes the item through its calculated-price
+  // path, which rebuilds the line item and silently drops input adjustments.
   return [
     {
       product_id: sourceSnapshot.product_id,
@@ -555,6 +559,7 @@ function buildOrderItems(
       subtitle: sourceSnapshot.subtitle,
       quantity: sourceSnapshot.quantity,
       unit_price: sourceSnapshot.unit_price,
+      is_tax_inclusive: sourceSnapshot.is_tax_inclusive ?? true,
       requires_shipping: sourceSnapshot.requires_shipping ?? true,
       is_discountable: sourceSnapshot.is_discountable ?? true,
       metadata: {
@@ -576,52 +581,32 @@ function buildShippingMethods(cart: CartRecord) {
   ) as any[]
 }
 
-async function resolveRenewalLineGross(
+function resolveRenewalLineGross(
   container: MedusaContainer,
-  cart: CartRecord,
   subscription: SubscriptionType,
   appliedPendingChanges: RenewalAppliedPendingUpdateData | null
-): Promise<number | null> {
+): number | null {
   const sourceSnapshot = subscription.source_snapshot as SubscriptionSourceSnapshot
 
   if (!appliedPendingChanges) {
     return roundCurrency(sourceSnapshot.unit_price * sourceSnapshot.quantity)
   }
 
-  // A pending plan change is priced live by `createOrderWorkflow` (the item is
-  // built without `unit_price`), so the gross has to come from the variant's
-  // current calculated price in the source cart's region and currency.
+  // A pending plan change is priced live by `createOrderWorkflow` — the item is
+  // built without `unit_price`, which routes it through the workflow's
+  // calculated-price path. That path rebuilds the line item and DISCARDS input
+  // adjustments, so discounts cannot be attached to a plan-change cycle without
+  // the plugin taking over core's (customer-aware) pricing. Deliberately
+  // skipped for now: the gross is reported as unknown, no adjustments are
+  // applied, and the next cycle (post-change snapshot in place) discounts
+  // normally again.
   const logger = container.resolve("logger")
 
-  try {
-    const query = container.resolve(ContainerRegistrationKeys.QUERY)
-    const { data } = await query.graph({
-      entity: "variants",
-      fields: ["id", "calculated_price.calculated_amount"],
-      filters: { id: [appliedPendingChanges.variant_id] },
-      context: {
-        calculated_price: QueryContext({
-          region_id: cart.region_id,
-          currency_code: cart.currency_code,
-        }),
-      },
-    })
+  logger.warn(
+    `Skipping renewal discounts for subscription '${subscription.id}': cycle applies a pending plan change to variant '${appliedPendingChanges.variant_id}', which is priced by the order workflow and cannot carry adjustments`
+  )
 
-    const calculatedAmount = (data as Array<{
-      calculated_price?: { calculated_amount?: number | null } | null
-    }>)[0]?.calculated_price?.calculated_amount
-
-    if (calculatedAmount == null) {
-      throw new Error("variant has no calculated price for the cart context")
-    }
-
-    return roundCurrency(Number(calculatedAmount) * sourceSnapshot.quantity)
-  } catch (error) {
-    logger.warn(
-      `Skipping renewal discounts for subscription '${subscription.id}': could not price pending variant '${appliedPendingChanges.variant_id}' (${getRenewalErrorMessage(error)})`
-    )
-    return null
-  }
+  return null
 }
 
 async function computeRenewalPlanAdjustment(
@@ -705,9 +690,8 @@ export const buildRenewalOrderItemsStep = createStep(
 
       const cart = await loadCart(container, subscription.cart_id)
       const items = buildOrderItems(cart, subscription, context.applied_pending_changes)
-      const lineGrossTotal = await resolveRenewalLineGross(
+      const lineGrossTotal = resolveRenewalLineGross(
         container,
-        cart,
         subscription,
         context.applied_pending_changes
       )

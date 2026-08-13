@@ -261,9 +261,10 @@ promotions or plan pricing for them by default. The renewal item build works as 
 - the **plan discount is recomputed each cycle**: the frozen `pricing_snapshot` is the deal
   agreed at signup; an applied plan change (and any subscription without a snapshot) re-reads
   the live `Plans & Offers` config for the effective variant and frequency
-- on a pending plan change, the line gross comes from the variant's live `calculated_price`
-  in the source cart's region/currency; if that lookup fails, discounts are skipped for the
-  cycle with a warning
+- a cycle that applies a pending plan change carries **no discounts** (logged): the item is
+  priced by `createOrderWorkflow`'s calculated-price path, which rebuilds the line item and
+  discards input adjustments; the following cycle (with the post-change snapshot) discounts
+  normally again. Attaching discounts to plan-change cycles is a known follow-up.
 - the host app can contribute additional discounts via the `resolveRenewalAdjustments`
   workflow hook (see `src/workflows/README.md`); all renewal adjustments are written
   **code-less** so they survive the promotion refresh, and the combined discount is clamped

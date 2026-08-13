@@ -139,9 +139,9 @@ processRenewalCycleWorkflow.hooks.resolveRenewalAdjustments(
 ```
 
 - The handler receives the `subscription`, `renewal_cycle_id`, the cart's `currency_code`, the
-  pre-discount `line_gross_total`, and the built order `items`. On a skipped cycle (or when a
-  pending plan change could not be priced) `items`, `line_gross_total`, and `currency_code` are
-  `null` — return `undefined` in that case.
+  pre-discount `line_gross_total`, and the built order `items`. `line_gross_total` is `null` on
+  a skipped cycle and on one that applies a pending plan change (such cycles carry no
+  discounts) — return `undefined` in that case.
 - The result is validated with zod: an optional array of `{ amount, description?, provider_id?,
   promotion_id? }`. **There is deliberately no `code` field** — `createOrderWorkflow` refreshes
   promotions with REPLACE semantics and deletes every adjustment carrying a string code; the

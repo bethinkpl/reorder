@@ -1353,21 +1353,19 @@ export const createRenewalOrderStep = createStep(
       }
 
       const adjustments = mergeRenewalAdjustments(buildResult, extraAdjustments)
-      const items = builtItems.map((item, index) =>
-        index === 0 && adjustments.length
-          ? {
-              ...item,
-              adjustments: adjustments.map((adjustment) => ({
-                amount: adjustment.amount,
-                description: adjustment.description ?? undefined,
-                provider_id: adjustment.provider_id ?? undefined,
-                promotion_id: adjustment.promotion_id ?? undefined,
-                // Same convention as the checkout subscription adjustment.
-                is_tax_inclusive: true,
-              })),
-            }
-          : item
-      )
+      if (builtItems[0] && adjustments.length) {
+        builtItems[0] = {
+          ...builtItems[0],
+          adjustments: adjustments.map((adjustment) => ({
+            amount: adjustment.amount,
+            description: adjustment.description ?? undefined,
+            provider_id: adjustment.provider_id ?? undefined,
+            promotion_id: adjustment.promotion_id ?? undefined,
+            // Same convention as the checkout subscription adjustment.
+            is_tax_inclusive: true,
+          })),
+        }
+      }
 
       const { order, payment_collections, payment } = await createRenewalOrder(
         container,
@@ -1377,7 +1375,7 @@ export const createRenewalOrderStep = createStep(
         },
         subscription,
         cart,
-        items
+        builtItems
       )
 
       let resolvedSourceSnapshot: SubscriptionSourceSnapshot | null = null

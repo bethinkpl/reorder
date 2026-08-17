@@ -45,6 +45,7 @@ import { startDunningWorkflow } from "../start-dunning"
 import { persistSubscriptionLogEvent } from "./create-subscription-log-event"
 import { buildPricingSnapshot } from "./validate-subscription-cart"
 import { toISOStringOrNull } from "../utils/date-output"
+import { recordOrderCaptureTransactions } from "../utils/record-order-capture-transactions"
 import {
   computeSubscriptionDiscountAmount,
   roundCurrency,
@@ -1477,6 +1478,22 @@ export const authorizeRenewalPaymentStep = createStep(
             error,
             "payment_capture",
             orderId
+          )
+        }
+
+        // Capturing through the module writes no order transaction, which would
+        // leave `summary.pending_difference` reporting the full total as still
+        // owed - the exact value `createRenewalOrder` reads to decide whether a
+        // reused order still needs charging. Without this the card gets charged
+        // again on any retry that runs before the provider webhook lands.
+        // Deliberately not fatal: the money is already captured, so a failure to
+        // write the bookkeeping row must not fail the renewal (and so trigger
+        // dunning) - the webhook writes the same rows later.
+        try {
+          await recordOrderCaptureTransactions(container, orderId, payment.id)
+        } catch (error) {
+          container.resolve("logger").warn(
+            `Captured renewal payment '${payment.id}' but failed to record its order transaction on '${orderId}': ${getRenewalErrorMessage(error)}`
           )
         }
       }

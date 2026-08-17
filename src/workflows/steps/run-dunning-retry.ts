@@ -515,13 +515,26 @@ async function executePaymentRetry(
       }
     }
 
-    await paymentModule.capturePayment({
-      payment_id: payment.id,
-      amount: payment.amount,
-    })
+    let captureError: unknown = null
+
+    try {
+      await paymentModule.capturePayment({
+        payment_id: payment.id,
+        amount: payment.amount,
+      })
+    } catch (error) {
+      captureError = error
+    }
 
     // Record what the capture settled, so the next retry (and the renewal flow's
     // reused-order guard) sees the order as paid instead of charging it again.
+    //
+    // Runs even when the capture call above failed: an auto-capturing provider
+    // has already taken the money at authorize time, and this retry's failure
+    // just schedules another one that would otherwise collect it again. The
+    // helper only writes rows for captures that exist, so it no-ops when nothing
+    // was actually captured.
+    //
     // Not fatal: the money is already captured and the provider webhook writes
     // the same rows later.
     try {
@@ -530,6 +543,10 @@ async function executePaymentRetry(
       container.resolve("logger").warn(
         `Captured dunning retry payment '${payment.id}' but failed to record its order transaction on '${renewalOrderId}': ${getDunningErrorMessage(transactionError)}`
       )
+    }
+
+    if (captureError) {
+      throw captureError
     }
 
     return {

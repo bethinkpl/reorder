@@ -1468,17 +1468,15 @@ export const authorizeRenewalPaymentStep = createStep(
       }
 
       if (payment?.id) {
+        let captureError: unknown = null
+
         try {
           await paymentModule.capturePayment({
             payment_id: payment.id,
             amount: payment.amount,
           })
         } catch (error) {
-          throw createPaymentQualifiedRenewalError(
-            error,
-            "payment_capture",
-            orderId
-          )
+          captureError = error
         }
 
         // Capturing through the module writes no order transaction, which would
@@ -1486,6 +1484,14 @@ export const authorizeRenewalPaymentStep = createStep(
         // owed - the exact value `createRenewalOrder` reads to decide whether a
         // reused order still needs charging. Without this the card gets charged
         // again on any retry that runs before the provider webhook lands.
+        //
+        // Runs even when the capture call above failed: an auto-capturing
+        // provider (status CAPTURED straight out of `authorizePayment`) has
+        // already taken the money by then, so the charge still needs recording
+        // or the dunning case this failure opens would collect it a second time.
+        // Safe either way - the helper only writes rows for captures that exist,
+        // so it no-ops when nothing was actually captured.
+        //
         // Deliberately not fatal: the money is already captured, so a failure to
         // write the bookkeeping row must not fail the renewal (and so trigger
         // dunning) - the webhook writes the same rows later.
@@ -1494,6 +1500,14 @@ export const authorizeRenewalPaymentStep = createStep(
         } catch (error) {
           container.resolve("logger").warn(
             `Captured renewal payment '${payment.id}' but failed to record its order transaction on '${orderId}': ${getRenewalErrorMessage(error)}`
+          )
+        }
+
+        if (captureError) {
+          throw createPaymentQualifiedRenewalError(
+            captureError,
+            "payment_capture",
+            orderId
           )
         }
       }

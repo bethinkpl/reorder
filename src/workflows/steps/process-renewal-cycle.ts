@@ -843,7 +843,8 @@ function mergeRenewalAdjustments(
   return merged
 }
 
-async function createRenewalOrder(
+/** Exported for unit tests: covers the reused-order double-charge guard. */
+export async function createRenewalOrder(
   container: MedusaContainer,
   cycle: { id: string, generated_order_id?: string | null },
   subscription: SubscriptionType,

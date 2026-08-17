@@ -428,7 +428,8 @@ function readNestedErrorCode(value: unknown): string | null {
   return null
 }
 
-async function executePaymentRetry(
+/** Exported for unit tests: covers the already-settled double-charge guard. */
+export async function executePaymentRetry(
   container: MedusaContainer,
   subscription: SubscriptionRecord,
   renewalOrderId: string

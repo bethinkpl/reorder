@@ -56,9 +56,13 @@ export async function recordOrderCaptureTransactions(
   // The capture rows are created by the module (on an auto-capturing provider
   // they already exist by the time `authorizePaymentSession` returns), and the
   // payment handed back by authorize/capture doesn't carry the relation.
+  // `captures.raw_amount` mirrors what the payment module's own `capturePayment`
+  // asks for: the dotted form is what pulls the raw (full-precision) amount that
+  // `capturePaymentWorkflow` writes its transactions from. The capture id comes
+  // along with it.
   const payment = (await paymentModule.retrievePayment(paymentId, {
     select: ["id", "currency_code"],
-    relations: ["captures"],
+    relations: ["captures.raw_amount"],
   })) as unknown as CapturedPaymentRecord
 
   const captures = payment.captures ?? []

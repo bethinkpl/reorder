@@ -98,4 +98,12 @@ export {
   updateSubscriptionSettingsWorkflow,
   default as updateSubscriptionSettingsWorkflowDefault,
 } from "./update-subscription-settings"
+// NOTE: `createSubscriptionFromCartWorkflow` is deliberately NOT re-exported
+// here. Its composition is order-sensitive (a second composition in the same
+// process serializes differently and trips WorkflowManager's duplicate check),
+// so it must only ever be composed once — by the app's resource loaders.
+// Re-exporting it from this index would make any consumer of
+// `@bethinkpl/reorder/workflows` (including jest specs) compose it a second
+// time. Consumers that need it import the deep path
+// `@bethinkpl/reorder/subscription-flows/create-subscription-from-cart`.
 export { validateNoSubscriptionItemsInCart } from "./hooks/complete-cart-validate"

@@ -249,6 +249,43 @@ Current implementation detail:
 - the current lock settings are `timeout = 10` seconds and `ttl = 120` seconds
 - this shared lock protects both scheduler execution and manual force execution
 
+### Renewal Order Pricing and Discounts
+
+Renewal orders are created cart-lessly through `createOrderWorkflow`, so nothing recomputes
+promotions or plan pricing for them by default. The renewal item build works as follows:
+
+- items are built from `source_snapshot` (`unit_price`, quantity, flags); snapshot
+  `adjustments` and `tax_lines` are **deliberately not replayed** — they are stale by design,
+  code-bearing adjustments would be deleted by `createOrderWorkflow`'s REPLACE promotion
+  refresh, and replayed tax lines would be added to (not replaced by) freshly calculated ones
+- the **plan discount is recomputed each cycle** from the frozen `pricing_snapshot` — the deal
+  agreed at signup, rebuilt from the live `Plans & Offers` config only when a plan change is
+  applied (a plan change re-negotiates the deal). A **null snapshot means "no plan discount was
+  agreed"** and never falls back to the live config: otherwise a customer who signed up at full
+  price would start receiving a discount the moment an admin configures one
+- discount bases are **tax-inclusive gross** on both sides, matching the checkout adjustment
+  (`is_tax_inclusive: true`). Renewal gross is derived from the snapshot's `unit_price`, grossed
+  up by its tax lines when the price is tax-exclusive; the checkout clamp likewise converts other
+  actors' (default tax-exclusive) promotion amounts before subtracting them
+- a cycle that applies a pending plan change carries **no discounts** (logged): the item is
+  priced by `createOrderWorkflow`'s calculated-price path, which rebuilds the line item and
+  discards input adjustments; the following cycle (with the post-change snapshot) discounts
+  normally again. Attaching discounts to plan-change cycles is a known follow-up.
+- the host app can contribute additional discounts via the `resolveRenewalAdjustments`
+  workflow hook (see `src/workflows/README.md`); all renewal adjustments are written
+  **code-less** so they survive the promotion refresh, and the combined discount is clamped
+  to the line gross (plan discount first, hook adjustments consume the remainder)
+- renewals register **no promotion usage** — a promotion redeemed at signup is counted once,
+  by the checkout; recurring application is an app-level replay of frozen terms
+- a failure between `prepare-renewal-cycle` and the failure-recording steps (e.g. a hook
+  handler throw) reverts the workflow; a compensation handler on `prepare-renewal-cycle`
+  marks the cycle and attempt FAILED so the cycle never strands in PROCESSING
+- the generated order id is persisted on the cycle as soon as the order exists, and a retry
+  **reuses** it instead of creating a duplicate order for the same billing period. Retries
+  collect the order's `summary.pending_difference`, not its total — an attempt that captured
+  payment before aborting leaves nothing outstanding, so the retry skips payment and proceeds
+  straight to finalizing (advancing the subscription) rather than double-charging or wedging
+
 ### Approval Workflows
 
 `approve-renewal-changes` and `reject-renewal-changes` are the mutation boundary for approval decisions.

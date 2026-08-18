@@ -4,6 +4,10 @@ import { createStep, StepResponse } from "@medusajs/framework/workflows-sdk"
 import { MedusaError } from "@medusajs/framework/utils"
 import { resolveProductSubscriptionConfig } from "../../modules/plan-offer/utils/effective-config"
 import { isSubscriptionItem } from "../../common/utils/is-subscription-item"
+import {
+  computeSubscriptionDiscountAmount,
+  roundCurrency,
+} from "../utils/subscription-discount"
 
 type SyncSubscriptionCartPricingStepInput = {
   cart_id: string
@@ -25,6 +29,9 @@ type CartLineItemRecord = {
     amount?: number | null
     is_tax_inclusive?: boolean | null
     provider_id?: string | null
+  }> | null
+  tax_lines?: Array<{
+    rate?: number | null
   }> | null
   variant?: {
     id?: string | null
@@ -144,10 +151,40 @@ export const syncSubscriptionCartPricingStep = createStep(
         continue
       }
 
-      const amount =
-        discount.discount_type === "percentage"
-          ? roundCurrency((lineGrossTotal * discount.discount_value) / 100)
-          : roundCurrency(Math.min(discount.discount_value, lineGrossTotal))
+      // Promotions and the subscription discount are both computed off the same
+      // pre-adjustment gross; without accounting for what other adjustments have
+      // already taken, the combined discount could exceed the line total.
+      //
+      // Amounts must be compared in the same unit as `lineGrossTotal` (which is
+      // tax-inclusive). A promotion adjustment defaults to
+      // `is_tax_inclusive: false`, meaning its amount is a NET reduction whose
+      // real effect on the line total is `amount * (1 + taxRate)` — summing raw
+      // amounts would understate it and let the combined discount exceed the
+      // line, driving the total negative.
+      const taxRateSum = (item.tax_lines ?? []).reduce(
+        (sum, taxLine) => sum + Number(taxLine.rate ?? 0),
+        0
+      )
+      const alreadyDiscountedTotal = (item.adjustments ?? [])
+        .filter(
+          (adjustment) =>
+            adjustment.code !== "subscription_discount" &&
+            adjustment.provider_id !== "subscription_discount"
+        )
+        .reduce(
+          (sum, adjustment) =>
+            sum +
+            Number(adjustment.amount ?? 0) *
+            (adjustment.is_tax_inclusive ? 1 : 1 + taxRateSum / 100),
+          0
+        )
+
+      const amount = computeSubscriptionDiscountAmount({
+        discount_type: discount.discount_type,
+        discount_value: discount.discount_value,
+        line_gross_total: lineGrossTotal,
+        already_discounted_total: alreadyDiscountedTotal,
+      })
 
       if (amount <= 0) {
         if (existingSubscriptionAdjustment) {
@@ -209,6 +246,7 @@ async function loadCart(
       "items.adjustments.amount",
       "items.adjustments.is_tax_inclusive",
       "items.adjustments.provider_id",
+      "items.tax_lines.rate",
       "items.variant.id",
       "items.variant.product.id",
     ],
@@ -224,8 +262,4 @@ async function loadCart(
   }
 
   return cart
-}
-
-function roundCurrency(amount: number) {
-  return Math.round(amount * 100) / 100
 }

@@ -86,9 +86,11 @@ medusaIntegrationTestRunner({
         const subscription = await createSubscriptionSeed(container, {
           reference: "SUB-REN-API-003",
           skip_next_cycle: true,
+          next_renewal_at: new Date("2026-05-07T10:00:00.000Z"),
         })
         const cycle = await createRenewalCycleSeed(container, {
           subscription_id: subscription.id,
+          scheduled_for: new Date("2026-05-07T10:00:00.000Z"),
           status: RenewalCycleStatus.SCHEDULED,
         })
 

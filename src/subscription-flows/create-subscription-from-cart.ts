@@ -1,9 +1,11 @@
 import {
+  createHook,
   createWorkflow,
   transform,
   when,
   WorkflowResponse,
 } from "@medusajs/framework/workflows-sdk"
+import { z } from "zod"
 import {
   acquireLockStep,
   completeCartWorkflow,
@@ -27,6 +29,31 @@ import { addCompleteAllowedMetadataEntryStep } from "./steps/add-complete-allowe
 
 export type CreateSubscriptionFromCartWorkflowInput =
   ValidateSubscriptionCartStepInput
+
+export const subscriptionCreatedResult = z.void().optional()
+
+export type SubscriptionCreatedHookInput = {
+  subscription_id: string
+  order_id: string
+  cart_id: string
+  customer_id: string
+}
+
+/**
+ * Typed registration surface for the runtime-only `subscriptionCreated` hook
+ * (see the note at its `createHook` call for why it is absent from the
+ * workflow's hook types).
+ */
+export type SubscriptionCreatedHook = (
+  invoke: (
+    input: SubscriptionCreatedHookInput,
+    context: { container: import("@medusajs/framework/types").MedusaContainer }
+  ) => unknown,
+  compensate?: (
+    input: unknown,
+    context: { container: import("@medusajs/framework/types").MedusaContainer }
+  ) => unknown
+) => void
 
 export const createSubscriptionFromCartWorkflow = createWorkflow(
   "create-subscription-from-cart",
@@ -109,6 +136,33 @@ export const createSubscriptionFromCartWorkflow = createWorkflow(
       createInitialRenewalCycleStep({
         subscription_id: createdSubscription.id,
       })
+
+      // Declared inside the `when` branch so it fires only when a subscription
+      // was genuinely created — never on the idempotent replay path for a cart
+      // that already has one (core does the same with `completeCartWorkflow`'s
+      // `orderCreated`). Handlers use it to react to the new subscription, e.g.
+      // capturing discount terms from the initial order.
+      //
+      // Deliberately NOT referenced in the WorkflowResponse `hooks` array:
+      // passing a branch-created hook handle there corrupts the composed flow
+      // (the first composition loses the trailing release-lock chain, and the
+      // divergent recomposition then fails WorkflowManager's duplicate check at
+      // boot). Core keeps its own branch hooks (`orderCreated` on
+      // `completeCartWorkflow`) out of the array for the same reason — the hook
+      // still registers and fires; it is just invisible in the workflow's hook
+      // types, so consumers cast (see `SubscriptionCreatedHookInput`).
+      createHook(
+        "subscriptionCreated",
+        {
+          subscription_id: createdSubscription.id,
+          order_id: orderId,
+          cart_id: validatedCart.cart_id,
+          customer_id: validatedCart.customer_id,
+        },
+        {
+          resultValidator: subscriptionCreatedResult,
+        }
+      )
 
       return createdSubscription
     })

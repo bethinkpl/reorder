@@ -5,6 +5,7 @@ import { SUBSCRIPTION_MODULE } from "../../src/modules/subscription"
 import type SubscriptionModuleService from "../../src/modules/subscription/service"
 import {
   SubscriptionPaymentContext,
+  SubscriptionPricingSnapshot,
   SubscriptionSourceSnapshot,
   SubscriptionStatus,
 } from "../../src/modules/subscription/types"
@@ -25,6 +26,7 @@ type SubscriptionSeedInput = {
   is_trial?: boolean
   payment_context?: SubscriptionPaymentContext | null
   source_snapshot?: SubscriptionSourceSnapshot
+  pricing_snapshot?: SubscriptionPricingSnapshot | null
 }
 
 export async function createAdminAuthHeaders(container: MedusaContainer) {
@@ -158,11 +160,14 @@ export async function createSubscriptionSeed(
       variant_title: "Default Variant",
       sku: "SUB-SKU-001",
     },
-    pricing_snapshot: {
-      discount_type: "percentage",
-      discount_value: 10,
-      label: "10% off",
-    },
+    pricing_snapshot:
+      input.pricing_snapshot === undefined
+        ? {
+            discount_type: "percentage",
+            discount_value: 10,
+            label: "10% off",
+          }
+        : input.pricing_snapshot,
     shipping_address: {
       first_name: "Jan",
       last_name: "Kowalski",

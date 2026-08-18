@@ -3,7 +3,9 @@ import { ContainerRegistrationKeys, Modules } from "@medusajs/framework/utils"
 import { createStep, StepResponse } from "@medusajs/framework/workflows-sdk"
 
 type LabelSubscriptionOrderAdjustmentsStepInput = {
-  order_id: string
+  // Null tolerated so renewal flows can pass their (possibly absent) generated
+  // order id without conditional wiring; the step no-ops in that case.
+  order_id: string | null
 }
 
 type OrderAdjustmentRecord = {
@@ -34,6 +36,10 @@ export const labelSubscriptionOrderAdjustmentsStep = createStep(
     input: LabelSubscriptionOrderAdjustmentsStepInput,
     { container }
   ) {
+    if (!input.order_id) {
+      return new StepResponse<void, PreviousAdjustmentCode[]>(undefined, [])
+    }
+
     const order = await loadOrder(container, input.order_id)
 
     const adjustmentsToUpdate = (order.items ?? [])

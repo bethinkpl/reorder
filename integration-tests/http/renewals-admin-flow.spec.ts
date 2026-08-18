@@ -25,6 +25,7 @@ medusaIntegrationTestRunner({
         const subscription = await createSubscriptionSeed(container, {
           reference: "SUB-REN-ADMIN-FLOW-001",
           skip_next_cycle: true,
+          next_renewal_at: new Date("2026-05-08T10:00:00.000Z"),
         })
 
         await createPlanOfferSeed(container, {
@@ -43,6 +44,7 @@ medusaIntegrationTestRunner({
 
         const cycle = await createRenewalCycleSeed(container, {
           subscription_id: subscription.id,
+          scheduled_for: new Date("2026-05-08T10:00:00.000Z"),
           approval_required: true,
           approval_status: RenewalApprovalStatus.PENDING,
         })

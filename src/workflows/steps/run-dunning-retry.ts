@@ -22,6 +22,7 @@ import {
   logDunningEvent,
 } from "../../modules/dunning/utils/observability"
 import { calculateNextRetryAt } from "../../modules/dunning/utils/retry-schedule"
+import { recordOrderCaptureTransactions } from "../utils/record-order-capture-transactions"
 import { SUBSCRIPTION_MODULE } from "../../modules/subscription"
 import type SubscriptionModuleService from "../../modules/subscription/service"
 import { type SubscriptionPaymentContext, SubscriptionStatus } from "../../modules/subscription/types"
@@ -78,6 +79,9 @@ type RetryTransitionSnapshot = {
 type OrderRecord = {
   id: string
   total?: number | string | null
+  summary?: {
+    pending_difference?: number | string | null
+  } | null
 }
 
 type PaymentSessionRecord = {
@@ -214,14 +218,23 @@ async function getNextAttemptNo(
   return Math.max(dunningCase.attempt_count, highestAttemptNo) + 1
 }
 
-async function loadOrderTotal(
+/**
+ * The order's total and the amount still owed on it.
+ *
+ * A dunning retry runs against an order an earlier attempt may already have
+ * (partly) paid, so `pending_difference` - not the gross total - is what may be
+ * collected. Passing the total for an already-paid order both double-charges
+ * and makes `createOrUpdateOrderPaymentCollectionWorkflow` throw
+ * "Amount cannot be greater than ...".
+ */
+async function loadOrderAmounts(
   container: MedusaContainer,
   id: string
-): Promise<number> {
+): Promise<{ total: number, pending: number }> {
   const query = container.resolve(ContainerRegistrationKeys.QUERY)
   const { data } = await query.graph({
     entity: "order",
-    fields: ["id", "total"],
+    fields: ["id", "total", "summary.*"],
     filters: {
       id: [id],
     },
@@ -233,7 +246,13 @@ async function loadOrderTotal(
     throw dunningErrors.notFound("Order", id)
   }
 
-  return Number(order.total ?? 0)
+  const total = Number(order.total ?? 0)
+  const pendingDifference = order.summary?.pending_difference
+
+  return {
+    total,
+    pending: pendingDifference == null ? total : Number(pendingDifference),
+  }
 }
 
 function validateRetryableCase(
@@ -409,7 +428,8 @@ function readNestedErrorCode(value: unknown): string | null {
   return null
 }
 
-async function executePaymentRetry(
+/** Exported for unit tests: covers the already-settled double-charge guard. */
+export async function executePaymentRetry(
   container: MedusaContainer,
   subscription: SubscriptionRecord,
   renewalOrderId: string
@@ -428,7 +448,7 @@ async function executePaymentRetry(
       )
     }
 
-    const total = await loadOrderTotal(container, renewalOrderId)
+    const { total, pending } = await loadOrderAmounts(container, renewalOrderId)
 
     if (total <= 0) {
       throw dunningErrors.invalidData(
@@ -436,11 +456,23 @@ async function executePaymentRetry(
       )
     }
 
+    // An earlier attempt may have captured before aborting, leaving nothing
+    // outstanding. Charging the total again would take the money twice, so treat
+    // the already-settled order as the recovery it is instead.
+    if (pending <= 0) {
+      return {
+        kind: "recovery",
+        payment_reference: null,
+        error_code: null,
+        error_message: null,
+      }
+    }
+
     const paymentCollections =
       await createOrUpdateOrderPaymentCollectionWorkflow(container).run({
         input: {
           order_id: renewalOrderId,
-          amount: total,
+          amount: pending,
         },
       })
 
@@ -484,10 +516,39 @@ async function executePaymentRetry(
       }
     }
 
-    await paymentModule.capturePayment({
-      payment_id: payment.id,
-      amount: payment.amount,
-    })
+    let captureError: unknown = null
+
+    try {
+      await paymentModule.capturePayment({
+        payment_id: payment.id,
+        amount: payment.amount,
+      })
+    } catch (error) {
+      captureError = error
+    }
+
+    // Record what the capture settled, so the next retry (and the renewal flow's
+    // reused-order guard) sees the order as paid instead of charging it again.
+    //
+    // Runs even when the capture call above failed: an auto-capturing provider
+    // has already taken the money at authorize time, and this retry's failure
+    // just schedules another one that would otherwise collect it again. The
+    // helper only writes rows for captures that exist, so it no-ops when nothing
+    // was actually captured.
+    //
+    // Not fatal: the money is already captured and the provider webhook writes
+    // the same rows later.
+    try {
+      await recordOrderCaptureTransactions(container, renewalOrderId, payment.id)
+    } catch (transactionError) {
+      container.resolve("logger").warn(
+        `Captured dunning retry payment '${payment.id}' but failed to record its order transaction on '${renewalOrderId}': ${getDunningErrorMessage(transactionError)}`
+      )
+    }
+
+    if (captureError) {
+      throw captureError
+    }
 
     return {
       kind: "recovery",

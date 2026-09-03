@@ -75,6 +75,10 @@ export {
   default as updateCancellationReasonWorkflowDefault,
 } from "./update-cancellation-reason"
 export {
+  cancelSubscriptionByCustomerWorkflow,
+  default as cancelSubscriptionByCustomerWorkflowDefault,
+} from "./cancel-subscription-by-customer"
+export {
   runDunningRetryWorkflow,
   default as runDunningRetryWorkflowDefault,
 } from "./run-dunning-retry"

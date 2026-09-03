@@ -33,6 +33,8 @@ Current pricing semantics:
 - `POST /store/customers/me/subscriptions/:id/change-address`
 - `POST /store/customers/me/subscriptions/:id/swap-product`
 - `POST /store/customers/me/subscriptions/:id/retry-payment`
+- `POST /store/customers/me/subscriptions/:id/cancellation`
+  - cancels the subscription outright, effective at the end of the paid cycle
 
 ## Design rules
 
@@ -82,6 +84,8 @@ Current pricing semantics:
 - `shipping_address`
 - `payment_status`
 - `payment_recovery`
+- `cancelled_at`
+- `cancel_effective_at`
 - `active_cancellation_case`
 
 ## 6.2 Store DTO for storefront
@@ -112,6 +116,8 @@ Current pricing semantics:
   - `variant_title`
   - `next_renewal_at`
   - `effective_next_renewal_at`
+  - `cancelled_at`
+  - `cancel_effective_at`
   - `active_cancellation_case`
 - subscription detail:
   - `id`
@@ -126,11 +132,15 @@ Current pricing semantics:
   - `shipping_address`
   - `payment_status`
   - `payment_recovery`
+  - `cancelled_at`
+  - `cancel_effective_at`
   - `active_cancellation_case`
 - action mutation response:
   - `subscription`
   - `result`
   - optional `message`
+
+Most implemented action routes return the refreshed subscription detail payload on its own. The cancellation route additionally returns `result` with `cancelled`, `already_cancelled`, and `cancel_effective_at`, so the storefront can distinguish a fresh cancellation from a repeated submit without re-deriving it.
 
 ## Fields to exclude from Store DTO
 

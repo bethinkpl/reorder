@@ -27,14 +27,25 @@ Implementation status:
 
 ## 1. Trigger definition
 
-`Cancellation & Retention` starts only when an Admin user explicitly begins a cancellation process for a subscription.
+`Cancellation & Retention` starts when an Admin user explicitly begins a cancellation process for a subscription, or when a customer cancels their own subscription from the storefront.
 
 In practical terms:
-- the trigger is a manual Admin action
+- the trigger is a deliberate human action, from either the Admin or the customer account UI
 - the action represents a conscious cancellation intent
-- the flow starts before a final cancellation is applied to the subscription
+- for the Admin entry, the flow starts before a final cancellation is applied to the subscription
+- for the customer entry, opening and finalizing the case happen in the same workflow run: the customer's request *is* the cancellation, with no operator approval and no retention offer
 
-`Cancellation & Retention` does not start automatically from system-side domain events in MVP.
+`Cancellation & Retention` does not start automatically from system-side domain events.
+
+### Customer self-service entry
+
+The storefront route `POST /store/customers/me/subscriptions/:id/cancellation` runs `cancelSubscriptionByCustomerWorkflow`, which:
+- closes any open `DunningCase` so a past-due customer stops being retried
+- opens the `CancellationCase` with `entry_context.source = "customer_self_service"`
+- finalizes it with `effective_at = "end_of_cycle"` in the same compensation boundary
+- removes the upcoming scheduled renewal cycle
+
+Retention offers are never proposed on this path.
 
 ## 2. Responsibility boundary
 
@@ -50,16 +61,17 @@ This means:
 - `Cancellation & Retention` is not a generic event bucket for subscription problems
 - the source event for `Cancellation & Retention` is an explicit Admin cancellation intent
 
-## 3. Manual Admin entry only
+## 3. Deliberate human entry only
 
-For MVP, `Cancellation & Retention` should be entered only by a manual Admin action.
+`Cancellation & Retention` should be entered only by a deliberate human action, Admin or customer.
 
-Recommended trigger sources:
-- cancellation action from the subscription list
-- cancellation action from the subscription detail page
-- any future dedicated Admin entrypoint explicitly labeled as starting cancellation handling
+Valid trigger sources:
+- cancellation action from the Admin subscription list (`entry_context.source = "subscription_list"`)
+- cancellation action from the Admin subscription detail page (`subscription_detail`)
+- customer cancellation from the storefront account UI (`customer_self_service`)
+- any future dedicated entrypoint explicitly labeled as starting cancellation handling
 
-Not valid as automatic triggers in MVP:
+Not valid as automatic triggers:
 - renewal failure by itself
 - open or terminal `DunningCase`
 - scheduler decisions
@@ -68,8 +80,8 @@ Not valid as automatic triggers in MVP:
 - churn scoring or recommendation jobs
 
 Reasoning:
-- the feature is designed as an operator workflow, not an automatic lifecycle engine
-- the process needs deliberate human input such as `reason`, notes, recommendation review, and outcome selection
+- the feature is a human-initiated workflow, not an automatic lifecycle engine
+- the process needs deliberate human input, at minimum a `reason`, which the storefront route requires as a non-empty string
 - automatic entry would mix recovery, churn analytics, and lifecycle enforcement before the domain rules are fully defined
 
 ## 4. Every cancellation intent must go through a case

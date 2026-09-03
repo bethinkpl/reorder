@@ -13,10 +13,14 @@ Returns the authenticated customer's subscriptions with storefront summary data:
 - `product_title`
 - `variant_title`
 - `next_renewal_at`
+- `cancelled_at`
+- `cancel_effective_at`
 - `active_cancellation_case`
 
 Authentication:
 - customer auth required
+
+Note that `active_cancellation_case` is only ever populated for cases left over from the removed operator-approval flow. Customer cancellations finalize immediately, so a cancelled subscription is recognised from `status` plus `cancel_effective_at`.
 
 ### `GET /store/customers/me/subscriptions/:id`
 
@@ -31,6 +35,8 @@ Returns storefront-safe subscription detail data:
 - `next_renewal_at`
 - `effective_next_renewal_at`
 - `last_renewal_at`
+- `cancelled_at`
+- `cancel_effective_at`
 - `shipping_address`
 - `payment_status`
 - `payment_provider_id`
@@ -167,10 +173,10 @@ Response:
 
 ### `POST /store/customers/me/subscriptions/:id/cancellation`
 
-Starts a cancellation case for the authenticated customer's subscription using the existing cancellation workflow.
+Cancels the authenticated customer's subscription. There is no approval step: the request opens a `CancellationCase` and finalizes it in the same workflow run.
 
 Entry context:
-- storefront customer request from the subscription list flow
+- storefront customer request, recorded on the case as `origin: "customer_cancel_intent"` and on the activity log as `source: "storefront"`
 
 Request body:
 
@@ -178,16 +184,28 @@ Request body:
 {
   "reason": "Too expensive right now",
   "reason_category": "price",
-  "notes": "Customer started cancellation from storefront"
+  "notes": "Customer cancelled from storefront"
 }
 ```
+
+Cancellation timing:
+- the subscription moves to `cancelled` immediately, and `cancel_effective_at` marks the end of the paid cycle
+- `cancel_effective_at` is `next_renewal_at` when a paid window remains, and the cancellation moment when the anchor has already passed (a past-due subscription never paid for the new cycle) or the subscription is `paused`
+- no proration and no refund is issued
+- access for the remaining paid window is enforced by the consuming application, which reads `cancel_effective_at`; the plugin only records and exposes it
+
+Side effects:
+- any open payment recovery case is closed as `unrecovered` with `recovery_reason: "subscription_cancelled_by_customer"`, so no further retries run
+- the upcoming scheduled renewal cycle is removed, so the subscription is never charged again
 
 Authentication and ownership:
 - customer auth required
 - the subscription must belong to the authenticated customer
 
 Response:
-- minimal `cancellation_case` payload with `id`, `status`, `subscription_id`, and submitted reason fields
+- refreshed subscription detail payload plus a `result` object (`cancelled`, `already_cancelled`, `cancel_effective_at`)
+- cancelling an already-cancelled subscription returns `200` and leaves the original cancellation untouched
+- route returns `409` if a payment retry is in flight, or if the subscription is otherwise not cancellable
 
 ## Auth Model
 

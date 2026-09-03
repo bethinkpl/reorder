@@ -25,6 +25,8 @@ type SubscriptionStoreListItem = {
   status: string
   created_at?: string | Date | null
   next_renewal_at: string | null
+  cancelled_at?: string | Date | null
+  cancel_effective_at?: string | Date | null
   frequency_interval: "day" | "week" | "month" | "year"
   frequency_value: number
   skip_next_cycle: boolean
@@ -133,6 +135,8 @@ export async function listStoreCustomerSubscriptions(
       "customer_id",
       "created_at",
       "next_renewal_at",
+      "cancelled_at",
+      "cancel_effective_at",
       "frequency_interval",
       "frequency_value",
       "skip_next_cycle",
@@ -191,6 +195,8 @@ export async function listStoreCustomerSubscriptions(
           frequency_value: subscription.frequency_value,
         })
       ),
+      cancelled_at: toIsoStringOrNull(subscription.cancelled_at),
+      cancel_effective_at: toIsoStringOrNull(subscription.cancel_effective_at),
       active_cancellation_case: activeCases.get(subscription.id)
         ? {
             id: activeCases.get(subscription.id)!.id,
@@ -400,6 +406,8 @@ export async function getStoreSubscriptionDetailResponse(
         "skip_next_cycle",
         "next_renewal_at",
         "last_renewal_at",
+        "cancelled_at",
+        "cancel_effective_at",
         "product_snapshot",
         "shipping_address",
         "payment_context",
@@ -456,6 +464,8 @@ export async function getStoreSubscriptionDetailResponse(
         })
       ),
       last_renewal_at: toIsoStringOrNull(subscription.last_renewal_at),
+      cancelled_at: toIsoStringOrNull(subscription.cancelled_at),
+      cancel_effective_at: toIsoStringOrNull(subscription.cancel_effective_at),
       shipping_address: subscription.shipping_address ?? null,
       payment_status: mapPaymentStatus(subscription.status, dunningCase),
       payment_provider_id:

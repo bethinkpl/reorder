@@ -12,7 +12,10 @@ import { SUBSCRIPTION_MODULE } from "../../modules/subscription"
 import type SubscriptionModuleService from "../../modules/subscription/service"
 import { SubscriptionStatus } from "../../modules/subscription/types"
 import { subscriptionErrors } from "../../modules/subscription/utils/errors"
-import { CancellationSubscriptionDisplayRecord } from "./shared-cancellation-log"
+import {
+  CancellationSubscriptionDisplayRecord,
+  type CancellationLogSource,
+} from "./shared-cancellation-log"
 
 const FINALIZABLE_CANCELLATION_CASE_STATUSES = new Set<CancellationCaseStatus>([
   CancellationCaseStatus.REQUESTED,
@@ -62,6 +65,7 @@ export type FinalizeCancellationStepInput = {
   notes?: string | null
   finalized_by?: string | null
   effective_at?: "immediately" | "end_of_cycle"
+  source?: CancellationLogSource
   metadata?: Record<string, unknown> | null
 }
 

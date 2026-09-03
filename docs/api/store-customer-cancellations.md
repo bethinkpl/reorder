@@ -190,13 +190,13 @@ Request body:
 
 Cancellation timing:
 - the subscription moves to `cancelled` immediately, and `cancel_effective_at` marks the end of the paid cycle
-- `cancel_effective_at` is `next_renewal_at` when a paid window remains, and the cancellation moment when the anchor has already passed (a past-due subscription never paid for the new cycle) or the subscription is `paused`
+- `cancel_effective_at` is `next_renewal_at` whenever that anchor is still in the future, and the cancellation moment when it has already passed (a past-due subscription never paid for the new cycle). A paused subscription keeps its preserved anchor and is treated exactly like an active one, so pausing before cancelling never costs the customer paid time.
 - no proration and no refund is issued
 - access for the remaining paid window is enforced by the consuming application, which reads `cancel_effective_at`; the plugin only records and exposes it
 
 Side effects:
 - any open payment recovery case is closed as `unrecovered` with `recovery_reason: "subscription_cancelled_by_customer"`, so no further retries run
-- the upcoming scheduled renewal cycle is removed, so the subscription is never charged again
+- the upcoming scheduled renewal cycle is removed; any historical `failed` cycle is left in place but can no longer execute, because renewal execution rejects a cancelled subscription
 
 Authentication and ownership:
 - customer auth required

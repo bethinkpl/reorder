@@ -208,16 +208,49 @@ medusaIntegrationTestRunner({
         )
       })
 
-      it("cancels a paused subscription immediately even with a future anchor", async () => {
+      it("keeps the paid window a paused subscription still has", async () => {
+        const container = getContainer()
+        const subscriptionModule =
+          container.resolve<SubscriptionModuleService>(SUBSCRIPTION_MODULE)
+
+        const pausedAnchor = daysFromNow(25)
+        const subscription = await createSubscriptionSeed(container, {
+          reference: "SUB-CUST-CANCEL-003",
+          status: SubscriptionStatus.PAUSED,
+          customer_id: CUSTOMER_ID,
+          next_renewal_at: pausedAnchor,
+        })
+
+        await cancelSubscriptionByCustomerWorkflow(container).run({
+          input: {
+            subscription_id: subscription.id,
+            reason: "No longer needed",
+            triggered_by: CUSTOMER_ID,
+          },
+        })
+
+        const updatedSubscription =
+          await subscriptionModule.retrieveSubscription(subscription.id)
+
+        expect(updatedSubscription.status).toEqual(SubscriptionStatus.CANCELLED)
+        expect(
+          updatedSubscription.cancel_effective_at?.toISOString()
+        ).toEqual(pausedAnchor.toISOString())
+        expect(
+          updatedSubscription.cancel_effective_at?.toISOString()
+        ).not.toEqual(updatedSubscription.cancelled_at?.toISOString())
+      })
+
+      it("cancels a paused subscription immediately once its anchor has passed", async () => {
         const container = getContainer()
         const subscriptionModule =
           container.resolve<SubscriptionModuleService>(SUBSCRIPTION_MODULE)
 
         const subscription = await createSubscriptionSeed(container, {
-          reference: "SUB-CUST-CANCEL-003",
+          reference: "SUB-CUST-CANCEL-010",
           status: SubscriptionStatus.PAUSED,
           customer_id: CUSTOMER_ID,
-          next_renewal_at: daysFromNow(25),
+          next_renewal_at: daysFromNow(-2),
         })
 
         await cancelSubscriptionByCustomerWorkflow(container).run({

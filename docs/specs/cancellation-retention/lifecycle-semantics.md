@@ -158,12 +158,14 @@ Recommended interpretation:
 - immediate cancellation:
   - `cancel_effective_at = now`
 - end-of-cycle cancellation:
-  - `cancel_effective_at = Subscription.next_renewal_at` at the time the cancel decision is finalized, but only when that anchor is still in the future and the subscription is not `paused`
+  - `cancel_effective_at = Subscription.next_renewal_at` at the time the cancel decision is finalized, but only when that anchor is still in the future
   - otherwise `cancel_effective_at = now`
 
-The two carve-outs matter because `next_renewal_at` can be stale:
-- a `past_due` subscription's `next_renewal_at` is the date of the renewal that *failed* (the anchor only advances on a successful renewal), so it sits in the past and the paid period has already elapsed — there is no remaining window to honour
-- a `paused` subscription keeps its anchor frozen as a billing reference, so honouring it would hand out unpaid time
+The rule is deliberately about the *anchor*, not the subscription status: whenever `next_renewal_at` is still ahead of the cancellation moment, the customer has paid through it and keeps access until then.
+
+The fallback exists because `next_renewal_at` can be stale. A `past_due` subscription's `next_renewal_at` is the date of the renewal that *failed* — the anchor only advances on a successful renewal — so it sits in the past, the paid period has already elapsed, and there is no remaining window to honour.
+
+A `paused` subscription is **not** a special case. Pause preserves `next_renewal_at` as the active billing anchor (see §3) and resume restores that same date rather than shifting it by the pause duration, so a paused subscription's anchor is a genuine paid-through date and is honoured exactly like an active one. Treating pause as immediate would confiscate paid time and would make pausing before cancelling cost the customer money.
 
 ### Entitlement
 

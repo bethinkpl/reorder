@@ -158,16 +158,11 @@ function resolveCancellationReasonCategory(
 }
 
 export function resolveCancelEffectiveAt(input: {
-  status: SubscriptionStatus
   next_renewal_at: Date | string | null
   effective_at?: "immediately" | "end_of_cycle"
   cancelled_at: Date
 }) {
   if (input.effective_at !== "end_of_cycle") {
-    return input.cancelled_at
-  }
-
-  if (input.status === SubscriptionStatus.PAUSED) {
     return input.cancelled_at
   }
 
@@ -286,7 +281,6 @@ export const finalizeCancellationStep = createStep(
     )
     const finalizedAt = new Date()
     const cancelEffectiveAt = resolveCancelEffectiveAt({
-      status: subscription.status,
       next_renewal_at: subscription.next_renewal_at,
       effective_at: input.effective_at,
       cancelled_at: finalizedAt,

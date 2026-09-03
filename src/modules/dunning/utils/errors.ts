@@ -55,6 +55,16 @@ export const dunningErrors = {
       `DunningCase '${dunningCaseId}' can't ${action} while retry is in flight`
     )
   },
+  subscriptionNotRetryable(
+    dunningCaseId: string,
+    subscriptionId: string,
+    subscriptionStatus: string
+  ) {
+    return new MedusaError(
+      MedusaError.Types.CONFLICT,
+      `DunningCase '${dunningCaseId}' targets subscription '${subscriptionId}' in status '${subscriptionStatus}' and is no longer retryable`
+    )
+  },
   invalidRetryScheduleOverride(dunningCaseId: string) {
     return new MedusaError(
       MedusaError.Types.CONFLICT,

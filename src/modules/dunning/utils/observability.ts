@@ -16,6 +16,7 @@ export type DunningFailureKind =
   | "retry_exhausted"
   | "lock_timeout"
   | "not_found"
+  | "subscription_not_retryable"
   | "unexpected_error"
 
 type DunningLogPayload = {
@@ -112,6 +113,10 @@ export function classifyDunningFailure(error: unknown): DunningFailureKind {
     return "not_found"
   }
 
+  if (message.includes("no longer retryable")) {
+    return "subscription_not_retryable"
+  }
+
   if (message.includes("can't") || message.includes("missing")) {
     return "invalid_transition"
   }
@@ -126,6 +131,7 @@ export function isAlertableDunningFailure(kind: DunningFailureKind) {
     "closed_case",
     "retry_exhausted",
     "lock_timeout",
+    "subscription_not_retryable",
   ].includes(kind)
 }
 

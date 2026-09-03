@@ -10,8 +10,6 @@ import {
   type FinalizeCancellationStepInput,
 } from "./steps/finalize-cancellation"
 import { buildCancellationFinalizedLogEvent } from "./steps/shared-cancellation-log"
-import { rebuildAnalyticsDailySnapshotsWorkflow } from "./rebuild-analytics-daily-snapshots"
-import { buildAnalyticsIncrementalRebuildInput } from "./utils/analytics-incremental"
 
 export const finalizeCancellationWorkflow = createWorkflow(
   "finalize-cancellation",
@@ -36,20 +34,6 @@ export const finalizeCancellationWorkflow = createWorkflow(
       }
     })
     const renewal_cycle = ensureNextRenewalCycleStep(ensureInput)
-    const incrementalAnalyticsInput = transform(
-      { result, input },
-      function ({ result, input }) {
-        return buildAnalyticsIncrementalRebuildInput({
-          occurred_at: result.current.finalized_at,
-          trigger_source: "finalize_cancellation",
-          correlation_id: input.metadata?.correlation_id as string | null | undefined,
-          triggered_by: input.finalized_by ?? null,
-        })
-      }
-    )
-    rebuildAnalyticsDailySnapshotsWorkflow.runAsStep({
-      input: incrementalAnalyticsInput,
-    })
     const output = transform(
       { result, renewal_cycle },
       function ({ result, renewal_cycle }) {

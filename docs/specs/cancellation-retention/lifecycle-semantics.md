@@ -208,9 +208,11 @@ Why this is preferred:
 - it simplifies Admin reads and future eligibility logic
 - it matches the general Medusa-style subscription example where future order date is removed on cancellation
 
-Clearing the anchor at finalize time is also what makes the no-further-charge guarantee unconditional: `cancelled_at` becoming non-null makes `shouldSubscriptionHaveUpcomingRenewalCycle` return false, so `ensureNextRenewalCycleStep` deletes the upcoming `SCHEDULED` cycle, and the renewal scheduler only ever discovers work from `RenewalCycle` rows. With no cycle there is nothing to execute, regardless of what any later read of the subscription looks like.
+Clearing the anchor at finalize time is part of what stops future billing: `cancelled_at` becoming non-null makes `shouldSubscriptionHaveUpcomingRenewalCycle` return false, so `ensureNextRenewalCycleStep` deletes the upcoming `SCHEDULED` cycle and never recreates one.
 
-A consequence to be aware of: because the subscription is terminal from the moment cancellation is recorded, the remaining paid window is expressed *only* by `cancel_effective_at`, and the subscription can no longer be paused, resumed, or otherwise modified. There is no undo — a customer who changes their mind subscribes again, which starts a new billing anchor.
+That alone is not the whole guarantee. `listDueRenewalCyclesForWindow` selects cycles in `scheduled` *or* `failed` status, and only `SCHEDULED` rows are deleted, so a past-due subscription's `FAILED` cycle survives cancellation and is rediscovered by the scheduler. Execution is blocked there by `validateSubscriptionEligibility`, which rejects any subscription that is not `active` or `past_due` — so the second layer, the status guard inside the renewal execution workflow, is what makes the guarantee hold in that case.
+
+A consequence to be aware of: because the subscription is terminal from the moment cancellation is recorded, the remaining paid window is expressed *only* by `cancel_effective_at`. Every lifecycle mutation rejects a `cancelled` subscription on entry, so pause, resume, frequency and address changes, swaps and skips are all refused from that point. Those guards are per-request status checks rather than locks, so a request that read the subscription *before* the cancellation landed can still complete against the stale read; the outcome is a status field that disagrees with `cancelled_at`, never an extra charge, since the renewal guards above are independent of it. There is no undo — a customer who changes their mind subscribes again, which starts a new billing anchor.
 
 ## 7. Future `RenewalCycle` semantics
 

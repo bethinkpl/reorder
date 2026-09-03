@@ -33,7 +33,7 @@ function getNestedMessage(value: unknown): string | null {
   return null
 }
 
-function mapStoreCancellationError(error: unknown) {
+export function mapStoreCancellationError(error: unknown) {
   const errorCause =
     error instanceof Error ? (error as Error & { cause?: unknown }).cause : null
   const medusaError =
@@ -72,8 +72,12 @@ function mapStoreCancellationError(error: unknown) {
   }
 
   const message = getNestedMessage(error) ?? ""
+  const normalized = message.toLowerCase()
 
-  if (message.toLowerCase().includes("failed to acquire lock")) {
+  if (
+    normalized.includes("failed to acquire lock") ||
+    normalized.includes("acquiring lock")
+  ) {
     return {
       status: 409,
       type: MedusaError.Types.CONFLICT,
@@ -97,7 +101,9 @@ export const POST = async (
   const subscription = await getOwnedSubscriptionForAction(req, subscriptionId)
   const customerId = await requireStoreCustomer(req)
 
-  if (subscription.status !== SubscriptionStatus.CANCELLED) {
+  let alreadyCancelled = subscription.status === SubscriptionStatus.CANCELLED
+
+  if (!alreadyCancelled) {
     try {
       await cancelSubscriptionByCustomerWorkflow(req.scope).run({
         input: {
@@ -105,17 +111,35 @@ export const POST = async (
           reason: req.validatedBody.reason,
           reason_category: req.validatedBody.reason_category,
           notes: req.validatedBody.notes,
-          metadata: req.validatedBody.metadata,
+          metadata: req.validatedBody.metadata
+            ? { customer_metadata: req.validatedBody.metadata }
+            : null,
           triggered_by: req.auth_context?.actor_id ?? null,
         },
       })
     } catch (error) {
       const mapped = mapStoreCancellationError(error)
 
-      return res.status(mapped.status).json({
-        type: mapped.type,
-        message: mapped.message,
-      })
+      if (mapped.status !== 409) {
+        return res.status(mapped.status).json({
+          type: mapped.type,
+          message: mapped.message,
+        })
+      }
+
+      const currentSubscription = await getOwnedSubscriptionForAction(
+        req,
+        subscriptionId
+      )
+
+      if (currentSubscription.status !== SubscriptionStatus.CANCELLED) {
+        return res.status(mapped.status).json({
+          type: mapped.type,
+          message: mapped.message,
+        })
+      }
+
+      alreadyCancelled = true
     }
   }
 
@@ -128,7 +152,7 @@ export const POST = async (
     ...response,
     result: {
       cancelled: true,
-      already_cancelled: subscription.status === SubscriptionStatus.CANCELLED,
+      already_cancelled: alreadyCancelled,
       cancel_effective_at: response.subscription.cancel_effective_at,
     },
   })

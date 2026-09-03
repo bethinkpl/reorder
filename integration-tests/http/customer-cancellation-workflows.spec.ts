@@ -1,4 +1,5 @@
 import { medusaIntegrationTestRunner } from "@medusajs/test-utils"
+import { Modules } from "@medusajs/framework/utils"
 import path from "path"
 import { ACTIVITY_LOG_MODULE } from "../../src/modules/activity-log"
 import type ActivityLogModuleService from "../../src/modules/activity-log/service"
@@ -300,6 +301,82 @@ medusaIntegrationTestRunner({
         const untouchedSubscription =
           await subscriptionModule.retrieveSubscription(subscription.id)
 
+        expect(untouchedSubscription.status).toEqual(
+          SubscriptionStatus.PAST_DUE
+        )
+        expect(untouchedSubscription.cancelled_at).toBeNull()
+      })
+
+      it("waits for a concurrent retry to release its case before closing it", async () => {
+        const container = getContainer()
+        const dunningModule =
+          container.resolve<DunningModuleService>(DUNNING_MODULE)
+        const subscriptionModule =
+          container.resolve<SubscriptionModuleService>(SUBSCRIPTION_MODULE)
+        const locking = container.resolve(Modules.LOCKING)
+
+        const subscription = await createSubscriptionSeed(container, {
+          reference: "SUB-CUST-CANCEL-009",
+          status: SubscriptionStatus.PAST_DUE,
+          customer_id: CUSTOMER_ID,
+          next_renewal_at: daysFromNow(-3),
+        })
+        const renewal = await createRenewalCycleSeed(container, {
+          subscription_id: subscription.id,
+          status: RenewalCycleStatus.FAILED,
+          scheduled_for: daysFromNow(-3),
+        })
+        const dunningCase = await createDunningCaseSeed(container, {
+          subscription_id: subscription.id,
+          renewal_cycle_id: renewal.id,
+          status: DunningCaseStatus.RETRY_SCHEDULED,
+        })
+
+        await locking.acquire(`dunning:${dunningCase.id}`, { expire: 30 })
+
+        const cancellation = cancelSubscriptionByCustomerWorkflow(
+          container
+        ).run({
+          input: {
+            subscription_id: subscription.id,
+            reason: "Please cancel",
+            triggered_by: CUSTOMER_ID,
+          },
+        })
+        const settled = cancellation.then(
+          () => "resolved",
+          () => "rejected"
+        )
+
+        await new Promise((resolve) => setTimeout(resolve, 300))
+
+        const caseWhileLocked = await dunningModule.retrieveDunningCase(
+          dunningCase.id
+        )
+
+        expect(caseWhileLocked.status).toEqual(
+          DunningCaseStatus.RETRY_SCHEDULED
+        )
+
+        await dunningModule.updateDunningCases({
+          id: dunningCase.id,
+          status: DunningCaseStatus.RETRYING,
+        } as any)
+        await locking.release(`dunning:${dunningCase.id}`)
+
+        await expect(settled).resolves.toEqual("rejected")
+        await expect(cancellation).rejects.toMatchObject({
+          message: expect.stringContaining("retry is in flight"),
+        })
+
+        const finalCase = await dunningModule.retrieveDunningCase(
+          dunningCase.id
+        )
+        const untouchedSubscription =
+          await subscriptionModule.retrieveSubscription(subscription.id)
+
+        expect(finalCase.status).toEqual(DunningCaseStatus.RETRYING)
+        expect(finalCase.closed_at).toBeNull()
         expect(untouchedSubscription.status).toEqual(
           SubscriptionStatus.PAST_DUE
         )

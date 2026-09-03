@@ -1,4 +1,6 @@
 import { createStep, StepResponse } from "@medusajs/framework/workflows-sdk"
+import { Modules } from "@medusajs/framework/utils"
+import type { MedusaContainer } from "@medusajs/framework/types"
 import { isActiveDunningCase } from "../../modules/cancellation/utils/retention-offer-policy"
 import { DUNNING_MODULE } from "../../modules/dunning"
 import type DunningModuleService from "../../modules/dunning/service"
@@ -7,6 +9,8 @@ import { dunningErrors } from "../../modules/dunning/utils/errors"
 
 export const SUBSCRIPTION_CANCELLED_RECOVERY_REASON =
   "subscription_cancelled_by_customer"
+
+const DUNNING_CASE_LOCK_TIMEOUT_SECONDS = 10
 
 type DunningCaseRecord = {
   id: string
@@ -63,27 +67,60 @@ export const closeSubscriptionDunningStep = createStep(
   ) {
     const dunningModule =
       container.resolve<DunningModuleService>(DUNNING_MODULE)
+    const locking = (container as MedusaContainer).resolve(Modules.LOCKING)
 
     const dunningCases = (await dunningModule.listDunningCases({
       subscription_id: input.subscription_id,
     } as any)) as DunningCaseRecord[]
 
-    const activeCases = dunningCases.filter((dunningCase) =>
+    const candidateCases = dunningCases.filter((dunningCase) =>
       isActiveDunningCase(dunningCase.status)
     )
 
-    const inFlightCase = activeCases.find(
-      (dunningCase) => dunningCase.status === DunningCaseStatus.RETRYING
-    )
+    const closedAt = new Date()
+    const closedCases: DunningCaseRecord[] = []
 
-    if (inFlightCase) {
-      throw dunningErrors.retryInFlightTransitionBlocked(
-        inFlightCase.id,
-        "be closed for subscription cancellation"
+    for (const candidateCase of candidateCases) {
+      await locking.execute(
+        `dunning:${candidateCase.id}`,
+        async () => {
+          const currentCase = (await dunningModule.retrieveDunningCase(
+            candidateCase.id
+          )) as DunningCaseRecord
+
+          if (!isActiveDunningCase(currentCase.status)) {
+            return
+          }
+
+          if (currentCase.status === DunningCaseStatus.RETRYING) {
+            throw dunningErrors.retryInFlightTransitionBlocked(
+              currentCase.id,
+              "be closed for subscription cancellation"
+            )
+          }
+
+          await dunningModule.updateDunningCases({
+            id: currentCase.id,
+            status: DunningCaseStatus.UNRECOVERED,
+            next_retry_at: null,
+            closed_at: closedAt,
+            recovery_reason: SUBSCRIPTION_CANCELLED_RECOVERY_REASON,
+            metadata: appendAuditMetadata(
+              currentCase.metadata,
+              input,
+              closedAt.toISOString()
+            ),
+          } as any)
+
+          closedCases.push(currentCase)
+        },
+        {
+          timeout: DUNNING_CASE_LOCK_TIMEOUT_SECONDS,
+        }
       )
     }
 
-    if (!activeCases.length) {
+    if (!closedCases.length) {
       return new StepResponse<
         CloseSubscriptionDunningStepOutput,
         CloseSubscriptionDunningCompensation
@@ -93,35 +130,18 @@ export const closeSubscriptionDunningStep = createStep(
       })
     }
 
-    const closedAt = new Date()
-
-    for (const dunningCase of activeCases) {
-      await dunningModule.updateDunningCases({
-        id: dunningCase.id,
-        status: DunningCaseStatus.UNRECOVERED,
-        next_retry_at: null,
-        closed_at: closedAt,
-        recovery_reason: SUBSCRIPTION_CANCELLED_RECOVERY_REASON,
-        metadata: appendAuditMetadata(
-          dunningCase.metadata,
-          input,
-          closedAt.toISOString()
-        ),
-      } as any)
-    }
-
     return new StepResponse<
       CloseSubscriptionDunningStepOutput,
       CloseSubscriptionDunningCompensation
     >(
       {
         subscription_id: input.subscription_id,
-        closed_dunning_case_ids: activeCases.map(
+        closed_dunning_case_ids: closedCases.map(
           (dunningCase) => dunningCase.id
         ),
       },
       {
-        previous_cases: activeCases,
+        previous_cases: closedCases,
       }
     )
   },

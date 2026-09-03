@@ -126,7 +126,7 @@ medusaIntegrationTestRunner({
         const subscriptionModule =
           container.resolve<SubscriptionModuleService>(SUBSCRIPTION_MODULE)
 
-        const nextRenewalAt = new Date("2026-04-22T09:00:00.000Z")
+        const nextRenewalAt = new Date(Date.now() + 1000 * 60 * 60 * 24 * 22)
         const subscription = await createSubscriptionSeed(container, {
           reference: "SUB-CAN-SMOKE-002",
           status: SubscriptionStatus.ACTIVE,

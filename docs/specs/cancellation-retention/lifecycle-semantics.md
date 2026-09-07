@@ -155,12 +155,23 @@ Recommended interpretation:
 
 ### Recommended timing rules
 
-For MVP:
-
 - immediate cancellation:
   - `cancel_effective_at = now`
 - end-of-cycle cancellation:
-  - `cancel_effective_at = Subscription.next_renewal_at` at the time the cancel decision is finalized
+  - `cancel_effective_at = Subscription.next_renewal_at` at the time the cancel decision is finalized, but only when that anchor is still in the future
+  - otherwise `cancel_effective_at = now`
+
+The rule is deliberately about the *anchor*, not the subscription status: whenever `next_renewal_at` is still ahead of the cancellation moment, the customer has paid through it and keeps access until then.
+
+The fallback exists because `next_renewal_at` can be stale. A `past_due` subscription's `next_renewal_at` is the date of the renewal that *failed* — the anchor only advances on a successful renewal — so it sits in the past, the paid period has already elapsed, and there is no remaining window to honour.
+
+A `paused` subscription is **not** a special case. Pause preserves `next_renewal_at` as the active billing anchor (see §3) and resume restores that same date rather than shifting it by the pause duration, so a paused subscription's anchor is a genuine paid-through date and is honoured exactly like an active one. Treating pause as immediate would confiscate paid time and would make pausing before cancelling cost the customer money.
+
+### Entitlement
+
+`cancel_effective_at` is the end of the paid window, and enforcing access up to that point is the consuming application's responsibility. Once cancellation is recorded, `Subscription.status` is `cancelled` even while the paid window is still open, so "does this customer still have access" must be answered from `cancel_effective_at`, not from `status` alone. The plugin records and exposes the timestamp (Admin and Store DTOs both carry `cancelled_at` and `cancel_effective_at`) and does not gate access itself.
+
+No proration or refund is issued on either path.
 
 This is consistent with `Renewals` semantics where `cancel_effective_at` is the guard date for whether a due renewal should still execute.
 
@@ -191,13 +202,19 @@ Why:
 
 ### When the outcome is `canceled`
 
-Recommended rule:
-- once cancellation becomes effective, `Subscription.next_renewal_at` should be cleared
+Rule:
+- `Subscription.next_renewal_at` is cleared when the cancellation is finalized, not when `cancel_effective_at` is reached
 
 Why this is preferred:
 - a cancelled subscription should not present an active next billable cycle
 - it simplifies Admin reads and future eligibility logic
 - it matches the general Medusa-style subscription example where future order date is removed on cancellation
+
+Clearing the anchor at finalize time is part of what stops future billing: `cancelled_at` becoming non-null makes `shouldSubscriptionHaveUpcomingRenewalCycle` return false, so `ensureNextRenewalCycleStep` deletes the upcoming `SCHEDULED` cycle and never recreates one.
+
+That alone is not the whole guarantee. `listDueRenewalCyclesForWindow` selects cycles in `scheduled` *or* `failed` status, and only `SCHEDULED` rows are deleted, so a past-due subscription's `FAILED` cycle survives cancellation and is rediscovered by the scheduler. Execution is blocked there by `validateSubscriptionEligibility`, which rejects any subscription that is not `active` or `past_due` — so the second layer, the status guard inside the renewal execution workflow, is what makes the guarantee hold in that case.
+
+A consequence to be aware of: because the subscription is terminal from the moment cancellation is recorded, the remaining paid window is expressed *only* by `cancel_effective_at`. Every lifecycle mutation rejects a `cancelled` subscription on entry, so pause, resume, frequency and address changes, swaps and skips are all refused from that point. Those guards are per-request status checks rather than locks, so a request that read the subscription *before* the cancellation landed can still complete against the stale read; the outcome is a status field that disagrees with `cancelled_at`, never an extra charge, since the renewal guards above are independent of it. There is no undo — a customer who changes their mind subscribes again, which starts a new billing anchor.
 
 ## 7. Future `RenewalCycle` semantics
 

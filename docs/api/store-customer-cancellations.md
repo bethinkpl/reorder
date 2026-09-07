@@ -10,13 +10,40 @@ Returns the authenticated customer's subscriptions with storefront summary data:
 - `id`
 - `reference`
 - `status`
+- `product_id`
+- `variant_id`
 - `product_title`
 - `variant_title`
+- `frequency_interval`
+- `frequency_value`
+- `started_at`
 - `next_renewal_at`
+- `effective_next_renewal_at`
+- `last_renewal_at`
+- `cancelled_at`
+- `cancel_effective_at`
+- `renewal_amount`
+- `currency_code`
+- `source_order_id`
+- `payment_status`
+- `payment_recovery`
 - `active_cancellation_case`
+
+The list carries the same payment recovery data as the detail route, resolved in bulk, so a storefront
+can render a subscription list without a request per row.
+
+`renewal_amount` is the recurring charge derived from the stored snapshots: the last billed line total
+(`source_snapshot.unit_price` x `source_snapshot.quantity`) less the plan discount held in
+`pricing_snapshot`. Renewals price the line against the live catalogue, so this value drifts if the
+catalogue price moves after the subscription started - it is a display value, not a quote. It is `null`
+when the source snapshot holds no unit price. `currency_code` comes from the originating order named by
+`metadata.source_order_id`, and is `null` when that link is missing. That order id is exposed as
+`source_order_id` so a storefront can pair subscriptions with the orders that started them.
 
 Authentication:
 - customer auth required
+
+Note that `active_cancellation_case` is only ever populated for cases left over from the removed operator-approval flow. Customer cancellations finalize immediately, so a cancelled subscription is recognised from `status` plus `cancel_effective_at`.
 
 ### `GET /store/customers/me/subscriptions/:id`
 
@@ -31,6 +58,8 @@ Returns storefront-safe subscription detail data:
 - `next_renewal_at`
 - `effective_next_renewal_at`
 - `last_renewal_at`
+- `cancelled_at`
+- `cancel_effective_at`
 - `shipping_address`
 - `payment_status`
 - `payment_provider_id`
@@ -167,10 +196,10 @@ Response:
 
 ### `POST /store/customers/me/subscriptions/:id/cancellation`
 
-Starts a cancellation case for the authenticated customer's subscription using the existing cancellation workflow.
+Cancels the authenticated customer's subscription. There is no approval step: the request opens a `CancellationCase` and finalizes it in the same workflow run.
 
 Entry context:
-- storefront customer request from the subscription list flow
+- storefront customer request, recorded on the case as `origin: "customer_cancel_intent"` and on the activity log as `source: "storefront"`
 
 Request body:
 
@@ -178,16 +207,28 @@ Request body:
 {
   "reason": "Too expensive right now",
   "reason_category": "price",
-  "notes": "Customer started cancellation from storefront"
+  "notes": "Customer cancelled from storefront"
 }
 ```
+
+Cancellation timing:
+- the subscription moves to `cancelled` immediately, and `cancel_effective_at` marks the end of the paid cycle
+- `cancel_effective_at` is `next_renewal_at` whenever that anchor is still in the future, and the cancellation moment when it has already passed (a past-due subscription never paid for the new cycle). A paused subscription keeps its preserved anchor and is treated exactly like an active one, so pausing before cancelling never costs the customer paid time.
+- no proration and no refund is issued
+- access for the remaining paid window is enforced by the consuming application, which reads `cancel_effective_at`; the plugin only records and exposes it
+
+Side effects:
+- any open payment recovery case is closed as `unrecovered` with `recovery_reason: "subscription_cancelled_by_customer"`, so no further retries run
+- the upcoming scheduled renewal cycle is removed; any historical `failed` cycle is left in place but can no longer execute, because renewal execution rejects a cancelled subscription
 
 Authentication and ownership:
 - customer auth required
 - the subscription must belong to the authenticated customer
 
 Response:
-- minimal `cancellation_case` payload with `id`, `status`, `subscription_id`, and submitted reason fields
+- refreshed subscription detail payload plus a `result` object (`cancelled`, `already_cancelled`, `cancel_effective_at`)
+- cancelling an already-cancelled subscription returns `200` and leaves the original cancellation untouched
+- route returns `409` if a payment retry is in flight, or if the subscription is otherwise not cancellable
 
 ## Auth Model
 

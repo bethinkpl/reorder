@@ -32,6 +32,7 @@ export const adminSubscriptionsMiddlewares: MiddlewareRoute[] = [
           "last_renewal_at",
           "paused_at",
           "cancelled_at",
+          "cancel_effective_at",
           "skip_next_cycle",
           "is_trial",
           "trial_ends_at",

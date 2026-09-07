@@ -12,7 +12,12 @@ import type SubscriptionModuleService from "../../modules/subscription/service"
 import { SubscriptionStatus } from "../../modules/subscription/types"
 import { subscriptionErrors } from "../../modules/subscription/utils/errors"
 import type { SubscriptionSettingsShape } from "../../modules/settings/utils/normalize-settings"
-import { CancellationSubscriptionDisplayRecord } from "./shared-cancellation-log"
+import {
+  CancellationSubscriptionDisplayRecord,
+  DEFAULT_CANCELLATION_ENTRY_SOURCE,
+  resolveCancellationCaseOrigin,
+  type CancellationEntrySource,
+} from "./shared-cancellation-log"
 import { getEffectiveSubscriptionSettings } from "../utils/subscription-settings"
 
 const ACTIVE_CANCELLATION_CASE_STATUSES = new Set<CancellationCaseStatus>([
@@ -53,7 +58,7 @@ type CancellationCaseRecord = {
 }
 
 type EntryContext = {
-  source: "subscription_list" | "subscription_detail" | "admin_manual"
+  source: CancellationEntrySource
   triggered_by?: string | null
   triggered_at?: string | Date | null
   reason?: string | null
@@ -104,7 +109,7 @@ function normalizeEntryContext(input: StartCancellationCaseStepInput) {
   }
 
   return {
-    source: input.entry_context?.source ?? "admin_manual",
+    source: input.entry_context?.source ?? DEFAULT_CANCELLATION_ENTRY_SOURCE,
     triggered_by: input.entry_context?.triggered_by ?? null,
     triggered_at: triggeredAt.toISOString(),
     reason: input.entry_context?.reason ?? input.reason ?? null,
@@ -148,7 +153,7 @@ function mergeCaseMetadata(
   const base = {
     ...(existingMetadata ?? {}),
     ...(input.metadata ?? {}),
-    origin: "admin_cancel_intent",
+    origin: resolveCancellationCaseOrigin(entryContext.source),
     entry_context: entryContext,
     ...(settings
       ? {

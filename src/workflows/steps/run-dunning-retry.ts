@@ -255,6 +255,31 @@ async function loadOrderAmounts(
   }
 }
 
+async function settleNonRetryableCase(
+  dunningModule: DunningModuleService,
+  dunningCase: DunningCaseRecord,
+  subscriptionStatus: SubscriptionStatus,
+  now: Date
+) {
+  if (subscriptionStatus === SubscriptionStatus.CANCELLED) {
+    await dunningModule.updateDunningCases({
+      id: dunningCase.id,
+      status: DunningCaseStatus.UNRECOVERED,
+      next_retry_at: null,
+      closed_at: now,
+      recovery_reason: "subscription_not_retryable",
+    } as any)
+
+    return
+  }
+
+  await dunningModule.updateDunningCases({
+    id: dunningCase.id,
+    status: DunningCaseStatus.AWAITING_MANUAL_RESOLUTION,
+    next_retry_at: null,
+  } as any)
+}
+
 function validateRetryableCase(
   dunningCase: DunningCaseRecord,
   now: Date,
@@ -632,9 +657,16 @@ export const runDunningRetryStep = createStep(
         subscription.status !== SubscriptionStatus.PAST_DUE &&
         subscription.status !== SubscriptionStatus.ACTIVE
       ) {
-        throw subscriptionErrors.invalidState(
+        await settleNonRetryableCase(
+          dunningModule,
+          dunningCase,
+          subscription.status,
+          now
+        )
+
+        throw dunningErrors.subscriptionNotRetryable(
+          dunningCase.id,
           subscription.id,
-          "run dunning retry",
           subscription.status
         )
       }

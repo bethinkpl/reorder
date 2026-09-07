@@ -12,7 +12,10 @@ import { SUBSCRIPTION_MODULE } from "../../modules/subscription"
 import type SubscriptionModuleService from "../../modules/subscription/service"
 import { SubscriptionStatus } from "../../modules/subscription/types"
 import { subscriptionErrors } from "../../modules/subscription/utils/errors"
-import { CancellationSubscriptionDisplayRecord } from "./shared-cancellation-log"
+import {
+  CancellationSubscriptionDisplayRecord,
+  type CancellationLogSource,
+} from "./shared-cancellation-log"
 
 const FINALIZABLE_CANCELLATION_CASE_STATUSES = new Set<CancellationCaseStatus>([
   CancellationCaseStatus.REQUESTED,
@@ -45,6 +48,7 @@ type SubscriptionRecord = {
   next_renewal_at: Date | null
   cancelled_at: Date | null
   cancel_effective_at: Date | null
+  skip_next_cycle: boolean
   customer_snapshot: {
     full_name?: string | null
   } | null
@@ -62,6 +66,7 @@ export type FinalizeCancellationStepInput = {
   notes?: string | null
   finalized_by?: string | null
   effective_at?: "immediately" | "end_of_cycle"
+  source?: CancellationLogSource
   metadata?: Record<string, unknown> | null
 }
 
@@ -152,16 +157,29 @@ function resolveCancellationReasonCategory(
   return input.reason_category ?? cancellationCase.reason_category ?? null
 }
 
-function resolveCancelEffectiveAt(
-  subscription: SubscriptionRecord,
-  effectiveAt: "immediately" | "end_of_cycle" | undefined,
-  cancelledAt: Date
-) {
-  if (effectiveAt === "end_of_cycle" && subscription.next_renewal_at) {
-    return subscription.next_renewal_at
+export function resolveCancelEffectiveAt(input: {
+  next_renewal_at: Date | string | null
+  effective_at?: "immediately" | "end_of_cycle"
+  cancelled_at: Date
+}) {
+  if (input.effective_at !== "end_of_cycle") {
+    return input.cancelled_at
   }
 
-  return cancelledAt
+  if (!input.next_renewal_at) {
+    return input.cancelled_at
+  }
+
+  const nextRenewalAt = new Date(input.next_renewal_at)
+
+  if (
+    Number.isNaN(nextRenewalAt.getTime()) ||
+    nextRenewalAt.getTime() <= input.cancelled_at.getTime()
+  ) {
+    return input.cancelled_at
+  }
+
+  return nextRenewalAt
 }
 
 function buildSubscriptionCancellationMetadata(
@@ -262,11 +280,11 @@ export const finalizeCancellationStep = createStep(
       input
     )
     const finalizedAt = new Date()
-    const cancelEffectiveAt = resolveCancelEffectiveAt(
-      subscription,
-      input.effective_at,
-      finalizedAt
-    )
+    const cancelEffectiveAt = resolveCancelEffectiveAt({
+      next_renewal_at: subscription.next_renewal_at,
+      effective_at: input.effective_at,
+      cancelled_at: finalizedAt,
+    })
 
     await subscriptionModule.updateSubscriptions({
       id: subscription.id,
@@ -274,6 +292,7 @@ export const finalizeCancellationStep = createStep(
       cancelled_at: finalizedAt,
       cancel_effective_at: cancelEffectiveAt,
       next_renewal_at: null,
+      skip_next_cycle: false,
       metadata: buildSubscriptionCancellationMetadata(
         subscription,
         input,

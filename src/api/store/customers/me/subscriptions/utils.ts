@@ -11,6 +11,10 @@ import {
   SubscriptionStatus,
 } from "../../../../../modules/subscription/types"
 import { getEffectiveNextRenewalAt } from "../../../../../modules/subscription/utils/effective-next-renewal"
+import {
+  computeSubscriptionDiscountAmount,
+  roundCurrency,
+} from "../../../../../workflows/utils/subscription-discount"
 import type { FrequencyInterval } from "../../../../../common/types/frequency-interval"
 
 const ACTIVE_CANCELLATION_STATUSES = [
@@ -23,8 +27,12 @@ type SubscriptionStoreListItem = {
   id: string
   reference: string
   status: string
+  product_id?: string | null
+  variant_id?: string | null
   created_at?: string | Date | null
   next_renewal_at: string | null
+  last_renewal_at?: string | Date | null
+  started_at?: string | Date | null
   cancelled_at?: string | Date | null
   cancel_effective_at?: string | Date | null
   frequency_interval: "day" | "week" | "month" | "year"
@@ -34,6 +42,22 @@ type SubscriptionStoreListItem = {
     product_title?: string | null
     variant_title?: string | null
   } | null
+  source_snapshot?: {
+    unit_price?: number | null
+    quantity?: number | null
+  } | null
+  pricing_snapshot?: {
+    discount_type?: "percentage" | "fixed" | null
+    discount_value?: number | null
+  } | null
+  metadata?: {
+    source_order_id?: string | null
+  } | null
+}
+
+type SourceOrderRecord = {
+  id: string
+  currency_code: string | null
 }
 
 type ActiveCancellationRecord = {
@@ -133,14 +157,21 @@ export async function listStoreCustomerSubscriptions(
       "reference",
       "status",
       "customer_id",
+      "product_id",
+      "variant_id",
       "created_at",
       "next_renewal_at",
+      "last_renewal_at",
+      "started_at",
       "cancelled_at",
       "cancel_effective_at",
       "frequency_interval",
       "frequency_value",
       "skip_next_cycle",
       "product_snapshot",
+      "source_snapshot",
+      "pricing_snapshot",
+      "metadata",
     ],
     filters: {
       customer_id: customerId,
@@ -177,33 +208,73 @@ export async function listStoreCustomerSubscriptions(
     }
   }
 
-  return {
-    subscriptions: subscriptions.map((subscription) => ({
-      id: subscription.id,
-      reference: subscription.reference,
-      status: subscription.status,
-      created_at: toIsoStringOrNull(subscription.created_at),
-      product_title: subscription.product_snapshot?.product_title ?? null,
-      variant_title: subscription.product_snapshot?.variant_title ?? null,
-      next_renewal_at: toIsoStringOrNull(subscription.next_renewal_at),
-      effective_next_renewal_at: toIsoStringOrNull(
-        getEffectiveNextRenewalAt({
-          next_renewal_at: subscription.next_renewal_at,
-          skip_next_cycle: subscription.skip_next_cycle,
-          frequency_interval:
-            subscription.frequency_interval as FrequencyInterval,
-          frequency_value: subscription.frequency_value,
-        })
+  const dunningCases = await getDunningCasesForSubscriptions(
+    query,
+    subscriptions.map((subscription) => subscription.id)
+  )
+  const latestAttempts = await getLatestDunningAttempts(
+    query,
+    [...dunningCases.values()].map((dunningCase) => dunningCase.id)
+  )
+  const sourceOrderCurrencies = await getSourceOrderCurrencies(
+    query,
+    [
+      ...new Set(
+        subscriptions
+          .map((subscription) => subscription.metadata?.source_order_id)
+          .filter((orderId): orderId is string => Boolean(orderId))
       ),
-      cancelled_at: toIsoStringOrNull(subscription.cancelled_at),
-      cancel_effective_at: toIsoStringOrNull(subscription.cancel_effective_at),
-      active_cancellation_case: activeCases.get(subscription.id)
-        ? {
-            id: activeCases.get(subscription.id)!.id,
-            status: activeCases.get(subscription.id)!.status,
-          }
-        : null,
-    })),
+    ]
+  )
+
+  return {
+    subscriptions: subscriptions.map((subscription) => {
+      const dunningCase = dunningCases.get(subscription.id) ?? null
+      const latestAttempt = dunningCase
+        ? latestAttempts.get(dunningCase.id) ?? null
+        : null
+      const sourceOrderId = subscription.metadata?.source_order_id ?? null
+
+      return {
+        id: subscription.id,
+        reference: subscription.reference,
+        status: subscription.status,
+        created_at: toIsoStringOrNull(subscription.created_at),
+        product_id: subscription.product_id ?? null,
+        variant_id: subscription.variant_id ?? null,
+        product_title: subscription.product_snapshot?.product_title ?? null,
+        variant_title: subscription.product_snapshot?.variant_title ?? null,
+        frequency_interval: subscription.frequency_interval,
+        frequency_value: subscription.frequency_value,
+        started_at: toIsoStringOrNull(subscription.started_at),
+        next_renewal_at: toIsoStringOrNull(subscription.next_renewal_at),
+        effective_next_renewal_at: toIsoStringOrNull(
+          getEffectiveNextRenewalAt({
+            next_renewal_at: subscription.next_renewal_at,
+            skip_next_cycle: subscription.skip_next_cycle,
+            frequency_interval:
+              subscription.frequency_interval as FrequencyInterval,
+            frequency_value: subscription.frequency_value,
+          })
+        ),
+        last_renewal_at: toIsoStringOrNull(subscription.last_renewal_at),
+        cancelled_at: toIsoStringOrNull(subscription.cancelled_at),
+        cancel_effective_at: toIsoStringOrNull(subscription.cancel_effective_at),
+        renewal_amount: resolveRenewalAmount(subscription),
+        currency_code: sourceOrderId
+          ? sourceOrderCurrencies.get(sourceOrderId) ?? null
+          : null,
+        source_order_id: sourceOrderId,
+        payment_status: mapPaymentStatus(subscription.status, dunningCase),
+        payment_recovery: mapPaymentRecovery(dunningCase, latestAttempt),
+        active_cancellation_case: activeCases.get(subscription.id)
+          ? {
+              id: activeCases.get(subscription.id)!.id,
+              status: activeCases.get(subscription.id)!.status,
+            }
+          : null,
+      }
+    }),
   }
 }
 
@@ -343,12 +414,7 @@ async function getSubscriptionDunningCase(
     ],
     filters: {
       subscription_id: [subscriptionId],
-      status: [
-        DunningCaseStatus.OPEN,
-        DunningCaseStatus.RETRY_SCHEDULED,
-        DunningCaseStatus.RETRYING,
-        DunningCaseStatus.AWAITING_MANUAL_RESOLUTION,
-      ],
+      status: [...ACTIVE_DUNNING_STATUSES],
     },
   })
 
@@ -381,6 +447,139 @@ async function getLatestDunningAttempt(
   const latest = attempts.sort((left, right) => right.attempt_no - left.attempt_no)[0]
 
   return latest ?? null
+}
+
+const ACTIVE_DUNNING_STATUSES = [
+  DunningCaseStatus.OPEN,
+  DunningCaseStatus.RETRY_SCHEDULED,
+  DunningCaseStatus.RETRYING,
+  DunningCaseStatus.AWAITING_MANUAL_RESOLUTION,
+] as const
+
+async function getDunningCasesForSubscriptions(
+  query: any,
+  subscriptionIds: string[]
+) {
+  const bySubscription = new Map<string, DunningCaseRecord>()
+
+  if (!subscriptionIds.length) {
+    return bySubscription
+  }
+
+  const { data } = await query.graph({
+    entity: "dunning_case",
+    fields: [
+      "id",
+      "subscription_id",
+      "status",
+      "attempt_count",
+      "max_attempts",
+      "next_retry_at",
+      "last_payment_error_code",
+      "last_payment_error_message",
+    ],
+    filters: {
+      subscription_id: subscriptionIds,
+      status: [...ACTIVE_DUNNING_STATUSES],
+    },
+  })
+
+  for (const record of (data as DunningCaseRecord[]) ?? []) {
+    if (!bySubscription.has(record.subscription_id)) {
+      bySubscription.set(record.subscription_id, record)
+    }
+  }
+
+  return bySubscription
+}
+
+async function getLatestDunningAttempts(query: any, dunningCaseIds: string[]) {
+  const byCase = new Map<string, DunningAttemptRecord>()
+
+  if (!dunningCaseIds.length) {
+    return byCase
+  }
+
+  const { data } = await query.graph({
+    entity: "dunning_attempt",
+    fields: [
+      "id",
+      "dunning_case_id",
+      "attempt_no",
+      "status",
+      "error_code",
+      "error_message",
+      "finished_at",
+    ],
+    filters: {
+      dunning_case_id: dunningCaseIds,
+    },
+  })
+
+  for (const record of (data as DunningAttemptRecord[]) ?? []) {
+    const current = byCase.get(record.dunning_case_id)
+
+    if (!current || record.attempt_no > current.attempt_no) {
+      byCase.set(record.dunning_case_id, record)
+    }
+  }
+
+  return byCase
+}
+
+async function getSourceOrderCurrencies(query: any, orderIds: string[]) {
+  const byOrder = new Map<string, string | null>()
+
+  if (!orderIds.length) {
+    return byOrder
+  }
+
+  const { data } = await query.graph({
+    entity: "order",
+    fields: ["id", "currency_code"],
+    filters: {
+      id: orderIds,
+    },
+  })
+
+  for (const record of (data as SourceOrderRecord[]) ?? []) {
+    byOrder.set(record.id, record.currency_code ?? null)
+  }
+
+  return byOrder
+}
+
+/**
+ * The recurring charge as far as the stored snapshots can tell: the line total the customer was last
+ * billed, less the plan discount that renewals re-apply. Renewals price the line against the live
+ * catalogue, so this drifts if the catalogue price moves — it is a display value, not a quote.
+ */
+export function resolveRenewalAmount(subscription: SubscriptionStoreListItem) {
+  const unitPrice = Number(subscription.source_snapshot?.unit_price ?? Number.NaN)
+
+  if (!Number.isFinite(unitPrice)) {
+    return null
+  }
+
+  const quantity = Number(subscription.source_snapshot?.quantity ?? 1)
+  const lineGrossTotal = roundCurrency(
+    unitPrice * (Number.isFinite(quantity) && quantity > 0 ? quantity : 1)
+  )
+
+  const discountType = subscription.pricing_snapshot?.discount_type
+  const discountValue = Number(subscription.pricing_snapshot?.discount_value ?? 0)
+
+  if (!discountType || !Number.isFinite(discountValue) || discountValue <= 0) {
+    return lineGrossTotal
+  }
+
+  const discount = computeSubscriptionDiscountAmount({
+    discount_type: discountType,
+    discount_value: discountValue,
+    line_gross_total: lineGrossTotal,
+  })
+
+  return roundCurrency(lineGrossTotal - discount)
 }
 
 export async function getStoreSubscriptionDetailResponse(

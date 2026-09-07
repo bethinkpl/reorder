@@ -10,12 +10,35 @@ Returns the authenticated customer's subscriptions with storefront summary data:
 - `id`
 - `reference`
 - `status`
+- `product_id`
+- `variant_id`
 - `product_title`
 - `variant_title`
+- `frequency_interval`
+- `frequency_value`
+- `started_at`
 - `next_renewal_at`
+- `effective_next_renewal_at`
+- `last_renewal_at`
 - `cancelled_at`
 - `cancel_effective_at`
+- `renewal_amount`
+- `currency_code`
+- `source_order_id`
+- `payment_status`
+- `payment_recovery`
 - `active_cancellation_case`
+
+The list carries the same payment recovery data as the detail route, resolved in bulk, so a storefront
+can render a subscription list without a request per row.
+
+`renewal_amount` is the recurring charge derived from the stored snapshots: the last billed line total
+(`source_snapshot.unit_price` x `source_snapshot.quantity`) less the plan discount held in
+`pricing_snapshot`. Renewals price the line against the live catalogue, so this value drifts if the
+catalogue price moves after the subscription started - it is a display value, not a quote. It is `null`
+when the source snapshot holds no unit price. `currency_code` comes from the originating order named by
+`metadata.source_order_id`, and is `null` when that link is missing. That order id is exposed as
+`source_order_id` so a storefront can pair subscriptions with the orders that started them.
 
 Authentication:
 - customer auth required

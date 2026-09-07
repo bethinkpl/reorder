@@ -113,11 +113,22 @@ Current pricing semantics:
   - `reference`
   - `status`
   - `product_title`
+  - `product_id`
+  - `variant_id`
   - `variant_title`
+  - `frequency_interval`
+  - `frequency_value`
+  - `started_at`
   - `next_renewal_at`
   - `effective_next_renewal_at`
+  - `last_renewal_at`
   - `cancelled_at`
   - `cancel_effective_at`
+  - `renewal_amount`
+  - `currency_code`
+  - `source_order_id`
+  - `payment_status`
+  - `payment_recovery`
   - `active_cancellation_case`
 - subscription detail:
   - `id`

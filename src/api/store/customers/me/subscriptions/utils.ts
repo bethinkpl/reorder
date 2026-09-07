@@ -21,7 +21,7 @@ const ACTIVE_CANCELLATION_STATUSES = [
   CancellationCaseStatus.REQUESTED,
   CancellationCaseStatus.EVALUATING_RETENTION,
   CancellationCaseStatus.RETENTION_OFFERED,
-] as const
+]
 
 type SubscriptionStoreListItem = {
   id: string
@@ -196,7 +196,7 @@ export async function listStoreCustomerSubscriptions(
     fields: ["id", "subscription_id", "status"],
     filters: {
       subscription_id: subscriptions.map((subscription) => subscription.id),
-      status: [...ACTIVE_CANCELLATION_STATUSES],
+      status: ACTIVE_CANCELLATION_STATUSES,
     },
   })
 
@@ -377,7 +377,7 @@ async function getActiveCancellationCase(
     fields: ["id", "subscription_id", "status"],
     filters: {
       subscription_id: [subscriptionId],
-      status: [...ACTIVE_CANCELLATION_STATUSES],
+      status: ACTIVE_CANCELLATION_STATUSES,
     },
     pagination: {
       take: 1,
@@ -414,7 +414,7 @@ async function getSubscriptionDunningCase(
     ],
     filters: {
       subscription_id: [subscriptionId],
-      status: [...ACTIVE_DUNNING_STATUSES],
+      status: ACTIVE_DUNNING_STATUSES,
     },
   })
 
@@ -454,7 +454,7 @@ const ACTIVE_DUNNING_STATUSES = [
   DunningCaseStatus.RETRY_SCHEDULED,
   DunningCaseStatus.RETRYING,
   DunningCaseStatus.AWAITING_MANUAL_RESOLUTION,
-] as const
+]
 
 async function getDunningCasesForSubscriptions(
   query: any,
@@ -480,7 +480,7 @@ async function getDunningCasesForSubscriptions(
     ],
     filters: {
       subscription_id: subscriptionIds,
-      status: [...ACTIVE_DUNNING_STATUSES],
+      status: ACTIVE_DUNNING_STATUSES,
     },
   })
 
@@ -553,6 +553,9 @@ async function getSourceOrderCurrencies(query: any, orderIds: string[]) {
  * The recurring charge as far as the stored snapshots can tell: the line total the customer was last
  * billed, less the plan discount that renewals re-apply. Renewals price the line against the live
  * catalogue, so this drifts if the catalogue price moves — it is a display value, not a quote.
+ *
+ * TODO: persist this on the subscription (e.g. `next_renewal_amount`) so the store reads an exact
+ * figure written by the renewal pricing instead of recomputing it from snapshots.
  */
 export function resolveRenewalAmount(subscription: SubscriptionStoreListItem) {
   const unitPrice = Number(subscription.source_snapshot?.unit_price ?? Number.NaN)

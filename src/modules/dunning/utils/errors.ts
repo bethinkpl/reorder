@@ -65,6 +65,12 @@ export const dunningErrors = {
       `DunningCase '${dunningCaseId}' targets subscription '${subscriptionId}' in status '${subscriptionStatus}' and is no longer retryable`
     )
   },
+  noPaymentMethod(dunningCaseId: string, subscriptionId: string) {
+    return new MedusaError(
+      MedusaError.Types.CONFLICT,
+      `DunningCase '${dunningCaseId}' targets subscription '${subscriptionId}' which has no saved payment method to charge`
+    )
+  },
   invalidRetryScheduleOverride(dunningCaseId: string) {
     return new MedusaError(
       MedusaError.Types.CONFLICT,

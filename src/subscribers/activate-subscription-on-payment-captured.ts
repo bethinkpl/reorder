@@ -1,10 +1,16 @@
 import type { SubscriberArgs, SubscriberConfig } from "@medusajs/framework"
-import type { IPaymentModuleService, MedusaContainer } from "@medusajs/framework/types"
-import { ContainerRegistrationKeys, Modules, PaymentEvents } from "@medusajs/framework/utils"
+import type { MedusaContainer } from "@medusajs/framework/types"
+import { ContainerRegistrationKeys, PaymentEvents } from "@medusajs/framework/utils"
 import { SUBSCRIPTION_MODULE } from "../modules/subscription"
 import type SubscriptionModuleService from "../modules/subscription/service"
-import { type SubscriptionPaymentContext, SubscriptionStatus } from "../modules/subscription/types"
+import {
+  type SubscriptionPaymentContext,
+  SubscriptionStatus,
+  TERMINAL_SUBSCRIPTION_STATUSES,
+} from "../modules/subscription/types"
 import { findSubscriptionIdForPaymentCollection } from "../modules/subscription/utils/find-subscription-for-payment"
+import { resolveLatestSavedPaymentMethod } from "../modules/subscription/utils/resolve-captured-payment-method"
+import { ensureNextRenewalCycleWorkflow } from "../workflows/ensure-next-renewal-cycle"
 
 type PaymentRecord = {
   id: string
@@ -16,16 +22,6 @@ type SubscriptionRecord = {
   customer_id: string
   status: SubscriptionStatus
   payment_context: SubscriptionPaymentContext | null
-}
-
-type CustomerAccountHolderRecord = {
-  account_holders?:
-    | {
-      id: string
-      provider_id: string
-      data?: Record<string, unknown> | null
-    }[]
-    | null
 }
 
 export default async function activateSubscriptionOnPaymentCapturedHandler({
@@ -80,6 +76,14 @@ export async function activateSubscriptionOnPaymentCaptured(
       id: subscription.id,
       status: SubscriptionStatus.ACTIVE,
     })
+
+    await ensureNextRenewalCycleWorkflow(container).run({
+      input: { subscription_id: subscription.id },
+    })
+  }
+
+  if (TERMINAL_SUBSCRIPTION_STATUSES.includes(subscription.status)) {
+    return
   }
 
   const paymentContext = subscription.payment_context
@@ -88,47 +92,17 @@ export async function activateSubscriptionOnPaymentCaptured(
     return
   }
 
-  const { data: customers } = await query.graph({
-    entity: "customer",
-    fields: [
-      "id",
-      "account_holders.id",
-      "account_holders.provider_id",
-      "account_holders.data",
-    ],
-    filters: { id: subscription.customer_id },
-  })
-  const accountHolder = (customers as CustomerAccountHolderRecord[])[0]?.account_holders?.find(
-    (entry) => entry.provider_id === providerId
-  )
-  if (!accountHolder?.id) {
-    return
-  }
-
-  const paymentModule = container.resolve<IPaymentModuleService>(Modules.PAYMENT)
-  const paymentMethods = await paymentModule.listPaymentMethods({
+  const resolved = await resolveLatestSavedPaymentMethod(container, {
+    customer_id: subscription.customer_id,
     provider_id: providerId,
-    context: {
-      account_holder: {
-        ...accountHolder,
-        data: accountHolder.data ?? {},
-      },
-    },
   })
-  const latest = paymentMethods.slice().sort((left, right) => {
-    const leftCreated = Number(left.data?.created) || 0
-    const rightCreated = Number(right.data?.created) || 0
-
-    return rightCreated - leftCreated
-  })[0]
-  const paymentMethodId = latest?.id ?? null
-  if (!paymentMethodId) {
+  if (!resolved) {
     return
   }
 
   if (
-    paymentContext?.payment_method_id === paymentMethodId &&
-    paymentContext?.account_holder_id === accountHolder.id
+    paymentContext?.payment_method_id === resolved.payment_method_id &&
+    paymentContext?.account_holder_id === resolved.account_holder_id
   ) {
     return
   }
@@ -137,8 +111,8 @@ export async function activateSubscriptionOnPaymentCaptured(
     id: subscription.id,
     payment_context: {
       payment_provider_id: providerId,
-      account_holder_id: accountHolder.id,
-      payment_method_id: paymentMethodId,
+      account_holder_id: resolved.account_holder_id,
+      payment_method_id: resolved.payment_method_id,
     } satisfies SubscriptionPaymentContext,
   })
 }

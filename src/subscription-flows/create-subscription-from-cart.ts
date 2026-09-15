@@ -14,6 +14,7 @@ import {
   useQueryGraphStep,
 } from "@medusajs/medusa/core-flows"
 import { syncSubscriptionCartPricingStep } from "../workflows/steps/sync-subscription-cart-pricing"
+import { activateSubscriptionIfAlreadyPaidStep } from "../workflows/steps/activate-subscription-if-already-paid"
 import { createInitialRenewalCycleStep } from "../workflows/steps/create-initial-renewal-cycle"
 import { labelSubscriptionOrderAdjustmentsStep } from "../workflows/steps/label-subscription-order-adjustments"
 import {
@@ -131,6 +132,11 @@ export const createSubscriptionFromCartWorkflow = createWorkflow(
         order_id: orderId,
       }).config({
         name: "create-subscription-commerce-links",
+      })
+
+      activateSubscriptionIfAlreadyPaidStep({
+        subscription_id: createdSubscription.id,
+        cart_id: validatedCart.cart_id,
       })
 
       createInitialRenewalCycleStep({

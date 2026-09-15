@@ -4,6 +4,17 @@ import { SUBSCRIPTION_MODULE } from "../../modules/subscription"
 import { SubscriptionStatus } from "../../modules/subscription/types"
 import { activateSubscriptionOnPaymentCaptured } from "../activate-subscription-on-payment-captured"
 
+const ensureNextRenewalCycleRun = jest.fn(
+  async (_input: { input: { subscription_id: string } }) => ({ result: {} })
+)
+
+jest.mock("../../workflows/ensure-next-renewal-cycle", () => ({
+  ensureNextRenewalCycleWorkflow: () => ({
+    run: (input: { input: { subscription_id: string } }) =>
+      ensureNextRenewalCycleRun(input),
+  }),
+}))
+
 type Staged = Record<string, unknown[]>
 
 type UpdateCall = { id: string, status?: unknown, payment_context?: unknown }
@@ -85,14 +96,15 @@ function buildContainer(options: {
 }
 
 describe("activateSubscriptionOnPaymentCaptured", () => {
+  beforeEach(() => {
+    ensureNextRenewalCycleRun.mockClear()
+  })
+
   it("activates the subscription and writes the latest saved method back onto it", async () => {
     const captured: UpdateCall[] = []
     const container = buildContainer({
       staged: defaultStaged(),
-      paymentMethods: [
-        { id: "pm_new", data: { created: 200 } },
-        { id: "pm_old", data: { created: 100 } },
-      ],
+      paymentMethods: [{ id: "pm_new", data: { created: 200 } }],
       captured,
     })
 
@@ -139,6 +151,22 @@ describe("activateSubscriptionOnPaymentCaptured", () => {
     expect(captured).toEqual([activationCall])
   })
 
+  it("schedules the first renewal cycle when it activates the subscription", async () => {
+    const captured: UpdateCall[] = []
+    const container = buildContainer({
+      staged: defaultStaged(),
+      paymentMethods: [{ id: "pm_new", data: { created: 200 } }],
+      captured,
+    })
+
+    await activateSubscriptionOnPaymentCaptured(container, "pay_1")
+
+    expect(ensureNextRenewalCycleRun).toHaveBeenCalledTimes(1)
+    expect(ensureNextRenewalCycleRun).toHaveBeenCalledWith({
+      input: { subscription_id: "sub_1" },
+    })
+  })
+
   it("leaves an already active subscription's status alone", async () => {
     const captured: UpdateCall[] = []
     const staged = defaultStaged()
@@ -161,6 +189,7 @@ describe("activateSubscriptionOnPaymentCaptured", () => {
         },
       },
     ])
+    expect(ensureNextRenewalCycleRun).not.toHaveBeenCalled()
   })
 
   it("does not resurrect a cancelled subscription", async () => {
@@ -169,7 +198,7 @@ describe("activateSubscriptionOnPaymentCaptured", () => {
     stagedSubscription(staged).status = SubscriptionStatus.CANCELLED
     const container = buildContainer({
       staged,
-      paymentMethods: [],
+      paymentMethods: [{ id: "pm_new", data: { created: 200 } }],
       captured,
     })
 
@@ -204,10 +233,7 @@ describe("activateSubscriptionOnPaymentCaptured", () => {
     }
     const container = buildContainer({
       staged,
-      paymentMethods: [
-        { id: "pm_new", data: { created: 200 } },
-        { id: "pm_old", data: { created: 100 } },
-      ],
+      paymentMethods: [{ id: "pm_new", data: { created: 200 } }],
       captured,
     })
 

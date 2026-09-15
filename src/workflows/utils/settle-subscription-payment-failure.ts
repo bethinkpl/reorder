@@ -6,6 +6,9 @@ import {
   CancellationFinalOutcome,
   CancellationReasonCategory,
 } from "../../modules/cancellation/types"
+import { RENEWAL_MODULE } from "../../modules/renewal"
+import type RenewalModuleService from "../../modules/renewal/service"
+import { RenewalCycleStatus } from "../../modules/renewal/types"
 import { SUBSCRIPTION_MODULE } from "../../modules/subscription"
 import type SubscriptionModuleService from "../../modules/subscription/service"
 import { SubscriptionStatus, TERMINAL_SUBSCRIPTION_STATUSES } from "../../modules/subscription/types"
@@ -29,6 +32,7 @@ type CancellationCaseRecord = {
   id: string
   subscription_id: string
   status: CancellationCaseStatus
+  metadata: Record<string, unknown> | null
 }
 
 const OPEN_CANCELLATION_STATUSES = [
@@ -68,6 +72,8 @@ export async function settleSubscriptionPaymentFailure(
     },
   })
 
+  await deleteScheduledRenewalCycles(container, subscription.id)
+
   await recordInvoluntaryChurn(container, {
     subscription_id: subscription.id,
     dunning_case_id: input.dunning_case_id,
@@ -76,6 +82,27 @@ export async function settleSubscriptionPaymentFailure(
   })
 
   return SubscriptionStatus.PAYMENT_FAILED
+}
+
+async function deleteScheduledRenewalCycles(
+  container: MedusaContainer,
+  subscriptionId: string
+) {
+  const renewalModule = container.resolve<RenewalModuleService>(RENEWAL_MODULE)
+
+  const cycles = (await renewalModule.listRenewalCycles({
+    subscription_id: subscriptionId,
+  })) as { id: string, status: RenewalCycleStatus }[]
+
+  const scheduled = cycles.filter(
+    (cycle) => cycle.status === RenewalCycleStatus.SCHEDULED
+  )
+
+  if (!scheduled.length) {
+    return
+  }
+
+  await renewalModule.deleteRenewalCycles(scheduled.map((cycle) => cycle.id))
 }
 
 async function recordInvoluntaryChurn(
@@ -111,7 +138,10 @@ async function recordInvoluntaryChurn(
       reason_category: CancellationReasonCategory.BILLING,
       finalized_at: input.settled_at,
       cancellation_effective_at: input.settled_at,
-      metadata,
+      metadata: {
+        ...(openCase.metadata ?? {}),
+        ...metadata,
+      },
     } as any)
 
     return

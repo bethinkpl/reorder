@@ -64,24 +64,12 @@ async function processCase(
   } catch (error) {
     const message = getDunningErrorMessage(error)
     const failureKind = classifyDunningFailure(error)
-    const level =
-      failureKind === "already_retrying" ||
-      failureKind === "not_due" ||
-      failureKind === "closed_case" ||
-      failureKind === "retry_exhausted"
-        ? "warn"
-        : "error"
+    const alertable = isAlertableDunningFailure(failureKind)
 
-    logDunningEvent(logger, level, {
+    logDunningEvent(logger, alertable ? "error" : "warn", {
       event: "dunning.job.case",
       job_name: JOB_NAME,
-      outcome:
-        failureKind === "already_retrying" ||
-        failureKind === "not_due" ||
-        failureKind === "closed_case" ||
-        failureKind === "retry_exhausted"
-          ? "blocked"
-          : "failed",
+      outcome: alertable ? "failed" : "blocked",
       correlation_id: caseCorrelationId,
       dunning_case_id: dunningCase.id,
       subscription_id: dunningCase.subscription_id,
@@ -91,19 +79,12 @@ async function processCase(
       success_count: 0,
       failure_count: 1,
       failure_kind: failureKind,
-      alertable: isAlertableDunningFailure(failureKind),
+      alertable,
       message,
     })
 
     return {
-      outcome:
-        failureKind === "already_retrying" ||
-        failureKind === "not_due" ||
-        failureKind === "closed_case" ||
-        failureKind === "retry_exhausted" ||
-        failureKind === "lock_timeout"
-          ? ("blocked" as const)
-          : ("failed" as const),
+      outcome: alertable ? ("failed" as const) : ("blocked" as const),
       attempt_no: dunningCase.attempt_count + 1,
       time_to_recover_ms: null,
     }

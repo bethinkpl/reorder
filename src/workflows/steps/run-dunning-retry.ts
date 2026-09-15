@@ -22,6 +22,12 @@ import {
   logDunningEvent,
 } from "../../modules/dunning/utils/observability"
 import { calculateNextRetryAt } from "../../modules/dunning/utils/retry-schedule"
+import {
+  RetryBlockedReason,
+  type RetryEligibility,
+  resolveRetryEligibility,
+  toRetryBlockedError,
+} from "../../modules/dunning/utils/retry-eligibility"
 import { recordOrderCaptureTransactions } from "../utils/record-order-capture-transactions"
 import { settleSubscriptionPaymentFailure } from "../utils/settle-subscription-payment-failure"
 import { SUBSCRIPTION_MODULE } from "../../modules/subscription"
@@ -283,44 +289,25 @@ async function settleNonRetryableCase(
 
 function validateRetryableCase(
   dunningCase: DunningCaseRecord,
+  subscription: SubscriptionRecord,
   now: Date,
   ignoreSchedule?: boolean
-) {
-  if (dunningCase.status === DunningCaseStatus.RECOVERED) {
-    throw dunningErrors.alreadyRecovered(dunningCase.id)
+): RetryEligibility {
+  const eligibility = resolveRetryEligibility({
+    dunningCase,
+    subscriptionStatus: subscription.status,
+    paymentContext: subscription.payment_context,
+    now: ignoreSchedule ? undefined : now,
+  })
+
+  if (
+    eligibility.eligible ||
+    eligibility.blocked_reason === RetryBlockedReason.SUBSCRIPTION_NOT_RETRYABLE
+  ) {
+    return eligibility
   }
 
-  if (dunningCase.status === DunningCaseStatus.UNRECOVERED) {
-    throw dunningErrors.alreadyUnrecovered(dunningCase.id)
-  }
-
-  if (dunningCase.status === DunningCaseStatus.RETRYING) {
-    throw dunningErrors.retryAlreadyProcessing(dunningCase.id)
-  }
-
-  if (!dunningCase.renewal_order_id) {
-    throw dunningErrors.invalidData(
-      `DunningCase '${dunningCase.id}' is missing renewal_order_id`
-    )
-  }
-
-  if (!dunningCase.retry_schedule) {
-    throw dunningErrors.invalidData(
-      `DunningCase '${dunningCase.id}' is missing retry_schedule`
-    )
-  }
-
-  if (!ignoreSchedule && !dunningCase.next_retry_at) {
-    throw dunningErrors.retryNotDue(dunningCase.id)
-  }
-
-  if (!ignoreSchedule && dunningCase.next_retry_at && dunningCase.next_retry_at > now) {
-    throw dunningErrors.retryNotDue(dunningCase.id)
-  }
-
-  if (dunningCase.attempt_count >= dunningCase.max_attempts) {
-    throw dunningErrors.maxAttemptsExceeded(dunningCase.id)
-  }
+  throw toRetryBlockedError(eligibility.blocked_reason!, dunningCase)
 }
 
 function classifyPaymentRetryFailure(
@@ -647,16 +634,20 @@ export const runDunningRetryStep = createStep(
     })
 
     try {
-      validateRetryableCase(dunningCase, now, input.ignore_schedule)
-
       const subscription = await loadSubscription(
         container,
         dunningCase.subscription_id
       )
 
+      const eligibility = validateRetryableCase(
+        dunningCase,
+        subscription,
+        now,
+        input.ignore_schedule
+      )
+
       if (
-        subscription.status !== SubscriptionStatus.PAST_DUE &&
-        subscription.status !== SubscriptionStatus.ACTIVE
+        eligibility.blocked_reason === RetryBlockedReason.SUBSCRIPTION_NOT_RETRYABLE
       ) {
         await settleNonRetryableCase(
           dunningModule,

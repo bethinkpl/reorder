@@ -1,6 +1,10 @@
 import { DunningCaseStatus } from "../../types"
 import { SubscriptionStatus } from "../../../subscription/types"
-import { RetryBlockedReason, resolveRetryEligibility } from "../retry-eligibility"
+import {
+  RetryBlockedReason,
+  resolveRetryEligibility,
+  toRetryBlockedError,
+} from "../retry-eligibility"
 
 const retrySchedule = {
   strategy: "fixed_intervals",
@@ -138,10 +142,78 @@ describe("resolveRetryEligibility", () => {
     ).toEqual({ eligible: false, blocked_reason: RetryBlockedReason.MISSING_RENEWAL_ORDER })
   })
 
+  it("ignores the schedule when no clock is given, which is how a manual retry asks", () => {
+    expect(
+      resolveRetryEligibility(buildInput({ dunningCase: { next_retry_at: null } }))
+    ).toEqual({ eligible: true, blocked_reason: null })
+  })
+
+  it("blocks a scheduled run before the case is due", () => {
+    expect(
+      resolveRetryEligibility({
+        ...buildInput({ dunningCase: { next_retry_at: "2026-09-20T10:00:00.000Z" } }),
+        now: new Date("2026-09-19T10:00:00.000Z"),
+      })
+    ).toEqual({ eligible: false, blocked_reason: RetryBlockedReason.RETRY_NOT_DUE })
+  })
+
+  it("blocks a scheduled run with no next_retry_at at all", () => {
+    expect(
+      resolveRetryEligibility({
+        ...buildInput({ dunningCase: { next_retry_at: null } }),
+        now: new Date("2026-09-19T10:00:00.000Z"),
+      })
+    ).toEqual({ eligible: false, blocked_reason: RetryBlockedReason.RETRY_NOT_DUE })
+  })
+
+  it("allows a scheduled run once the case is due", () => {
+    expect(
+      resolveRetryEligibility({
+        ...buildInput({ dunningCase: { next_retry_at: "2026-09-19T09:00:00.000Z" } }),
+        now: new Date("2026-09-19T10:00:00.000Z"),
+      })
+    ).toEqual({ eligible: true, blocked_reason: null })
+  })
+
   it("blocks a case with no retry schedule", () => {
     expect(resolveRetryEligibility(buildInput({ dunningCase: { retry_schedule: null } }))).toEqual({
       eligible: false,
       blocked_reason: RetryBlockedReason.MISSING_RETRY_SCHEDULE,
     })
+  })
+})
+
+describe("toRetryBlockedError", () => {
+  const caseFor = (status: DunningCaseStatus) => ({ id: "dun_1", status })
+
+  it("tells a recovered case apart from an unrecovered one", () => {
+    expect(
+      toRetryBlockedError(
+        RetryBlockedReason.CASE_CLOSED,
+        caseFor(DunningCaseStatus.RECOVERED)
+      ).message
+    ).toMatch(/recovered/i)
+
+    expect(
+      toRetryBlockedError(
+        RetryBlockedReason.CASE_CLOSED,
+        caseFor(DunningCaseStatus.UNRECOVERED)
+      ).message
+    ).toMatch(/unrecovered/i)
+  })
+
+  it.each([
+    RetryBlockedReason.RETRY_IN_PROGRESS,
+    RetryBlockedReason.MAX_ATTEMPTS_REACHED,
+    RetryBlockedReason.RETRY_NOT_DUE,
+    RetryBlockedReason.MISSING_RENEWAL_ORDER,
+    RetryBlockedReason.MISSING_RETRY_SCHEDULE,
+    RetryBlockedReason.NO_PAYMENT_METHOD,
+    RetryBlockedReason.NO_ACTIVE_CASE,
+  ])("names the case in its error for '%s'", (reason) => {
+    const error = toRetryBlockedError(reason, caseFor(DunningCaseStatus.RETRY_SCHEDULED))
+
+    expect(error).toBeInstanceOf(Error)
+    expect(error.message).toContain("dun_1")
   })
 })

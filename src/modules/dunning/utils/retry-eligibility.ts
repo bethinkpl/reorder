@@ -1,4 +1,5 @@
 import { DunningCaseStatus } from "../types"
+import { dunningErrors } from "./errors"
 import {
   CHARGEABLE_SUBSCRIPTION_STATUSES,
   type SubscriptionPaymentContext,
@@ -14,6 +15,7 @@ export enum RetryBlockedReason {
   MAX_ATTEMPTS_REACHED = "max_attempts_reached",
   MISSING_RENEWAL_ORDER = "missing_renewal_order",
   MISSING_RETRY_SCHEDULE = "missing_retry_schedule",
+  RETRY_NOT_DUE = "retry_not_due",
 }
 
 export type RetryEligibilityInput = {
@@ -23,9 +25,15 @@ export type RetryEligibilityInput = {
     max_attempts: number
     renewal_order_id: string | null
     retry_schedule: unknown | null
+    next_retry_at?: Date | string | null
   } | null
   subscriptionStatus: SubscriptionStatus
   paymentContext: SubscriptionPaymentContext | null
+  /**
+   * Only supplied by the scheduled runner, which may not retry before `next_retry_at`. A manual
+   * retry ignores the schedule, so callers asking "can this be retried now" leave it out.
+   */
+  now?: Date
 }
 
 export type RetryEligibility = {
@@ -39,6 +47,16 @@ const RETRYABLE_CASE_STATUSES: readonly DunningCaseStatus[] = [
   DunningCaseStatus.AWAITING_MANUAL_RESOLUTION,
 ]
 
+function isRetryDue(nextRetryAt: Date | string | null | undefined, now: Date): boolean {
+  if (!nextRetryAt) {
+    return false
+  }
+
+  const due = nextRetryAt instanceof Date ? nextRetryAt : new Date(nextRetryAt)
+
+  return !Number.isNaN(due.getTime()) && due <= now
+}
+
 const eligible: RetryEligibility = { eligible: true, blocked_reason: null }
 
 const blocked = (reason: RetryBlockedReason): RetryEligibility => ({
@@ -47,8 +65,9 @@ const blocked = (reason: RetryBlockedReason): RetryEligibility => ({
 })
 
 /**
- * Mirrors every precondition `runDunningRetryStep` enforces, so a storefront or
- * admin that trusts `eligible` never offers a retry the workflow will refuse.
+ * The single source of truth for "may this dunning case be charged again". `runDunningRetryStep`
+ * enforces it before doing any work, and the store and admin payloads report it so neither ever
+ * offers a retry the workflow would refuse.
  */
 export function resolveRetryEligibility(input: RetryEligibilityInput): RetryEligibility {
   const { dunningCase } = input
@@ -85,5 +104,47 @@ export function resolveRetryEligibility(input: RetryEligibilityInput): RetryElig
     return blocked(RetryBlockedReason.MISSING_RETRY_SCHEDULE)
   }
 
+  if (input.now && !isRetryDue(dunningCase.next_retry_at, input.now)) {
+    return blocked(RetryBlockedReason.RETRY_NOT_DUE)
+  }
+
   return eligible
+}
+
+/**
+ * The error `runDunningRetryStep` raises for a blocked retry. `SUBSCRIPTION_NOT_RETRYABLE` is
+ * absent on purpose: the workflow settles the case before throwing, so it owns that branch.
+ */
+export function toRetryBlockedError(
+  reason: RetryBlockedReason,
+  dunningCase: { id: string, status: DunningCaseStatus }
+) {
+  switch (reason) {
+    case RetryBlockedReason.CASE_CLOSED:
+      return dunningCase.status === DunningCaseStatus.RECOVERED
+        ? dunningErrors.alreadyRecovered(dunningCase.id)
+        : dunningErrors.alreadyUnrecovered(dunningCase.id)
+    case RetryBlockedReason.RETRY_IN_PROGRESS:
+      return dunningErrors.retryAlreadyProcessing(dunningCase.id)
+    case RetryBlockedReason.MAX_ATTEMPTS_REACHED:
+      return dunningErrors.maxAttemptsExceeded(dunningCase.id)
+    case RetryBlockedReason.RETRY_NOT_DUE:
+      return dunningErrors.retryNotDue(dunningCase.id)
+    case RetryBlockedReason.MISSING_RENEWAL_ORDER:
+      return dunningErrors.invalidData(
+        `DunningCase '${dunningCase.id}' is missing renewal_order_id`
+      )
+    case RetryBlockedReason.MISSING_RETRY_SCHEDULE:
+      return dunningErrors.invalidData(
+        `DunningCase '${dunningCase.id}' is missing retry_schedule`
+      )
+    case RetryBlockedReason.NO_PAYMENT_METHOD:
+      return dunningErrors.invalidData(
+        `DunningCase '${dunningCase.id}' has no saved payment method to charge`
+      )
+    default:
+      return dunningErrors.invalidData(
+        `DunningCase '${dunningCase.id}' cannot be retried (${reason})`
+      )
+  }
 }

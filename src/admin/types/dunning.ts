@@ -71,6 +71,7 @@ export type DunningRetryBlockedReason =
   | "max_attempts_reached"
   | "missing_renewal_order"
   | "missing_retry_schedule"
+  | "retry_not_due"
 
 export type DunningCaseAdminDetail = {
   id: string

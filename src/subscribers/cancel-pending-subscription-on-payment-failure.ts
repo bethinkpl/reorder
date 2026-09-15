@@ -7,7 +7,7 @@ import {
   PaymentWebhookEvents,
 } from "@medusajs/framework/utils"
 import { SubscriptionStatus } from "../modules/subscription/types"
-import { cancelAbandonedSubscription } from "../modules/subscription/utils/expire-pending-payment"
+import { cancelAbandonedSubscription } from "../modules/subscription/utils/cancel-abandoned-subscription"
 import { findSubscriptionIdForPaymentCollection } from "../modules/subscription/utils/find-subscription-for-payment"
 
 type WebhookEventData = {

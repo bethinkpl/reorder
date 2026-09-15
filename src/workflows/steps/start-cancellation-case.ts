@@ -9,7 +9,7 @@ import { appendCancellationManualAction } from "../../modules/cancellation/utils
 import { cancellationErrors } from "../../modules/cancellation/utils/errors"
 import { SUBSCRIPTION_MODULE } from "../../modules/subscription"
 import type SubscriptionModuleService from "../../modules/subscription/service"
-import { SubscriptionStatus } from "../../modules/subscription/types"
+import { CANCELLABLE_SUBSCRIPTION_STATUSES, SubscriptionStatus } from "../../modules/subscription/types"
 import { subscriptionErrors } from "../../modules/subscription/utils/errors"
 import type { SubscriptionSettingsShape } from "../../modules/settings/utils/normalize-settings"
 import {
@@ -131,11 +131,7 @@ async function loadSubscription(
 }
 
 function validateSubscriptionEntryState(subscription: SubscriptionRecord) {
-  if (
-    subscription.status !== SubscriptionStatus.ACTIVE &&
-    subscription.status !== SubscriptionStatus.PAUSED &&
-    subscription.status !== SubscriptionStatus.PAST_DUE
-  ) {
+  if (!CANCELLABLE_SUBSCRIPTION_STATUSES.includes(subscription.status)) {
     throw subscriptionErrors.invalidState(
       subscription.id,
       "enter cancellation handling",

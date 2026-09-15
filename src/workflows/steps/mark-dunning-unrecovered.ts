@@ -3,9 +3,11 @@ import { DUNNING_MODULE } from "../../modules/dunning"
 import type DunningModuleService from "../../modules/dunning/service"
 import { DunningCaseStatus } from "../../modules/dunning/types"
 import { dunningErrors } from "../../modules/dunning/utils/errors"
+import { settleSubscriptionPaymentFailure } from "../utils/settle-subscription-payment-failure"
 
 type DunningCaseRecord = {
   id: string
+  subscription_id: string
   status: DunningCaseStatus
   next_retry_at: Date | null
   closed_at: Date | null
@@ -83,6 +85,13 @@ export const markDunningUnrecoveredStep = createStep(
         changedAt.toISOString()
       ),
     } as any)
+
+    await settleSubscriptionPaymentFailure(container, {
+      subscription_id: dunningCase.subscription_id,
+      dunning_case_id: dunningCase.id,
+      recovery_reason: "marked_unrecovered_by_admin",
+      at: changedAt,
+    })
 
     return new StepResponse(updated, dunningCase)
   },

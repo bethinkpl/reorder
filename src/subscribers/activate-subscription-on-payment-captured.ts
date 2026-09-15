@@ -3,7 +3,7 @@ import type { IPaymentModuleService, MedusaContainer } from "@medusajs/framework
 import { ContainerRegistrationKeys, Modules, PaymentEvents } from "@medusajs/framework/utils"
 import { SUBSCRIPTION_MODULE } from "../modules/subscription"
 import type SubscriptionModuleService from "../modules/subscription/service"
-import type { SubscriptionPaymentContext } from "../modules/subscription/types"
+import { type SubscriptionPaymentContext, SubscriptionStatus } from "../modules/subscription/types"
 
 type PaymentRecord = {
   id: string
@@ -17,6 +17,7 @@ type CartPaymentCollectionRecord = {
 type SubscriptionRecord = {
   id: string
   customer_id: string
+  status: SubscriptionStatus
   payment_context: SubscriptionPaymentContext | null
 }
 
@@ -30,18 +31,18 @@ type CustomerAccountHolderRecord = {
     | null
 }
 
-export default async function backfillSubscriptionPaymentMethodHandler({
+export default async function activateSubscriptionOnPaymentCapturedHandler({
   event: { data },
   container,
 }: SubscriberArgs<{ id: string }>) {
-  await backfillSubscriptionPaymentMethod(container, data.id)
+  await activateSubscriptionOnPaymentCaptured(container, data.id)
 }
 
 export const config: SubscriberConfig = {
   event: PaymentEvents.CAPTURED,
 }
 
-export async function backfillSubscriptionPaymentMethod(
+export async function activateSubscriptionOnPaymentCaptured(
   container: MedusaContainer,
   paymentId: string
 ): Promise<void> {
@@ -69,12 +70,21 @@ export async function backfillSubscriptionPaymentMethod(
 
   const { data: subscriptions } = await query.graph({
     entity: "subscription",
-    fields: ["id", "customer_id", "payment_context"],
+    fields: ["id", "customer_id", "status", "payment_context"],
     filters: { cart_id: cartId },
   })
   const subscription = (subscriptions as SubscriptionRecord[])[0]
   if (!subscription) {
     return
+  }
+
+  const subscriptionModule = container.resolve<SubscriptionModuleService>(SUBSCRIPTION_MODULE)
+
+  if (subscription.status === SubscriptionStatus.PENDING_PAYMENT) {
+    await subscriptionModule.updateSubscriptions({
+      id: subscription.id,
+      status: SubscriptionStatus.ACTIVE,
+    })
   }
 
   const paymentContext = subscription.payment_context
@@ -128,7 +138,6 @@ export async function backfillSubscriptionPaymentMethod(
     return
   }
 
-  const subscriptionModule = container.resolve<SubscriptionModuleService>(SUBSCRIPTION_MODULE)
   await subscriptionModule.updateSubscriptions({
     id: subscription.id,
     payment_context: {

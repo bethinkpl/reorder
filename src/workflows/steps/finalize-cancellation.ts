@@ -10,7 +10,7 @@ import { appendCancellationManualAction } from "../../modules/cancellation/utils
 import { cancellationErrors } from "../../modules/cancellation/utils/errors"
 import { SUBSCRIPTION_MODULE } from "../../modules/subscription"
 import type SubscriptionModuleService from "../../modules/subscription/service"
-import { SubscriptionStatus } from "../../modules/subscription/types"
+import { CANCELLABLE_SUBSCRIPTION_STATUSES, SubscriptionStatus } from "../../modules/subscription/types"
 import { subscriptionErrors } from "../../modules/subscription/utils/errors"
 import {
   CancellationSubscriptionDisplayRecord,
@@ -130,11 +130,7 @@ function validateCaseState(cancellationCase: CancellationCaseRecord) {
 }
 
 function validateSubscriptionState(subscription: SubscriptionRecord) {
-  if (
-    subscription.status !== SubscriptionStatus.ACTIVE &&
-    subscription.status !== SubscriptionStatus.PAUSED &&
-    subscription.status !== SubscriptionStatus.PAST_DUE
-  ) {
+  if (!CANCELLABLE_SUBSCRIPTION_STATUSES.includes(subscription.status)) {
     throw subscriptionErrors.invalidState(
       subscription.id,
       "be cancelled",
@@ -158,11 +154,16 @@ function resolveCancellationReasonCategory(
 }
 
 export function resolveCancelEffectiveAt(input: {
+  status?: SubscriptionStatus
   next_renewal_at: Date | string | null
   effective_at?: "immediately" | "end_of_cycle"
   cancelled_at: Date
 }) {
   if (input.effective_at !== "end_of_cycle") {
+    return input.cancelled_at
+  }
+
+  if (input.status === SubscriptionStatus.PENDING_PAYMENT) {
     return input.cancelled_at
   }
 
@@ -281,6 +282,7 @@ export const finalizeCancellationStep = createStep(
     )
     const finalizedAt = new Date()
     const cancelEffectiveAt = resolveCancelEffectiveAt({
+      status: subscription.status,
       next_renewal_at: subscription.next_renewal_at,
       effective_at: input.effective_at,
       cancelled_at: finalizedAt,

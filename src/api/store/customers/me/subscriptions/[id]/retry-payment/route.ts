@@ -11,6 +11,7 @@ import {
   getStoreSubscriptionDetailResponse,
   requireStoreCustomer,
   sendStoreJson,
+  StoreRetryNotEligibleError,
 } from "../../utils"
 
 function mapStoreRetryError(error: unknown) {
@@ -45,11 +46,27 @@ export const POST = async (
   req: AuthenticatedMedusaRequest<PostStoreRetrySubscriptionPaymentSchemaType>,
   res: MedusaResponse
 ) => {
-  await getOwnedSubscriptionForAction(req, req.params.id)
-  const dunningCase = await getRetryableDunningCaseForSubscription(
-    req,
-    req.params.id
-  )
+  const subscription = await getOwnedSubscriptionForAction(req, req.params.id)
+
+  let dunningCase: Awaited<ReturnType<typeof getRetryableDunningCaseForSubscription>>
+
+  try {
+    dunningCase = await getRetryableDunningCaseForSubscription(
+      req,
+      req.params.id,
+      subscription
+    )
+  } catch (error) {
+    if (error instanceof StoreRetryNotEligibleError) {
+      return res.status(409).json({
+        type: error.type,
+        message: error.message,
+        blocked_reason: error.blocked_reason,
+      })
+    }
+
+    throw error
+  }
 
   try {
     await runDunningRetryWorkflow(req.scope).run({

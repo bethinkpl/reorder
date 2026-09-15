@@ -202,6 +202,10 @@ function resolveSubscriptionStatusForDay(
   hasOpenDunningAtDayEnd: boolean,
   dayEnd: Date
 ) {
+  if (subscription.status === SubscriptionStatus.PENDING_PAYMENT) {
+    return SubscriptionStatus.PENDING_PAYMENT
+  }
+
   if (
     subscription.cancel_effective_at &&
     new Date(subscription.cancel_effective_at) <= dayEnd
@@ -241,6 +245,10 @@ function resolveSubscriptionStatusForDay(
 
   if (subscription.status === SubscriptionStatus.PAST_DUE) {
     return SubscriptionStatus.PAST_DUE
+  }
+
+  if (subscription.status === SubscriptionStatus.PAYMENT_FAILED) {
+    return SubscriptionStatus.PAYMENT_FAILED
   }
 
   return SubscriptionStatus.ACTIVE

@@ -1,7 +1,8 @@
 import { createStep, StepResponse } from "@medusajs/framework/workflows-sdk"
 import { SUBSCRIPTION_MODULE } from "../../modules/subscription"
 import SubscriptionModuleService from "../../modules/subscription/service"
-import { SubscriptionStatus } from "../../modules/subscription/types"
+import { CANCELLABLE_SUBSCRIPTION_STATUSES, SubscriptionStatus } from "../../modules/subscription/types"
+import { resolveCancelEffectiveAt } from "./finalize-cancellation"
 import { subscriptionErrors } from "../../modules/subscription/utils/errors"
 import {
   asSubscriptionUpdateInput,
@@ -27,11 +28,7 @@ export const cancelSubscriptionStep = createStep(
       input.id
     )
 
-    if (
-      subscription.status !== SubscriptionStatus.ACTIVE &&
-      subscription.status !== SubscriptionStatus.PAUSED &&
-      subscription.status !== SubscriptionStatus.PAST_DUE
-    ) {
+    if (!CANCELLABLE_SUBSCRIPTION_STATUSES.includes(subscription.status)) {
       throw subscriptionErrors.invalidState(
         input.id,
         "be cancelled",
@@ -40,10 +37,12 @@ export const cancelSubscriptionStep = createStep(
     }
 
     const cancelledAt = new Date()
-    const cancelEffectiveAt =
-      input.effective_at === "end_of_cycle" && subscription.next_renewal_at
-        ? subscription.next_renewal_at
-        : cancelledAt
+    const cancelEffectiveAt = resolveCancelEffectiveAt({
+      status: subscription.status,
+      next_renewal_at: subscription.next_renewal_at,
+      effective_at: input.effective_at,
+      cancelled_at: cancelledAt,
+    })
 
     const updated = await subscriptionModuleService.updateSubscriptions({
       id: input.id,

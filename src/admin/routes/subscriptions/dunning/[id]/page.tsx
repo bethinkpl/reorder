@@ -37,6 +37,7 @@ import {
   DunningCaseAdminDetail,
   DunningCaseAdminDetailResponse,
   DunningCaseAdminStatus,
+  DunningRetryBlockedReason,
   MarkRecoveredDunningAdminRequest,
   MarkUnrecoveredDunningAdminRequest,
   RetryNowDunningAdminRequest,
@@ -188,13 +189,15 @@ const DunningDetailPage = () => {
     }))
   }, [dunningCase])
 
-  const canRetryNow = dunningCase
+  const isCaseOpen = dunningCase
     ? !terminalStatuses.has(dunningCase.status) &&
     dunningCase.status !== DunningCaseAdminStatus.RETRYING
     : false
-  const canMarkRecovered = canRetryNow
-  const canMarkUnrecovered = canRetryNow
-  const canEditRetrySchedule = canRetryNow
+  const canRetryNow = dunningCase?.retry_eligible ?? false
+  const retryBlockedReason = dunningCase?.retry_blocked_reason ?? null
+  const canMarkRecovered = isCaseOpen
+  const canMarkUnrecovered = isCaseOpen
+  const canEditRetrySchedule = isCaseOpen
   const isActionPending =
     retryNowMutation.isPending ||
     markRecoveredMutation.isPending ||
@@ -416,7 +419,14 @@ const DunningDetailPage = () => {
                         <span>{retryNowMutation.isPending ? "Retrying..." : "Retry now"}</span>
                       </DropdownMenu.Item>
                     )
-                  : null}
+                  : isCaseOpen && retryBlockedReason
+                    ? (
+                        <DropdownMenu.Item className="flex items-center gap-x-2" disabled>
+                          <TriangleRightMini className="text-ui-fg-subtle" />
+                          <span>{`Retry unavailable: ${formatRetryBlockedReason(retryBlockedReason)}`}</span>
+                        </DropdownMenu.Item>
+                      )
+                    : null}
                 {canMarkRecovered
                   ? (
                       <DropdownMenu.Item
@@ -1011,6 +1021,27 @@ function formatCaseStatus(status: DunningCaseAdminStatus) {
       return "Recovered"
     case DunningCaseAdminStatus.UNRECOVERED:
       return "Unrecovered"
+  }
+}
+
+function formatRetryBlockedReason(reason: DunningRetryBlockedReason) {
+  switch (reason) {
+    case "no_active_case":
+      return "no active recovery case"
+    case "retry_in_progress":
+      return "a retry is already running"
+    case "case_closed":
+      return "the case is closed"
+    case "subscription_not_retryable":
+      return "the subscription is not chargeable"
+    case "no_payment_method":
+      return "no saved payment method"
+    case "max_attempts_reached":
+      return "all attempts are used up"
+    case "missing_renewal_order":
+      return "the case has no renewal order"
+    case "missing_retry_schedule":
+      return "the case has no retry schedule"
   }
 }
 

@@ -45,11 +45,20 @@ const PAGE_SIZE = 20
 const columnHelper = createDataTableColumnHelper<SubscriptionAdminListItem>()
 const filterHelper = createDataTableFilterHelper<SubscriptionAdminListItem>()
 
+const CANCELLABLE_ADMIN_STATUSES = new Set<SubscriptionAdminStatus>([
+  SubscriptionAdminStatus.PENDING_PAYMENT,
+  SubscriptionAdminStatus.ACTIVE,
+  SubscriptionAdminStatus.PAUSED,
+  SubscriptionAdminStatus.PAST_DUE,
+])
+
 const statusFilterOptions = [
+  { label: "Pending payment", value: SubscriptionAdminStatus.PENDING_PAYMENT },
   { label: "Active", value: SubscriptionAdminStatus.ACTIVE },
   { label: "Paused", value: SubscriptionAdminStatus.PAUSED },
   { label: "Cancelled", value: SubscriptionAdminStatus.CANCELLED },
   { label: "Past due", value: SubscriptionAdminStatus.PAST_DUE },
+  { label: "Payment failed", value: SubscriptionAdminStatus.PAYMENT_FAILED },
 ] as const
 
 const booleanFilterOptions = [
@@ -363,8 +372,7 @@ const SubscriptionsPage = () => {
             subscription.status === SubscriptionAdminStatus.ACTIVE
           const canResume =
             subscription.status === SubscriptionAdminStatus.PAUSED
-          const canCancel =
-            subscription.status !== SubscriptionAdminStatus.CANCELLED
+          const canCancel = CANCELLABLE_ADMIN_STATUSES.has(subscription.status)
 
           const actionGroups = [
             canPause
@@ -815,6 +823,8 @@ const SubscriptionsPage = () => {
 
 function getStatusColor(status: SubscriptionAdminStatus) {
   switch (status) {
+    case SubscriptionAdminStatus.PENDING_PAYMENT:
+      return "orange"
     case SubscriptionAdminStatus.ACTIVE:
       return "green"
     case SubscriptionAdminStatus.PAUSED:
@@ -823,11 +833,15 @@ function getStatusColor(status: SubscriptionAdminStatus) {
       return "red"
     case SubscriptionAdminStatus.PAST_DUE:
       return "grey"
+    case SubscriptionAdminStatus.PAYMENT_FAILED:
+      return "red"
   }
 }
 
 function formatStatus(status: SubscriptionAdminStatus) {
   switch (status) {
+    case SubscriptionAdminStatus.PENDING_PAYMENT:
+      return "Pending payment"
     case SubscriptionAdminStatus.ACTIVE:
       return "Active"
     case SubscriptionAdminStatus.PAUSED:
@@ -836,6 +850,8 @@ function formatStatus(status: SubscriptionAdminStatus) {
       return "Cancelled"
     case SubscriptionAdminStatus.PAST_DUE:
       return "Past due"
+    case SubscriptionAdminStatus.PAYMENT_FAILED:
+      return "Payment failed"
   }
 }
 

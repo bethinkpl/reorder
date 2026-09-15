@@ -6,8 +6,13 @@ import type {
 import { ContainerRegistrationKeys, MedusaError } from "@medusajs/framework/utils"
 import { CancellationCaseStatus } from "../../../../../modules/cancellation/types"
 import { DunningCaseStatus } from "../../../../../modules/dunning/types"
+import {
+  RetryBlockedReason,
+  resolveRetryEligibility,
+} from "../../../../../modules/dunning/utils/retry-eligibility"
 import { resolveProductSubscriptionConfig } from "../../../../../modules/plan-offer/utils/effective-config"
 import {
+  type SubscriptionPaymentContext,
   SubscriptionStatus,
 } from "../../../../../modules/subscription/types"
 import { getEffectiveNextRenewalAt } from "../../../../../modules/subscription/utils/effective-next-renewal"
@@ -50,8 +55,10 @@ type SubscriptionStoreListItem = {
     discount_type?: "percentage" | "fixed" | null
     discount_value?: number | null
   } | null
+  payment_context?: SubscriptionPaymentContext | null
   metadata?: {
     source_order_id?: string | null
+    cancellation_reason?: string | null
   } | null
 }
 
@@ -95,6 +102,8 @@ type DunningCaseRecord = {
   status: string
   attempt_count: number
   max_attempts: number
+  renewal_order_id: string | null
+  retry_schedule: unknown | null
   next_retry_at: string | Date | null
   last_payment_error_code: string | null
   last_payment_error_message: string | null
@@ -171,6 +180,7 @@ export async function listStoreCustomerSubscriptions(
       "product_snapshot",
       "source_snapshot",
       "pricing_snapshot",
+      "payment_context",
       "metadata",
     ],
     filters: {
@@ -265,8 +275,9 @@ export async function listStoreCustomerSubscriptions(
           ? sourceOrderCurrencies.get(sourceOrderId) ?? null
           : null,
         source_order_id: sourceOrderId,
+        cancellation_reason: subscription.metadata?.cancellation_reason ?? null,
         payment_status: mapPaymentStatus(subscription.status, dunningCase),
-        payment_recovery: mapPaymentRecovery(dunningCase, latestAttempt),
+        payment_recovery: mapPaymentRecovery(dunningCase, latestAttempt, subscription),
         active_cancellation_case: activeCases.get(subscription.id)
           ? {
               id: activeCases.get(subscription.id)!.id,
@@ -325,6 +336,14 @@ function mapPaymentStatus(
   subscriptionStatus: string,
   dunningCase: DunningCaseRecord | null
 ) {
+  if (subscriptionStatus === SubscriptionStatus.PAYMENT_FAILED) {
+    return "recovery_failed"
+  }
+
+  if (subscriptionStatus === SubscriptionStatus.PENDING_PAYMENT) {
+    return "awaiting_payment"
+  }
+
   if (
     subscriptionStatus === SubscriptionStatus.PAST_DUE ||
     dunningCase?.status === DunningCaseStatus.OPEN ||
@@ -332,7 +351,7 @@ function mapPaymentStatus(
     dunningCase?.status === DunningCaseStatus.RETRYING ||
     dunningCase?.status === DunningCaseStatus.AWAITING_MANUAL_RESOLUTION
   ) {
-    return "recovery_required"
+    return dunningCase ? "recovery_required" : "recovery_failed"
   }
 
   return "ok"
@@ -340,21 +359,33 @@ function mapPaymentStatus(
 
 function mapPaymentRecovery(
   dunningCase: DunningCaseRecord | null,
-  latestAttempt: DunningAttemptRecord | null
+  latestAttempt: DunningAttemptRecord | null,
+  subscription: {
+    status: string
+    payment_context?: SubscriptionPaymentContext | null
+  }
 ) {
   if (!dunningCase) {
     return null
   }
 
-  const retryEligible =
-    dunningCase.status === DunningCaseStatus.OPEN ||
-    dunningCase.status === DunningCaseStatus.RETRY_SCHEDULED ||
-    dunningCase.status === DunningCaseStatus.AWAITING_MANUAL_RESOLUTION
+  const eligibility = resolveRetryEligibility({
+    dunningCase: {
+      status: dunningCase.status as DunningCaseStatus,
+      attempt_count: dunningCase.attempt_count,
+      max_attempts: dunningCase.max_attempts,
+      renewal_order_id: dunningCase.renewal_order_id ?? null,
+      retry_schedule: dunningCase.retry_schedule ?? null,
+    },
+    subscriptionStatus: subscription.status as SubscriptionStatus,
+    paymentContext: subscription.payment_context ?? null,
+  })
 
   return {
     dunning_case_id: dunningCase.id,
     state: dunningCase.status,
-    retry_eligible: retryEligible,
+    retry_eligible: eligibility.eligible,
+    retry_blocked_reason: eligibility.blocked_reason,
     attempt_count: dunningCase.attempt_count,
     max_attempts: dunningCase.max_attempts,
     next_retry_at: toIsoStringOrNull(dunningCase.next_retry_at),
@@ -408,6 +439,8 @@ async function getSubscriptionDunningCase(
       "status",
       "attempt_count",
       "max_attempts",
+      "renewal_order_id",
+      "retry_schedule",
       "next_retry_at",
       "last_payment_error_code",
       "last_payment_error_message",
@@ -474,6 +507,8 @@ async function getDunningCasesForSubscriptions(
       "status",
       "attempt_count",
       "max_attempts",
+      "renewal_order_id",
+      "retry_schedule",
       "next_retry_at",
       "last_payment_error_code",
       "last_payment_error_message",
@@ -672,7 +707,7 @@ export async function getStoreSubscriptionDetailResponse(
       payment_status: mapPaymentStatus(subscription.status, dunningCase),
       payment_provider_id:
         subscription.payment_context?.payment_provider_id ?? null,
-      payment_recovery: mapPaymentRecovery(dunningCase, latestDunningAttempt),
+      payment_recovery: mapPaymentRecovery(dunningCase, latestDunningAttempt, subscription),
       active_cancellation_case: activeCancellationCase,
       scheduled_plan_change: subscription.pending_update_data
         ? {
@@ -733,6 +768,7 @@ export async function getOwnedSubscriptionForAction(
         "customer_id",
         "variant_id",
         "status",
+        "payment_context",
       ],
       filters: {
         id: [subscriptionId],
@@ -749,6 +785,7 @@ export async function getOwnedSubscriptionForAction(
     customer_id: string
     variant_id: string
     status: string
+    payment_context: SubscriptionPaymentContext | null
   }>)[0]
 
   if (!subscription) {
@@ -761,32 +798,48 @@ export async function getOwnedSubscriptionForAction(
   return subscription
 }
 
+export class StoreRetryNotEligibleError extends MedusaError {
+  readonly blocked_reason: RetryBlockedReason
+
+  constructor(subscriptionId: string, blockedReason: RetryBlockedReason) {
+    super(
+      MedusaError.Types.CONFLICT,
+      `Subscription '${subscriptionId}' is not eligible for payment retry (${blockedReason}).`
+    )
+    this.blocked_reason = blockedReason
+  }
+}
+
 export async function getRetryableDunningCaseForSubscription(
   req: AuthenticatedMedusaRequest,
-  subscriptionId: string
+  subscriptionId: string,
+  subscription: {
+    status: string
+    payment_context?: SubscriptionPaymentContext | null
+  }
 ) {
   const query = req.scope.resolve(ContainerRegistrationKeys.QUERY)
   const dunningCase = await getSubscriptionDunningCase(query, subscriptionId)
 
-  if (!dunningCase) {
-    throw new MedusaError(
-      MedusaError.Types.CONFLICT,
-      `Subscription '${subscriptionId}' doesn't have an active payment recovery case.`
-    )
+  const eligibility = resolveRetryEligibility({
+    dunningCase: dunningCase
+      ? {
+          status: dunningCase.status as DunningCaseStatus,
+          attempt_count: dunningCase.attempt_count,
+          max_attempts: dunningCase.max_attempts,
+          renewal_order_id: dunningCase.renewal_order_id ?? null,
+          retry_schedule: dunningCase.retry_schedule ?? null,
+        }
+      : null,
+    subscriptionStatus: subscription.status as SubscriptionStatus,
+    paymentContext: subscription.payment_context ?? null,
+  })
+
+  if (!eligibility.eligible) {
+    throw new StoreRetryNotEligibleError(subscriptionId, eligibility.blocked_reason!)
   }
 
-  if (
-    dunningCase.status === DunningCaseStatus.RETRYING ||
-    dunningCase.status === DunningCaseStatus.RECOVERED ||
-    dunningCase.status === DunningCaseStatus.UNRECOVERED
-  ) {
-    throw new MedusaError(
-      MedusaError.Types.CONFLICT,
-      `Subscription '${subscriptionId}' is not eligible for payment retry.`
-    )
-  }
-
-  return dunningCase
+  return dunningCase!
 }
 
 export async function getStoreProductSubscriptionOfferResponse(

@@ -4,11 +4,30 @@ import type { Override } from "../../../common/utils/override"
 import type { FrequencyInterval } from "../../../common/types/frequency-interval"
 
 export enum SubscriptionStatus {
+  PENDING_PAYMENT = "pending_payment",
   ACTIVE = "active",
   PAUSED = "paused",
   CANCELLED = "cancelled",
   PAST_DUE = "past_due",
+  PAYMENT_FAILED = "payment_failed",
 }
+
+export const TERMINAL_SUBSCRIPTION_STATUSES: readonly SubscriptionStatus[] = [
+  SubscriptionStatus.CANCELLED,
+  SubscriptionStatus.PAYMENT_FAILED,
+]
+
+export const CHARGEABLE_SUBSCRIPTION_STATUSES: readonly SubscriptionStatus[] = [
+  SubscriptionStatus.ACTIVE,
+  SubscriptionStatus.PAST_DUE,
+]
+
+export const CANCELLABLE_SUBSCRIPTION_STATUSES: readonly SubscriptionStatus[] = [
+  SubscriptionStatus.PENDING_PAYMENT,
+  SubscriptionStatus.ACTIVE,
+  SubscriptionStatus.PAUSED,
+  SubscriptionStatus.PAST_DUE,
+]
 
 export type SubscriptionCustomerSnapshot = {
   email: string

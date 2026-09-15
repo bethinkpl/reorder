@@ -23,6 +23,7 @@ import {
 } from "../../modules/dunning/utils/observability"
 import { calculateNextRetryAt } from "../../modules/dunning/utils/retry-schedule"
 import { recordOrderCaptureTransactions } from "../utils/record-order-capture-transactions"
+import { settleSubscriptionPaymentFailure } from "../utils/settle-subscription-payment-failure"
 import { SUBSCRIPTION_MODULE } from "../../modules/subscription"
 import type SubscriptionModuleService from "../../modules/subscription/service"
 import { type SubscriptionPaymentContext, SubscriptionStatus } from "../../modules/subscription/types"
@@ -792,6 +793,11 @@ export const runDunningRetryStep = createStep(
         attemptNo >= dunningCase.max_attempts
 
       if (shouldCloseAsUnrecovered) {
+        const recoveryReason =
+          outcome.kind === "permanent_failure"
+            ? "permanent_payment_failure"
+            : "retry_limit_exhausted"
+
         const updatedCase = await dunningModule.updateDunningCases({
           id: dunningCase.id,
           status: DunningCaseStatus.UNRECOVERED,
@@ -800,11 +806,15 @@ export const runDunningRetryStep = createStep(
           last_payment_error_code: outcome.error_code,
           last_payment_error_message: outcome.error_message,
           closed_at: finishedAt,
-          recovery_reason:
-            outcome.kind === "permanent_failure"
-              ? "permanent_payment_failure"
-              : "retry_limit_exhausted",
+          recovery_reason: recoveryReason,
         } as any)
+
+        const settledStatus = await settleSubscriptionPaymentFailure(container, {
+          subscription_id: subscription.id,
+          dunning_case_id: dunningCase.id,
+          recovery_reason: recoveryReason,
+          at: finishedAt,
+        })
 
         logDunningEvent(logger, "warn", {
           event: "dunning.retry",
@@ -832,7 +842,7 @@ export const runDunningRetryStep = createStep(
           dunning_case_id: updatedCase.id,
           dunning_attempt_id: attempt.id,
           outcome: "unrecovered",
-          subscription_status: subscription.status,
+          subscription_status: settledStatus,
           correlation_id: correlationId,
           attempt_no: attemptNo,
         })
@@ -855,6 +865,13 @@ export const runDunningRetryStep = createStep(
           closed_at: finishedAt,
           recovery_reason: "retry_schedule_exhausted",
         } as any)
+
+        const settledStatus = await settleSubscriptionPaymentFailure(container, {
+          subscription_id: subscription.id,
+          dunning_case_id: dunningCase.id,
+          recovery_reason: "retry_schedule_exhausted",
+          at: finishedAt,
+        })
 
         logDunningEvent(logger, "warn", {
           event: "dunning.retry",
@@ -882,7 +899,7 @@ export const runDunningRetryStep = createStep(
           dunning_case_id: updatedCase.id,
           dunning_attempt_id: attempt.id,
           outcome: "unrecovered",
-          subscription_status: subscription.status,
+          subscription_status: settledStatus,
           correlation_id: correlationId,
           attempt_no: attemptNo,
         })

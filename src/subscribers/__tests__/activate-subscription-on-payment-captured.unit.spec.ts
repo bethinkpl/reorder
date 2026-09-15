@@ -1,13 +1,16 @@
 import type { MedusaContainer } from "@medusajs/framework/types"
 import { ContainerRegistrationKeys, Modules } from "@medusajs/framework/utils"
 import { SUBSCRIPTION_MODULE } from "../../modules/subscription"
-import { backfillSubscriptionPaymentMethod } from "../backfill-subscription-payment-method"
+import { SubscriptionStatus } from "../../modules/subscription/types"
+import { activateSubscriptionOnPaymentCaptured } from "../activate-subscription-on-payment-captured"
 
 type Staged = Record<string, unknown[]>
 
-type UpdateCall = { id: string, payment_context: unknown }
+type UpdateCall = { id: string, status?: unknown, payment_context?: unknown }
 
 type PaymentMethodStub = { id: string, data?: Record<string, unknown> }
+
+const activationCall = { id: "sub_1", status: SubscriptionStatus.ACTIVE }
 
 function defaultStaged(): Staged {
   return {
@@ -17,6 +20,7 @@ function defaultStaged(): Staged {
       {
         id: "sub_1",
         customer_id: "cus_1",
+        status: SubscriptionStatus.PENDING_PAYMENT,
         payment_context: {
           payment_provider_id: "pp_stripe_stripe",
           account_holder_id: "acch_1",
@@ -33,6 +37,10 @@ function defaultStaged(): Staged {
       },
     ],
   }
+}
+
+function stagedSubscription(staged: Staged) {
+  return staged.subscription[0] as Record<string, unknown>
 }
 
 function buildContainer(options: {
@@ -76,8 +84,8 @@ function buildContainer(options: {
   } as unknown as MedusaContainer
 }
 
-describe("backfillSubscriptionPaymentMethod", () => {
-  it("writes the latest saved method back onto the subscription", async () => {
+describe("activateSubscriptionOnPaymentCaptured", () => {
+  it("activates the subscription and writes the latest saved method back onto it", async () => {
     const captured: UpdateCall[] = []
     const container = buildContainer({
       staged: defaultStaged(),
@@ -88,7 +96,60 @@ describe("backfillSubscriptionPaymentMethod", () => {
       captured,
     })
 
-    await backfillSubscriptionPaymentMethod(container, "pay_1")
+    await activateSubscriptionOnPaymentCaptured(container, "pay_1")
+
+    expect(captured).toEqual([
+      activationCall,
+      {
+        id: "sub_1",
+        payment_context: {
+          payment_provider_id: "pp_stripe_stripe",
+          account_holder_id: "acch_1",
+          payment_method_id: "pm_new",
+        },
+      },
+    ])
+  })
+
+  it("still activates when the provider exposes no saved method", async () => {
+    const captured: UpdateCall[] = []
+    const container = buildContainer({
+      staged: defaultStaged(),
+      paymentMethods: [],
+      captured,
+    })
+
+    await activateSubscriptionOnPaymentCaptured(container, "pay_1")
+
+    expect(captured).toEqual([activationCall])
+  })
+
+  it("still activates when the subscription carries no payment provider", async () => {
+    const captured: UpdateCall[] = []
+    const staged = defaultStaged()
+    stagedSubscription(staged).payment_context = null
+    const container = buildContainer({
+      staged,
+      paymentMethods: [{ id: "pm_new", data: { created: 200 } }],
+      captured,
+    })
+
+    await activateSubscriptionOnPaymentCaptured(container, "pay_1")
+
+    expect(captured).toEqual([activationCall])
+  })
+
+  it("leaves an already active subscription's status alone", async () => {
+    const captured: UpdateCall[] = []
+    const staged = defaultStaged()
+    stagedSubscription(staged).status = SubscriptionStatus.ACTIVE
+    const container = buildContainer({
+      staged,
+      paymentMethods: [{ id: "pm_new", data: { created: 200 } }],
+      captured,
+    })
+
+    await activateSubscriptionOnPaymentCaptured(container, "pay_1")
 
     expect(captured).toEqual([
       {
@@ -102,6 +163,21 @@ describe("backfillSubscriptionPaymentMethod", () => {
     ])
   })
 
+  it("does not resurrect a cancelled subscription", async () => {
+    const captured: UpdateCall[] = []
+    const staged = defaultStaged()
+    stagedSubscription(staged).status = SubscriptionStatus.CANCELLED
+    const container = buildContainer({
+      staged,
+      paymentMethods: [],
+      captured,
+    })
+
+    await activateSubscriptionOnPaymentCaptured(container, "pay_1")
+
+    expect(captured).toEqual([])
+  })
+
   it("does nothing when the cart maps to no subscription", async () => {
     const captured: UpdateCall[] = []
     const staged = defaultStaged()
@@ -112,20 +188,7 @@ describe("backfillSubscriptionPaymentMethod", () => {
       captured,
     })
 
-    await backfillSubscriptionPaymentMethod(container, "pay_1")
-
-    expect(captured).toEqual([])
-  })
-
-  it("does nothing when the provider has no saved method yet", async () => {
-    const captured: UpdateCall[] = []
-    const container = buildContainer({
-      staged: defaultStaged(),
-      paymentMethods: [],
-      captured,
-    })
-
-    await backfillSubscriptionPaymentMethod(container, "pay_1")
+    await activateSubscriptionOnPaymentCaptured(container, "pay_1")
 
     expect(captured).toEqual([])
   })
@@ -133,7 +196,8 @@ describe("backfillSubscriptionPaymentMethod", () => {
   it("is idempotent when the resolved method already matches the stored context", async () => {
     const captured: UpdateCall[] = []
     const staged = defaultStaged()
-    ;(staged.subscription[0] as { payment_context: Record<string, unknown> }).payment_context = {
+    stagedSubscription(staged).status = SubscriptionStatus.ACTIVE
+    stagedSubscription(staged).payment_context = {
       payment_provider_id: "pp_stripe_stripe",
       account_holder_id: "acch_1",
       payment_method_id: "pm_new",
@@ -147,7 +211,7 @@ describe("backfillSubscriptionPaymentMethod", () => {
       captured,
     })
 
-    await backfillSubscriptionPaymentMethod(container, "pay_1")
+    await activateSubscriptionOnPaymentCaptured(container, "pay_1")
 
     expect(captured).toEqual([])
   })

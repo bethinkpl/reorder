@@ -4,14 +4,11 @@ import { ContainerRegistrationKeys, Modules, PaymentEvents } from "@medusajs/fra
 import { SUBSCRIPTION_MODULE } from "../modules/subscription"
 import type SubscriptionModuleService from "../modules/subscription/service"
 import { type SubscriptionPaymentContext, SubscriptionStatus } from "../modules/subscription/types"
+import { findSubscriptionIdForPaymentCollection } from "../modules/subscription/utils/find-subscription-for-payment"
 
 type PaymentRecord = {
   id: string
   payment_collection_id: string | null
-}
-
-type CartPaymentCollectionRecord = {
-  cart_id: string | null
 }
 
 type SubscriptionRecord = {
@@ -58,20 +55,18 @@ export async function activateSubscriptionOnPaymentCaptured(
     return
   }
 
-  const { data: cartLinks } = await query.graph({
-    entity: "cart_payment_collection",
-    fields: ["cart_id"],
-    filters: { payment_collection_id: paymentCollectionId },
-  })
-  const cartId = (cartLinks as CartPaymentCollectionRecord[])[0]?.cart_id
-  if (!cartId) {
+  const subscriptionId = await findSubscriptionIdForPaymentCollection(
+    container,
+    paymentCollectionId
+  )
+  if (!subscriptionId) {
     return
   }
 
   const { data: subscriptions } = await query.graph({
     entity: "subscription",
     fields: ["id", "customer_id", "status", "payment_context"],
-    filters: { cart_id: cartId },
+    filters: { id: subscriptionId },
   })
   const subscription = (subscriptions as SubscriptionRecord[])[0]
   if (!subscription) {

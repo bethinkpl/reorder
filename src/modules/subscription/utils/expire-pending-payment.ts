@@ -40,18 +40,46 @@ export function resolvePendingPaymentCutoff(now: Date, ttlMinutes: number): Date
 }
 
 /**
- * Cancels subscriptions whose customer never came back from the payment provider.
- *
- * Nothing else closes them: the provider's `checkout.session.expired` webhook maps to
- * `PaymentActions.CANCELED`, which core's `processPaymentWorkflow` ignores.
+ * Ends a subscription whose customer never completed the initial payment. Shared by the TTL job
+ * and the provider-failure subscriber so both write the same shape the storefront filters on.
+ */
+export async function cancelAbandonedSubscription(
+  container: MedusaContainer,
+  subscription: { id: string, metadata: Record<string, unknown> | null },
+  now: Date
+): Promise<void> {
+  const subscriptionModule =
+    container.resolve<SubscriptionModuleService>(SUBSCRIPTION_MODULE)
+
+  await subscriptionModule.updateSubscriptions({
+    id: subscription.id,
+    status: SubscriptionStatus.CANCELLED,
+    cancelled_at: now,
+    cancel_effective_at: now,
+    next_renewal_at: null,
+    metadata: {
+      ...(subscription.metadata ?? {}),
+      cancel_context: {
+        reason: ABANDONED_CHECKOUT_REASON,
+        effective_at: "immediately",
+        cancelled_at: now.toISOString(),
+        triggered_by: null,
+      },
+      cancellation_reason: ABANDONED_CHECKOUT_REASON,
+    },
+  })
+}
+
+/**
+ * The backstop for abandoned checkouts. `cancel-pending-subscription-on-payment-failure` closes
+ * them as soon as the provider reports the failure; this catches the ones where no such webhook
+ * ever arrives.
  */
 export async function expirePendingPaymentSubscriptions(
   container: MedusaContainer,
   options: { now?: Date, ttl_minutes?: number } = {}
 ): Promise<ExpirePendingPaymentResult> {
   const query = container.resolve(ContainerRegistrationKeys.QUERY)
-  const subscriptionModule =
-    container.resolve<SubscriptionModuleService>(SUBSCRIPTION_MODULE)
 
   const now = options.now ?? new Date()
   const ttlMinutes = options.ttl_minutes ?? resolvePendingPaymentTtlMinutes()
@@ -70,23 +98,7 @@ export async function expirePendingPaymentSubscriptions(
   const expired: string[] = []
 
   for (const subscription of subscriptions) {
-    await subscriptionModule.updateSubscriptions({
-      id: subscription.id,
-      status: SubscriptionStatus.CANCELLED,
-      cancelled_at: now,
-      cancel_effective_at: now,
-      next_renewal_at: null,
-      metadata: {
-        ...(subscription.metadata ?? {}),
-        cancel_context: {
-          reason: ABANDONED_CHECKOUT_REASON,
-          effective_at: "immediately",
-          cancelled_at: now.toISOString(),
-          triggered_by: null,
-        },
-        cancellation_reason: ABANDONED_CHECKOUT_REASON,
-      },
-    })
+    await cancelAbandonedSubscription(container, subscription, now)
 
     expired.push(subscription.id)
   }

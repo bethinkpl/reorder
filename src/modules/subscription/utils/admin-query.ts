@@ -15,7 +15,7 @@ import {
   SubscriptionAdminStatus,
   SubscriptionDiscountType,
 } from "../../../admin/types/subscription"
-import { type SubscriptionQueryType } from "../types"
+import { type SubscriptionQueryType, SubscriptionStatus } from "../types"
 import { getEffectiveNextRenewalAt } from "./effective-next-renewal"
 import { subscriptionErrors } from "./errors"
 import { FrequencyInterval } from "../../../common/types/frequency-interval"
@@ -240,14 +240,7 @@ function mapListItem(record: SubscriptionQueryType): SubscriptionAdminListItem {
   return {
     id: record.id,
     reference: record.reference,
-    status:
-      record.status === "active"
-        ? SubscriptionAdminStatus.ACTIVE
-        : record.status === "paused"
-          ? SubscriptionAdminStatus.PAUSED
-          : record.status === "cancelled"
-            ? SubscriptionAdminStatus.CANCELLED
-            : SubscriptionAdminStatus.PAST_DUE,
+    status: mapSubscriptionStatus(record.status),
     customer: {
       id: record.customer_id,
       full_name: customer?.full_name ?? "Unknown customer",
@@ -295,14 +288,19 @@ function mapDetail(record: SubscriptionQueryType): SubscriptionAdminDetail {
   }
 }
 
-function mapSubscriptionStatus(status: string | null | undefined) {
-  return status === "active"
-    ? SubscriptionAdminStatus.ACTIVE
-    : status === "paused"
-      ? SubscriptionAdminStatus.PAUSED
-      : status === "cancelled"
-        ? SubscriptionAdminStatus.CANCELLED
-        : SubscriptionAdminStatus.PAST_DUE
+const ADMIN_STATUS_BY_SUBSCRIPTION_STATUS: Record<string, SubscriptionAdminStatus> = {
+  [SubscriptionStatus.PENDING_PAYMENT]: SubscriptionAdminStatus.PENDING_PAYMENT,
+  [SubscriptionStatus.ACTIVE]: SubscriptionAdminStatus.ACTIVE,
+  [SubscriptionStatus.PAUSED]: SubscriptionAdminStatus.PAUSED,
+  [SubscriptionStatus.CANCELLED]: SubscriptionAdminStatus.CANCELLED,
+  [SubscriptionStatus.PAST_DUE]: SubscriptionAdminStatus.PAST_DUE,
+  [SubscriptionStatus.PAYMENT_FAILED]: SubscriptionAdminStatus.PAYMENT_FAILED,
+}
+
+export function mapSubscriptionStatus(status: string | null | undefined) {
+  return (
+    ADMIN_STATUS_BY_SUBSCRIPTION_STATUS[status ?? ""] ?? SubscriptionAdminStatus.PAST_DUE
+  )
 }
 
 function mapOrderSummary(

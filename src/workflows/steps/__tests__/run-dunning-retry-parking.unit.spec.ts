@@ -262,6 +262,34 @@ describe("runDunningRetry - parking instead of churning", () => {
     ).toMatchObject({ last_payment_error_code: "insufficient_funds" })
   })
 
+  it("parks rather than settles when no attempt ever reached the provider", async () => {
+    // The static mock ignores the row written moments earlier, which is the only way to reach the
+    // guard: with a session in hand the current attempt always carries a payment_reference, so in
+    // production this branch is an invariant check rather than a path a live retry can take.
+    const { container, updateDunningCases, authorizePaymentSession } =
+      buildContainer({
+        attemptCount: 2,
+        maxAttempts: 3,
+        attempts: [
+          { attempt_no: 1, status: "failed", payment_reference: null },
+          { attempt_no: 2, status: "failed", payment_reference: null },
+        ],
+      })
+    authorizePaymentSession.mockRejectedValue(declineError())
+
+    const response = await runDunningRetry(container, {
+      dunning_case_id: "dun_1",
+    })
+
+    expect(response.output.outcome).toBe("awaiting_manual_resolution")
+    expect(
+      caseUpdate(updateDunningCases, DunningCaseStatus.AWAITING_MANUAL_RESOLUTION)
+    ).toMatchObject({
+      metadata: expect.objectContaining({ park_reason: "unreached_provider" }),
+    })
+    expect(settleSubscriptionPaymentFailure).not.toHaveBeenCalled()
+  })
+
   it("spends one budget slot on the first retry of a fresh case", async () => {
     const { container, updateDunningCases, createDunningAttempts, authorizePaymentSession } =
       buildContainer()

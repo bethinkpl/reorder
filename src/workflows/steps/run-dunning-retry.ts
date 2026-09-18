@@ -242,6 +242,22 @@ async function getNextAttemptNo(
 }
 
 /**
+ * Whether any attempt on this case ever got as far as a payment session. Without one nothing was
+ * ever declined, so settling the case would churn the subscription over a fault on our side.
+ */
+async function hasReachedProvider(
+  container: MedusaContainer,
+  dunningCaseId: string
+) {
+  const dunningModule = container.resolve<DunningModuleService>(DUNNING_MODULE)
+  const attempts = (await dunningModule.listDunningAttempts({
+    dunning_case_id: dunningCaseId,
+  } as any)) as DunningAttemptRecord[]
+
+  return attempts.some((attempt) => Boolean(attempt.payment_reference))
+}
+
+/**
  * The order's total and the amount still owed on it.
  *
  * A dunning retry runs against an order an earlier attempt may already have
@@ -950,6 +966,23 @@ export async function runDunningRetry(
       consumedAttempts >= dunningCase.max_attempts
 
     if (shouldCloseAsUnrecovered) {
+      if (!(await hasReachedProvider(container, dunningCase.id))) {
+        return await parkForManualResolution(container, {
+          dunningCase,
+          caseMetadata: retryMetadata,
+          attempt,
+          attemptStatus: DunningAttemptStatus.FAILED,
+          attemptNo,
+          attemptCount: consumedAttempts,
+          parkReason: "unreached_provider",
+          outcome,
+          finishedAt,
+          correlationId,
+          durationMs: Date.now() - startedAtMs,
+          subscriptionStatus: subscription.status,
+        })
+      }
+
       const recoveryReason =
         outcome.kind === "permanent_failure"
           ? "permanent_payment_failure"
@@ -1012,6 +1045,23 @@ export async function runDunningRetry(
     )
 
     if (!nextRetryAt) {
+      if (!(await hasReachedProvider(container, dunningCase.id))) {
+        return await parkForManualResolution(container, {
+          dunningCase,
+          caseMetadata: retryMetadata,
+          attempt,
+          attemptStatus: DunningAttemptStatus.FAILED,
+          attemptNo,
+          attemptCount: consumedAttempts,
+          parkReason: "unreached_provider",
+          outcome,
+          finishedAt,
+          correlationId,
+          durationMs: Date.now() - startedAtMs,
+          subscriptionStatus: subscription.status,
+        })
+      }
+
       const settledStatus = await settleSubscriptionPaymentFailure(container, {
         subscription_id: subscription.id,
         dunning_case_id: dunningCase.id,

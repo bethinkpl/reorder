@@ -121,6 +121,26 @@ export const runDunningRetryWorkflow = createWorkflow(
       })
     })
 
+    when(
+      "emit-dunning-recovered",
+      { result },
+      function ({ result }) {
+        return result.outcome === "recovered"
+      }
+    ).then(function () {
+      emitDunningEventStep({
+        eventName: DunningEvents.RECOVERED,
+        data: {
+          subscription_id: result.subscription_id,
+          dunning_case_id: result.dunning_case_id,
+          renewal_order_id: result.renewal_order_id,
+          recovery_reason: result.recovery_reason,
+        },
+      }).config({
+        name: "emit-dunning-retry-recovered-event",
+      })
+    })
+
     // Only the run that actually moved the subscription may notify: an already-terminal
     // subscription keeps its previous status and its customer has been told once already.
     when(

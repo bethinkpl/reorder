@@ -31,18 +31,17 @@ describe("dunning lifecycle events", () => {
     expect(typeof recoverDunningFromCapturedPaymentWorkflow).toBe("function")
   })
 
-  it("registers all three retry emits under distinct step names", () => {
+  it("registers all four retry emits under distinct step names", () => {
     const handlers = stepHandlers("run-dunning-retry")
-    const attemptFailed = handlers.get("emit-dunning-attempt-failed-event")
-    const paymentFailed = handlers.get("emit-dunning-payment-failed-event")
-    const parked = handlers.get("emit-dunning-parked-event")
+    const emits = [
+      "emit-dunning-attempt-failed-event",
+      "emit-dunning-payment-failed-event",
+      "emit-dunning-parked-event",
+      "emit-dunning-retry-recovered-event",
+    ].map((name) => handlers.get(name))
 
-    expect(attemptFailed).toBeDefined()
-    expect(paymentFailed).toBeDefined()
-    expect(parked).toBeDefined()
-    expect(attemptFailed).not.toBe(paymentFailed)
-    expect(paymentFailed).not.toBe(parked)
-    expect(attemptFailed).not.toBe(parked)
+    expect(emits.every(Boolean)).toBe(true)
+    expect(new Set(emits).size).toBe(emits.length)
   })
 
   it("registers the started and admin emits", () => {

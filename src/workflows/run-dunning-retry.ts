@@ -64,6 +64,9 @@ export const runDunningRetryWorkflow = createWorkflow(
       filters: {
         id: subscriptionId,
       },
+      options: {
+        throwIfKeyNotFound: true,
+      },
     }).config({
       name: "load-subscription-for-hook",
     })

@@ -54,10 +54,11 @@ export async function settleDunningCaseRecovered(
 
   const metadata: Record<string, unknown> = {
     ...(input.metadata ?? dunningCase.metadata ?? {}),
+    // Explicit nulls: the module merges JSON columns, so an omitted key would survive.
     park_reason: null,
+    setup_failure_streak: null,
+    session_conflict_count: null,
   }
-  delete metadata.setup_failure_streak
-  delete metadata.session_conflict_count
 
   if (input.payment_reference) {
     metadata.recovery_payment_reference = input.payment_reference

@@ -256,7 +256,12 @@ describe("runDunningRetry - recovery branch", () => {
       .map(([payload]) => payload)
       .find((payload) => payload.status === DunningCaseStatus.RECOVERED)!
 
-    expect(write.metadata).not.toHaveProperty("setup_failure_streak")
+    // The module merges JSON columns, so only an explicit null clears a stored key.
+    expect(write.metadata).toMatchObject({
+      setup_failure_streak: null,
+      session_conflict_count: null,
+      park_reason: null,
+    })
   })
 
   it("credits whoever paid when the order came back already settled", async () => {

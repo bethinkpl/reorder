@@ -137,6 +137,27 @@ describe("hasCustomerPaymentInProgress", () => {
     ).toBe(true)
   })
 
+  it.each(["canceled", "completed", "failed"])(
+    "ignores a pending session left on a %s collection",
+    (status) => {
+      expect(
+        hasCustomerPaymentInProgress(
+          [collection({ status, payment_sessions: [customerSession()] })],
+          now
+        )
+      ).toBe(false)
+    }
+  )
+
+  it("still counts a live session when the collection status can't be read", () => {
+    expect(
+      hasCustomerPaymentInProgress(
+        [collection({ status: null, payment_sessions: [customerSession()] })],
+        now
+      )
+    ).toBe(true)
+  })
+
   it.each(["authorized", "partially_authorized"])(
     "steps aside for somebody else's '%s' collection",
     (status) => {

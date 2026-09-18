@@ -537,6 +537,6 @@ describe("runDunningRetry - customer payment session guard", () => {
     expect(response.output.outcome).toBe("recovered")
     expect(
       caseUpdate(updateDunningCases, DunningCaseStatus.RECOVERED).metadata
-    ).not.toHaveProperty("session_conflict_count")
+    ).toMatchObject({ session_conflict_count: null, setup_failure_streak: null })
   })
 })

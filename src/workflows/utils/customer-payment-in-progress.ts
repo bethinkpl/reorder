@@ -35,6 +35,13 @@ const CUSTOMER_LIVE_SESSION_STATUSES: readonly string[] = [
 ]
 
 /** The collection statuses core cancels and recreates, throwing away whatever they hold. */
+const CHARGEABLE_COLLECTION_STATUSES: readonly string[] = [
+  "not_paid",
+  "awaiting",
+  "authorized",
+  "partially_authorized",
+]
+
 const AUTHORIZED_COLLECTION_STATUSES: readonly string[] = [
   "authorized",
   "partially_authorized",
@@ -157,6 +164,14 @@ function isForeignAuthorizedCollection(collection: PaymentCollectionRecord) {
  * the customer is on, or somebody else's authorized collection that
  * `createOrUpdateOrderPaymentCollectionWorkflow` cancels and recreates.
  */
+// A host that abandons a collection (expired or failed checkout) leaves its session rows `pending`,
+// so only collections core would still charge against can hold a live session.
+function isChargeableCollection(collection: PaymentCollectionRecord) {
+  const status = String(collection.status ?? "").toLowerCase()
+
+  return !status || CHARGEABLE_COLLECTION_STATUSES.includes(status)
+}
+
 export function hasCustomerPaymentInProgress(
   paymentCollections: PaymentCollectionRecord[],
   now: Date
@@ -164,8 +179,9 @@ export function hasCustomerPaymentInProgress(
   return paymentCollections.some(
     (collection) =>
       isForeignAuthorizedCollection(collection) ||
-      (collection.payment_sessions ?? []).some((session) =>
-        isCustomerLiveSession(session, now)
-      )
+      (isChargeableCollection(collection) &&
+        (collection.payment_sessions ?? []).some((session) =>
+          isCustomerLiveSession(session, now)
+        ))
   )
 }

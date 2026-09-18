@@ -532,12 +532,13 @@ function readRetryCounter(
 }
 
 /** The counters that only track retries that never charged anything. */
+// The module merges JSON columns, so a key left out of the patch keeps its stored value.
 function clearUnchargedRetryCounters(metadata: Record<string, unknown>) {
-  const next = { ...metadata }
-  delete next.setup_failure_streak
-  delete next.session_conflict_count
-
-  return next
+  return {
+    ...metadata,
+    setup_failure_streak: null,
+    session_conflict_count: null,
+  }
 }
 
 function readPaymentErrorCode(error: unknown) {

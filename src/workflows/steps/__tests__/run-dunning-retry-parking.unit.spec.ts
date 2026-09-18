@@ -291,7 +291,7 @@ describe("runDunningRetry - parking instead of churning", () => {
     expect(response.output.outcome).toBe("retry_scheduled")
     expect(
       caseUpdate(updateDunningCases, DunningCaseStatus.RETRY_SCHEDULED).metadata
-    ).not.toHaveProperty("setup_failure_streak")
+    ).toMatchObject({ setup_failure_streak: null, session_conflict_count: null })
   })
 
   it("parks the case on an SCA challenge instead of settling it", async () => {

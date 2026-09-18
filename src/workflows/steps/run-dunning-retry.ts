@@ -102,6 +102,17 @@ type PaymentRecord = {
   amount: BigNumberInput
 }
 
+type PaymentRetryFailureOutcome = {
+  kind:
+    | "setup_failure"
+    | "requires_action"
+    | "temporary_failure"
+    | "permanent_failure"
+  payment_reference: string | null
+  error_code: string
+  error_message: string
+}
+
 type PaymentRetryOutcome =
   | {
     kind: "recovery"
@@ -109,12 +120,12 @@ type PaymentRetryOutcome =
     error_code: null
     error_message: null
   }
-  | {
-    kind: "temporary_failure" | "permanent_failure"
-    payment_reference: string | null
-    error_code: string
-    error_message: string
-  }
+  | PaymentRetryFailureOutcome
+
+type DunningParkReason =
+  | "requires_action"
+  | "setup_failure"
+  | "unreached_provider"
 
 export type RunDunningRetryStepInput = {
   dunning_case_id: string
@@ -126,10 +137,14 @@ export type RunDunningRetryStepInput = {
   payment_session_data?: Record<string, unknown>
 }
 
-type RunDunningRetryStepOutput = {
+export type RunDunningRetryStepOutput = {
   dunning_case_id: string
   dunning_attempt_id: string
-  outcome: "recovered" | "retry_scheduled" | "unrecovered"
+  outcome:
+    | "recovered"
+    | "retry_scheduled"
+    | "unrecovered"
+    | "awaiting_manual_resolution"
   subscription_status: SubscriptionStatus
   correlation_id: string
   attempt_no: number
@@ -349,9 +364,6 @@ function classifyPaymentRetryFailure(
   }
 
   if (
-    normalizedMessage.includes("missing payment retry context") ||
-    normalizedMessage.includes("doesn't have a collectible total") ||
-    normalizedMessage.includes("no payment collection is available") ||
     normalizedMessage.includes("expired") ||
     normalizedMessage.includes("declined") ||
     normalizedMessage.includes("requires payment method") ||
@@ -573,6 +585,16 @@ export async function executePaymentRetry(
       error_message: null,
     }
   } catch (error) {
+    if (!paymentSession?.id) {
+      return {
+        kind: "setup_failure",
+        payment_reference: null,
+        error_code: readPaymentErrorCode(error) ?? "payment_session_setup_failed",
+        error_message:
+          error instanceof Error ? error.message : "Dunning payment retry failed",
+      }
+    }
+
     let paymentSessionStatus: string | null = paymentSession?.status ?? null
 
     if (paymentSession?.id) {
@@ -594,332 +616,337 @@ export async function executePaymentRetry(
   }
 }
 
-export const runDunningRetryStep = createStep(
-  "run-dunning-retry",
-  async function (
-    input: RunDunningRetryStepInput,
-    { container }
-  ) {
-    const logger = container.resolve("logger")
-    const dunningModule = container.resolve<DunningModuleService>(DUNNING_MODULE)
-    const subscriptionModule =
-      container.resolve<SubscriptionModuleService>(SUBSCRIPTION_MODULE)
-    const now = normalizeNow(input.now)
-    const startedAtMs = Date.now()
-    const correlationId =
-      input.correlation_id ??
-      createDunningCorrelationId(`dunning-retry-${input.ignore_schedule ? "manual" : "scheduled"}`)
+type ParkForManualResolutionInput = {
+  dunningCase: DunningCaseRecord
+  caseMetadata: Record<string, unknown> | null
+  attempt: DunningAttemptRecord
+  attemptStatus: DunningAttemptStatus
+  attemptNo: number
+  attemptCount: number
+  parkReason: DunningParkReason
+  outcome: PaymentRetryFailureOutcome
+  finishedAt: Date
+  correlationId: string
+  durationMs: number
+  subscriptionStatus: SubscriptionStatus
+}
 
-    const dunningCase = await loadDunningCase(container, input.dunning_case_id)
-    const attemptNo = await getNextAttemptNo(container, dunningCase)
-    const transitionSnapshot: RetryTransitionSnapshot = {
-      status: dunningCase.status,
-      attempt_count: dunningCase.attempt_count,
-      next_retry_at: dunningCase.next_retry_at,
-      last_attempt_at: dunningCase.last_attempt_at,
-      metadata: dunningCase.metadata ?? null,
+/**
+ * Hands the case to an operator instead of settling it, and returns rather than throws: past the
+ * RETRYING transition the step's catch rolls the case back to its pre-retry snapshot, which would
+ * undo the park and leave the scheduler free to pick the case up again.
+ */
+async function parkForManualResolution(
+  container: MedusaContainer,
+  input: ParkForManualResolutionInput
+): Promise<StepResponse<RunDunningRetryStepOutput>> {
+  const logger = container.resolve("logger")
+  const dunningModule = container.resolve<DunningModuleService>(DUNNING_MODULE)
+
+  await dunningModule.updateDunningAttempts({
+    id: input.attempt.id,
+    finished_at: input.finishedAt,
+    status: input.attemptStatus,
+    error_code: input.outcome.error_code,
+    error_message: input.outcome.error_message,
+    payment_reference: input.outcome.payment_reference,
+  } as any)
+
+  const updatedCase = await dunningModule.updateDunningCases({
+    id: input.dunningCase.id,
+    status: DunningCaseStatus.AWAITING_MANUAL_RESOLUTION,
+    attempt_count: input.attemptCount,
+    next_retry_at: null,
+    last_attempt_at: input.finishedAt,
+    last_payment_error_code: input.outcome.error_code,
+    last_payment_error_message: input.outcome.error_message,
+    metadata: {
+      ...(input.caseMetadata ?? {}),
+      park_reason: input.parkReason,
+    },
+  } as any)
+
+  logDunningEvent(logger, "error", {
+    event: "dunning.retry",
+    outcome: "failed",
+    correlation_id: input.correlationId,
+    dunning_case_id: updatedCase.id,
+    subscription_id: updatedCase.subscription_id,
+    renewal_cycle_id: updatedCase.renewal_cycle_id,
+    attempt_no: input.attemptNo,
+    duration_ms: input.durationMs,
+    failure_count: 1,
+    avg_attempts: input.attemptNo,
+    alertable: true,
+    message: input.outcome.error_message,
+    metadata: {
+      retry_outcome: "awaiting_manual_resolution",
+      park_reason: input.parkReason,
+      error_code: input.outcome.error_code,
+      payment_reference: input.outcome.payment_reference,
+    },
+  })
+
+  return new StepResponse<RunDunningRetryStepOutput>({
+    dunning_case_id: updatedCase.id,
+    dunning_attempt_id: input.attempt.id,
+    outcome: "awaiting_manual_resolution",
+    subscription_status: input.subscriptionStatus,
+    correlation_id: input.correlationId,
+    attempt_no: input.attemptNo,
+  })
+}
+
+/** Exported for unit tests: `createStep` doesn't expose its handler. */
+export async function runDunningRetry(
+  container: MedusaContainer,
+  input: RunDunningRetryStepInput
+): Promise<StepResponse<RunDunningRetryStepOutput>> {
+  const logger = container.resolve("logger")
+  const dunningModule = container.resolve<DunningModuleService>(DUNNING_MODULE)
+  const subscriptionModule =
+    container.resolve<SubscriptionModuleService>(SUBSCRIPTION_MODULE)
+  const now = normalizeNow(input.now)
+  const startedAtMs = Date.now()
+  const correlationId =
+    input.correlation_id ??
+    createDunningCorrelationId(`dunning-retry-${input.ignore_schedule ? "manual" : "scheduled"}`)
+
+  const dunningCase = await loadDunningCase(container, input.dunning_case_id)
+  const attemptNo = await getNextAttemptNo(container, dunningCase)
+  const transitionSnapshot: RetryTransitionSnapshot = {
+    status: dunningCase.status,
+    attempt_count: dunningCase.attempt_count,
+    next_retry_at: dunningCase.next_retry_at,
+    last_attempt_at: dunningCase.last_attempt_at,
+    metadata: dunningCase.metadata ?? null,
+  }
+  // Budget position, not row number: `attempt_no` stays monotonic across aborted rows, so it can
+  // neither index the retry schedule nor drive the attempt limit.
+  const consumedAttempts = transitionSnapshot.attempt_count + 1
+  let transitionedToRetrying = false
+
+  logDunningEvent(logger, "info", {
+    event: "dunning.retry",
+    outcome: "started",
+    correlation_id: correlationId,
+    dunning_case_id: dunningCase.id,
+    subscription_id: dunningCase.subscription_id,
+    renewal_cycle_id: dunningCase.renewal_cycle_id,
+    attempt_no: attemptNo,
+    metadata: {
+      triggered_by: input.triggered_by ?? null,
+      reason: input.reason ?? null,
+      ignore_schedule: Boolean(input.ignore_schedule),
+    },
+  })
+
+  try {
+    const subscription = await loadSubscription(
+      container,
+      dunningCase.subscription_id
+    )
+
+    const eligibility = validateRetryableCase(
+      dunningCase,
+      subscription,
+      now,
+      input.ignore_schedule
+    )
+
+    if (
+      eligibility.blocked_reason === RetryBlockedReason.SUBSCRIPTION_NOT_RETRYABLE
+    ) {
+      await settleNonRetryableCase(
+        dunningModule,
+        dunningCase,
+        subscription.status,
+        now
+      )
+
+      throw dunningErrors.subscriptionNotRetryable(
+        dunningCase.id,
+        subscription.id,
+        subscription.status
+      )
     }
-    let transitionedToRetrying = false
 
-    logDunningEvent(logger, "info", {
-      event: "dunning.retry",
-      outcome: "started",
-      correlation_id: correlationId,
+    if (eligibility.blocked_reason === RetryBlockedReason.NO_PAYMENT_METHOD) {
+      await dunningModule.updateDunningCases({
+        id: dunningCase.id,
+        status: DunningCaseStatus.AWAITING_MANUAL_RESOLUTION,
+        next_retry_at: null,
+      } as any)
+
+      throw dunningErrors.noPaymentMethod(dunningCase.id, subscription.id)
+    }
+
+    const startedAt = now
+    const retryMetadata: Record<string, unknown> = {
+      ...appendRetryAuditMetadata(
+        dunningCase.metadata,
+        input,
+        startedAt.toISOString()
+      ),
+      park_reason: null,
+    }
+
+    await dunningModule.updateDunningCases({
+      id: dunningCase.id,
+      status: DunningCaseStatus.RETRYING,
+      attempt_count: consumedAttempts,
+      next_retry_at: null,
+      last_attempt_at: startedAt,
+      metadata: retryMetadata,
+    } as any)
+    transitionedToRetrying = true
+
+    const attempt = (await dunningModule.createDunningAttempts({
       dunning_case_id: dunningCase.id,
-      subscription_id: dunningCase.subscription_id,
-      renewal_cycle_id: dunningCase.renewal_cycle_id,
       attempt_no: attemptNo,
+      started_at: startedAt,
+      finished_at: null,
+      status: DunningAttemptStatus.PROCESSING,
+      error_code: null,
+      error_message: null,
+      payment_reference: null,
       metadata: {
         triggered_by: input.triggered_by ?? null,
         reason: input.reason ?? null,
-        ignore_schedule: Boolean(input.ignore_schedule),
+        correlation_id: correlationId,
       },
-    })
+    } as any)) as DunningAttemptRecord
 
-    try {
-      const subscription = await loadSubscription(
-        container,
-        dunningCase.subscription_id
-      )
+    const outcome = await executePaymentRetry(
+      container,
+      subscription,
+      dunningCase.renewal_order_id!,
+      input.payment_session_data
+    )
+    const finishedAt = new Date()
 
-      const eligibility = validateRetryableCase(
-        dunningCase,
-        subscription,
-        now,
-        input.ignore_schedule
-      )
-
-      if (
-        eligibility.blocked_reason === RetryBlockedReason.SUBSCRIPTION_NOT_RETRYABLE
-      ) {
-        await settleNonRetryableCase(
-          dunningModule,
-          dunningCase,
-          subscription.status,
-          now
-        )
-
-        throw dunningErrors.subscriptionNotRetryable(
-          dunningCase.id,
-          subscription.id,
-          subscription.status
-        )
-      }
-
-      if (eligibility.blocked_reason === RetryBlockedReason.NO_PAYMENT_METHOD) {
-        await dunningModule.updateDunningCases({
-          id: dunningCase.id,
-          status: DunningCaseStatus.AWAITING_MANUAL_RESOLUTION,
-          next_retry_at: null,
-        } as any)
-
-        throw dunningErrors.noPaymentMethod(dunningCase.id, subscription.id)
-      }
-
-      const startedAt = now
-
-      await dunningModule.updateDunningCases({
-        id: dunningCase.id,
-        status: DunningCaseStatus.RETRYING,
-        attempt_count: attemptNo,
-        next_retry_at: null,
-        last_attempt_at: startedAt,
-        metadata: appendRetryAuditMetadata(
-          dunningCase.metadata,
-          input,
-          startedAt.toISOString()
-        ),
-      } as any)
-      transitionedToRetrying = true
-
-      const attempt = (await dunningModule.createDunningAttempts({
-        dunning_case_id: dunningCase.id,
-        attempt_no: attemptNo,
-        started_at: startedAt,
-        finished_at: null,
-        status: DunningAttemptStatus.PROCESSING,
-        error_code: null,
-        error_message: null,
-        payment_reference: null,
-        metadata: {
-          triggered_by: input.triggered_by ?? null,
-          reason: input.reason ?? null,
-          correlation_id: correlationId,
-        },
-      } as any)) as DunningAttemptRecord
-
-      const outcome = await executePaymentRetry(
-        container,
-        subscription,
-        dunningCase.renewal_order_id!,
-        input.payment_session_data
-      )
-      const finishedAt = new Date()
-
-      if (outcome.kind === "recovery") {
-        await dunningModule.updateDunningAttempts({
-          id: attempt.id,
-          finished_at: finishedAt,
-          status: DunningAttemptStatus.SUCCEEDED,
-          error_code: null,
-          error_message: null,
-          payment_reference: outcome.payment_reference,
-        } as any)
-
-        const updatedCase = await dunningModule.updateDunningCases({
-          id: dunningCase.id,
-          status: DunningCaseStatus.RECOVERED,
-          next_retry_at: null,
-          last_attempt_at: finishedAt,
-          last_payment_error_code: null,
-          last_payment_error_message: null,
-          recovered_at: finishedAt,
-          closed_at: finishedAt,
-          recovery_reason: "payment_recovered",
-        } as any)
-
-        if (subscription.status === SubscriptionStatus.PAST_DUE) {
-          await subscriptionModule.updateSubscriptions({
-            id: subscription.id,
-            status: SubscriptionStatus.ACTIVE,
-          })
-        }
-
-        const createdAt = updatedCase.created_at
-          ? new Date(updatedCase.created_at)
-          : dunningCase.created_at
-            ? new Date(dunningCase.created_at)
-            : null
-        const timeToRecoverMs = createdAt
-          ? finishedAt.getTime() - createdAt.getTime()
-          : null
-
-        logDunningEvent(logger, "info", {
-          event: "dunning.retry",
-          outcome: "succeeded",
-          correlation_id: correlationId,
-          dunning_case_id: updatedCase.id,
-          subscription_id: updatedCase.subscription_id,
-          renewal_cycle_id: updatedCase.renewal_cycle_id,
-          attempt_no: attemptNo,
-          duration_ms: Date.now() - startedAtMs,
-          success_count: 1,
-          recovered_count: 1,
-          avg_attempts: attemptNo,
-          avg_time_to_recover_ms: timeToRecoverMs ?? undefined,
-          metadata: {
-            retry_outcome: "recovered",
-            payment_reference: outcome.payment_reference,
-          },
-        })
-
-        return new StepResponse<RunDunningRetryStepOutput>({
-          dunning_case_id: updatedCase.id,
-          dunning_attempt_id: attempt.id,
-          outcome: "recovered",
-          subscription_status: SubscriptionStatus.ACTIVE,
-          correlation_id: correlationId,
-          attempt_no: attemptNo,
-          time_to_recover_ms: timeToRecoverMs,
-        })
-      }
-
+    if (outcome.kind === "recovery") {
       await dunningModule.updateDunningAttempts({
         id: attempt.id,
         finished_at: finishedAt,
-        status: DunningAttemptStatus.FAILED,
-        error_code: outcome.error_code,
-        error_message: outcome.error_message,
+        status: DunningAttemptStatus.SUCCEEDED,
+        error_code: null,
+        error_message: null,
         payment_reference: outcome.payment_reference,
       } as any)
 
-      const shouldCloseAsUnrecovered =
-        outcome.kind === "permanent_failure" ||
-        attemptNo >= dunningCase.max_attempts
+      const updatedCase = await dunningModule.updateDunningCases({
+        id: dunningCase.id,
+        status: DunningCaseStatus.RECOVERED,
+        next_retry_at: null,
+        last_attempt_at: finishedAt,
+        last_payment_error_code: null,
+        last_payment_error_message: null,
+        recovered_at: finishedAt,
+        closed_at: finishedAt,
+        recovery_reason: "payment_recovered",
+      } as any)
 
-      if (shouldCloseAsUnrecovered) {
-        const recoveryReason =
-          outcome.kind === "permanent_failure"
-            ? "permanent_payment_failure"
-            : "retry_limit_exhausted"
-
-        const settledStatus = await settleSubscriptionPaymentFailure(container, {
-          subscription_id: subscription.id,
-          dunning_case_id: dunningCase.id,
-          recovery_reason: recoveryReason,
-          at: finishedAt,
-        })
-
-        const updatedCase = await dunningModule.updateDunningCases({
-          id: dunningCase.id,
-          status: DunningCaseStatus.UNRECOVERED,
-          next_retry_at: null,
-          last_attempt_at: finishedAt,
-          last_payment_error_code: outcome.error_code,
-          last_payment_error_message: outcome.error_message,
-          closed_at: finishedAt,
-          recovery_reason: recoveryReason,
-        } as any)
-
-        logDunningEvent(logger, "warn", {
-          event: "dunning.retry",
-          outcome: "failed",
-          correlation_id: correlationId,
-          dunning_case_id: updatedCase.id,
-          subscription_id: updatedCase.subscription_id,
-          renewal_cycle_id: updatedCase.renewal_cycle_id,
-          attempt_no: attemptNo,
-          duration_ms: Date.now() - startedAtMs,
-          failure_count: 1,
-          unrecovered_count: 1,
-          avg_attempts: attemptNo,
-          failure_kind: "retry_exhausted",
-          alertable: outcome.kind === "permanent_failure",
-          message: outcome.error_message,
-          metadata: {
-            retry_outcome: "unrecovered",
-            error_code: outcome.error_code,
-            payment_reference: outcome.payment_reference,
-          },
-        })
-
-        return new StepResponse<RunDunningRetryStepOutput>({
-          dunning_case_id: updatedCase.id,
-          dunning_attempt_id: attempt.id,
-          outcome: "unrecovered",
-          subscription_status: settledStatus,
-          correlation_id: correlationId,
-          attempt_no: attemptNo,
+      if (subscription.status === SubscriptionStatus.PAST_DUE) {
+        await subscriptionModule.updateSubscriptions({
+          id: subscription.id,
+          status: SubscriptionStatus.ACTIVE,
         })
       }
 
-      const nextRetryAt = calculateNextRetryAt(
-        dunningCase.retry_schedule!,
+      const createdAt = updatedCase.created_at
+        ? new Date(updatedCase.created_at)
+        : dunningCase.created_at
+          ? new Date(dunningCase.created_at)
+          : null
+      const timeToRecoverMs = createdAt
+        ? finishedAt.getTime() - createdAt.getTime()
+        : null
+
+      logDunningEvent(logger, "info", {
+        event: "dunning.retry",
+        outcome: "succeeded",
+        correlation_id: correlationId,
+        dunning_case_id: updatedCase.id,
+        subscription_id: updatedCase.subscription_id,
+        renewal_cycle_id: updatedCase.renewal_cycle_id,
+        attempt_no: attemptNo,
+        duration_ms: Date.now() - startedAtMs,
+        success_count: 1,
+        recovered_count: 1,
+        avg_attempts: attemptNo,
+        avg_time_to_recover_ms: timeToRecoverMs ?? undefined,
+        metadata: {
+          retry_outcome: "recovered",
+          payment_reference: outcome.payment_reference,
+        },
+      })
+
+      return new StepResponse<RunDunningRetryStepOutput>({
+        dunning_case_id: updatedCase.id,
+        dunning_attempt_id: attempt.id,
+        outcome: "recovered",
+        subscription_status: SubscriptionStatus.ACTIVE,
+        correlation_id: correlationId,
+        attempt_no: attemptNo,
+        time_to_recover_ms: timeToRecoverMs,
+      })
+    }
+
+    // No payment session was ever created, so nothing was charged. Keep the audit row but give the
+    // budget its attempt back.
+    if (outcome.kind === "setup_failure") {
+      return await parkForManualResolution(container, {
+        dunningCase,
+        caseMetadata: retryMetadata,
+        attempt,
+        attemptStatus: DunningAttemptStatus.ABORTED,
         attemptNo,
-        finishedAt
-      )
+        attemptCount: transitionSnapshot.attempt_count,
+        parkReason: "setup_failure",
+        outcome,
+        finishedAt,
+        correlationId,
+        durationMs: Date.now() - startedAtMs,
+        subscriptionStatus: subscription.status,
+      })
+    }
 
-      if (!nextRetryAt) {
-        const settledStatus = await settleSubscriptionPaymentFailure(container, {
-          subscription_id: subscription.id,
-          dunning_case_id: dunningCase.id,
-          recovery_reason: "retry_schedule_exhausted",
-          at: finishedAt,
-        })
+    await dunningModule.updateDunningAttempts({
+      id: attempt.id,
+      finished_at: finishedAt,
+      status: DunningAttemptStatus.FAILED,
+      error_code: outcome.error_code,
+      error_message: outcome.error_message,
+      payment_reference: outcome.payment_reference,
+    } as any)
 
-        const updatedCase = await dunningModule.updateDunningCases({
-          id: dunningCase.id,
-          status: DunningCaseStatus.UNRECOVERED,
-          next_retry_at: null,
-          last_attempt_at: finishedAt,
-          last_payment_error_code: outcome.error_code,
-          last_payment_error_message: outcome.error_message,
-          closed_at: finishedAt,
-          recovery_reason: "retry_schedule_exhausted",
-        } as any)
+    const shouldCloseAsUnrecovered =
+      outcome.kind === "permanent_failure" ||
+      consumedAttempts >= dunningCase.max_attempts
 
-        logDunningEvent(logger, "warn", {
-          event: "dunning.retry",
-          outcome: "failed",
-          correlation_id: correlationId,
-          dunning_case_id: updatedCase.id,
-          subscription_id: updatedCase.subscription_id,
-          renewal_cycle_id: updatedCase.renewal_cycle_id,
-          attempt_no: attemptNo,
-          duration_ms: Date.now() - startedAtMs,
-          failure_count: 1,
-          unrecovered_count: 1,
-          avg_attempts: attemptNo,
-          failure_kind: "retry_exhausted",
-          alertable: false,
-          message: outcome.error_message,
-          metadata: {
-            retry_outcome: "unrecovered",
-            error_code: outcome.error_code,
-            payment_reference: outcome.payment_reference,
-          },
-        })
+    if (shouldCloseAsUnrecovered) {
+      const recoveryReason =
+        outcome.kind === "permanent_failure"
+          ? "permanent_payment_failure"
+          : "retry_limit_exhausted"
 
-        return new StepResponse<RunDunningRetryStepOutput>({
-          dunning_case_id: updatedCase.id,
-          dunning_attempt_id: attempt.id,
-          outcome: "unrecovered",
-          subscription_status: settledStatus,
-          correlation_id: correlationId,
-          attempt_no: attemptNo,
-        })
-      }
+      const settledStatus = await settleSubscriptionPaymentFailure(container, {
+        subscription_id: subscription.id,
+        dunning_case_id: dunningCase.id,
+        recovery_reason: recoveryReason,
+        at: finishedAt,
+      })
 
       const updatedCase = await dunningModule.updateDunningCases({
         id: dunningCase.id,
-        status: DunningCaseStatus.RETRY_SCHEDULED,
-        next_retry_at: nextRetryAt,
+        status: DunningCaseStatus.UNRECOVERED,
+        next_retry_at: null,
         last_attempt_at: finishedAt,
         last_payment_error_code: outcome.error_code,
         last_payment_error_message: outcome.error_message,
-        recovered_at: null,
-        closed_at: null,
-        recovery_reason: null,
+        closed_at: finishedAt,
+        recovery_reason: recoveryReason,
       } as any)
 
       logDunningEvent(logger, "warn", {
@@ -932,61 +959,168 @@ export const runDunningRetryStep = createStep(
         attempt_no: attemptNo,
         duration_ms: Date.now() - startedAtMs,
         failure_count: 1,
-        rescheduled_count: 1,
+        unrecovered_count: 1,
         avg_attempts: attemptNo,
-        failure_kind: "unexpected_error",
-        alertable: outcome.kind === "temporary_failure",
+        failure_kind: "retry_exhausted",
+        alertable: outcome.kind === "permanent_failure",
         message: outcome.error_message,
         metadata: {
-          retry_outcome: "retry_scheduled",
+          retry_outcome: "unrecovered",
           error_code: outcome.error_code,
           payment_reference: outcome.payment_reference,
-          next_retry_at: nextRetryAt.toISOString(),
         },
       })
 
       return new StepResponse<RunDunningRetryStepOutput>({
         dunning_case_id: updatedCase.id,
         dunning_attempt_id: attempt.id,
-        outcome: "retry_scheduled",
-        subscription_status: subscription.status,
+        outcome: "unrecovered",
+        subscription_status: settledStatus,
         correlation_id: correlationId,
         attempt_no: attemptNo,
       })
-    } catch (error) {
-      const failureKind = classifyDunningFailure(error)
-      logDunningEvent(logger, isAlertableDunningFailure(failureKind) ? "error" : "warn", {
-        event: "dunning.retry",
-        outcome: isAlertableDunningFailure(failureKind) ? "failed" : "blocked",
-        correlation_id: correlationId,
+    }
+
+    const nextRetryAt = calculateNextRetryAt(
+      dunningCase.retry_schedule!,
+      consumedAttempts,
+      finishedAt
+    )
+
+    if (!nextRetryAt) {
+      const settledStatus = await settleSubscriptionPaymentFailure(container, {
+        subscription_id: subscription.id,
         dunning_case_id: dunningCase.id,
-        subscription_id: dunningCase.subscription_id,
-        renewal_cycle_id: dunningCase.renewal_cycle_id,
+        recovery_reason: "retry_schedule_exhausted",
+        at: finishedAt,
+      })
+
+      const updatedCase = await dunningModule.updateDunningCases({
+        id: dunningCase.id,
+        status: DunningCaseStatus.UNRECOVERED,
+        next_retry_at: null,
+        last_attempt_at: finishedAt,
+        last_payment_error_code: outcome.error_code,
+        last_payment_error_message: outcome.error_message,
+        closed_at: finishedAt,
+        recovery_reason: "retry_schedule_exhausted",
+      } as any)
+
+      logDunningEvent(logger, "warn", {
+        event: "dunning.retry",
+        outcome: "failed",
+        correlation_id: correlationId,
+        dunning_case_id: updatedCase.id,
+        subscription_id: updatedCase.subscription_id,
+        renewal_cycle_id: updatedCase.renewal_cycle_id,
         attempt_no: attemptNo,
         duration_ms: Date.now() - startedAtMs,
         failure_count: 1,
-        failure_kind: failureKind,
-        alertable: isAlertableDunningFailure(failureKind),
-        message: getDunningErrorMessage(error),
+        unrecovered_count: 1,
+        avg_attempts: attemptNo,
+        failure_kind: "retry_exhausted",
+        alertable: false,
+        message: outcome.error_message,
         metadata: {
-          triggered_by: input.triggered_by ?? null,
-          reason: input.reason ?? null,
-          ignore_schedule: Boolean(input.ignore_schedule),
+          retry_outcome: "unrecovered",
+          error_code: outcome.error_code,
+          payment_reference: outcome.payment_reference,
         },
       })
 
-      if (transitionedToRetrying) {
-        await dunningModule.updateDunningCases({
-          id: dunningCase.id,
-          status: transitionSnapshot.status,
-          attempt_count: transitionSnapshot.attempt_count,
-          next_retry_at: transitionSnapshot.next_retry_at,
-          last_attempt_at: transitionSnapshot.last_attempt_at,
-          metadata: transitionSnapshot.metadata,
-        } as any)
-      }
-
-      throw error
+      return new StepResponse<RunDunningRetryStepOutput>({
+        dunning_case_id: updatedCase.id,
+        dunning_attempt_id: attempt.id,
+        outcome: "unrecovered",
+        subscription_status: settledStatus,
+        correlation_id: correlationId,
+        attempt_no: attemptNo,
+      })
     }
+
+    const updatedCase = await dunningModule.updateDunningCases({
+      id: dunningCase.id,
+      status: DunningCaseStatus.RETRY_SCHEDULED,
+      next_retry_at: nextRetryAt,
+      last_attempt_at: finishedAt,
+      last_payment_error_code: outcome.error_code,
+      last_payment_error_message: outcome.error_message,
+      recovered_at: null,
+      closed_at: null,
+      recovery_reason: null,
+    } as any)
+
+    logDunningEvent(logger, "warn", {
+      event: "dunning.retry",
+      outcome: "failed",
+      correlation_id: correlationId,
+      dunning_case_id: updatedCase.id,
+      subscription_id: updatedCase.subscription_id,
+      renewal_cycle_id: updatedCase.renewal_cycle_id,
+      attempt_no: attemptNo,
+      duration_ms: Date.now() - startedAtMs,
+      failure_count: 1,
+      rescheduled_count: 1,
+      avg_attempts: attemptNo,
+      failure_kind: "unexpected_error",
+      alertable: outcome.kind === "temporary_failure",
+      message: outcome.error_message,
+      metadata: {
+        retry_outcome: "retry_scheduled",
+        error_code: outcome.error_code,
+        payment_reference: outcome.payment_reference,
+        next_retry_at: nextRetryAt.toISOString(),
+      },
+    })
+
+    return new StepResponse<RunDunningRetryStepOutput>({
+      dunning_case_id: updatedCase.id,
+      dunning_attempt_id: attempt.id,
+      outcome: "retry_scheduled",
+      subscription_status: subscription.status,
+      correlation_id: correlationId,
+      attempt_no: attemptNo,
+    })
+  } catch (error) {
+    const failureKind = classifyDunningFailure(error)
+    logDunningEvent(logger, isAlertableDunningFailure(failureKind) ? "error" : "warn", {
+      event: "dunning.retry",
+      outcome: isAlertableDunningFailure(failureKind) ? "failed" : "blocked",
+      correlation_id: correlationId,
+      dunning_case_id: dunningCase.id,
+      subscription_id: dunningCase.subscription_id,
+      renewal_cycle_id: dunningCase.renewal_cycle_id,
+      attempt_no: attemptNo,
+      duration_ms: Date.now() - startedAtMs,
+      failure_count: 1,
+      failure_kind: failureKind,
+      alertable: isAlertableDunningFailure(failureKind),
+      message: getDunningErrorMessage(error),
+      metadata: {
+        triggered_by: input.triggered_by ?? null,
+        reason: input.reason ?? null,
+        ignore_schedule: Boolean(input.ignore_schedule),
+      },
+    })
+
+    if (transitionedToRetrying) {
+      await dunningModule.updateDunningCases({
+        id: dunningCase.id,
+        status: transitionSnapshot.status,
+        attempt_count: transitionSnapshot.attempt_count,
+        next_retry_at: transitionSnapshot.next_retry_at,
+        last_attempt_at: transitionSnapshot.last_attempt_at,
+        metadata: transitionSnapshot.metadata,
+      } as any)
+    }
+
+    throw error
+  }
+}
+
+export const runDunningRetryStep = createStep(
+  "run-dunning-retry",
+  async function (input: RunDunningRetryStepInput, { container }) {
+    return await runDunningRetry(container, input)
   }
 )

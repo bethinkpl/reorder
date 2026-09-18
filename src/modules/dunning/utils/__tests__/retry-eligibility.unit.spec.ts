@@ -183,6 +183,45 @@ describe("resolveRetryEligibility", () => {
   })
 })
 
+describe("resolveRetryEligibility - parked cases", () => {
+  const parkedCase = {
+    status: DunningCaseStatus.AWAITING_MANUAL_RESOLUTION,
+    metadata: { park_reason: "setup_failure" },
+  }
+
+  it("blocks a gated caller on a case the retry engine parked", () => {
+    expect(
+      resolveRetryEligibility({
+        ...buildInput({ dunningCase: parkedCase }),
+        block_parked: true,
+      })
+    ).toEqual({
+      eligible: false,
+      blocked_reason: RetryBlockedReason.MANUAL_RESOLUTION_REQUIRED,
+    })
+  })
+
+  it("leaves the same case retryable for an ungated caller", () => {
+    expect(
+      resolveRetryEligibility(buildInput({ dunningCase: parkedCase }))
+    ).toEqual({ eligible: true, blocked_reason: null })
+  })
+
+  it("does not gate a case parked for a missing payment method", () => {
+    expect(
+      resolveRetryEligibility({
+        ...buildInput({
+          dunningCase: {
+            status: DunningCaseStatus.AWAITING_MANUAL_RESOLUTION,
+            metadata: null,
+          },
+        }),
+        block_parked: true,
+      })
+    ).toEqual({ eligible: true, blocked_reason: null })
+  })
+})
+
 describe("toRetryBlockedError", () => {
   const caseFor = (status: DunningCaseStatus) => ({ id: "dun_1", status })
 
@@ -210,6 +249,7 @@ describe("toRetryBlockedError", () => {
     RetryBlockedReason.MISSING_RETRY_SCHEDULE,
     RetryBlockedReason.NO_PAYMENT_METHOD,
     RetryBlockedReason.NO_ACTIVE_CASE,
+    RetryBlockedReason.MANUAL_RESOLUTION_REQUIRED,
   ])("names the case in its error for '%s'", (reason) => {
     const error = toRetryBlockedError(reason, caseFor(DunningCaseStatus.RETRY_SCHEDULED))
 

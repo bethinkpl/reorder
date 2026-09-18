@@ -107,6 +107,7 @@ type DunningCaseRecord = {
   next_retry_at: string | Date | null
   last_payment_error_code: string | null
   last_payment_error_message: string | null
+  metadata: Record<string, unknown> | null
 }
 
 type DunningAttemptRecord = {
@@ -376,9 +377,11 @@ function mapPaymentRecovery(
       max_attempts: dunningCase.max_attempts,
       renewal_order_id: dunningCase.renewal_order_id ?? null,
       retry_schedule: dunningCase.retry_schedule ?? null,
+      metadata: dunningCase.metadata ?? null,
     },
     subscriptionStatus: subscription.status as SubscriptionStatus,
     paymentContext: subscription.payment_context ?? null,
+    block_parked: true,
   })
 
   return {
@@ -444,6 +447,7 @@ async function getSubscriptionDunningCase(
       "next_retry_at",
       "last_payment_error_code",
       "last_payment_error_message",
+      "metadata",
     ],
     filters: {
       subscription_id: [subscriptionId],
@@ -512,6 +516,7 @@ async function getDunningCasesForSubscriptions(
       "next_retry_at",
       "last_payment_error_code",
       "last_payment_error_message",
+      "metadata",
     ],
     filters: {
       subscription_id: subscriptionIds,
@@ -829,10 +834,12 @@ export async function getRetryableDunningCaseForSubscription(
           max_attempts: dunningCase.max_attempts,
           renewal_order_id: dunningCase.renewal_order_id ?? null,
           retry_schedule: dunningCase.retry_schedule ?? null,
+          metadata: dunningCase.metadata ?? null,
         }
       : null,
     subscriptionStatus: subscription.status as SubscriptionStatus,
     paymentContext: subscription.payment_context ?? null,
+    block_parked: true,
   })
 
   if (!eligibility.eligible) {

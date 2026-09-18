@@ -16,6 +16,7 @@ const dunningAttemptStatusSchema = z.enum([
   "processing",
   "succeeded",
   "failed",
+  "aborted",
 ])
 
 export const GetAdminDunningCasesSchema = createFindParams({

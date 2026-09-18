@@ -115,6 +115,7 @@ async function runJob(container: MedusaContainer) {
     let unrecovered = 0
     let failed = 0
     let blocked = 0
+    let parked = 0
     let attemptTotal = 0
     let recoveredTtrTotal = 0
     let recoveredTtrCount = 0
@@ -177,6 +178,8 @@ async function runJob(container: MedusaContainer) {
           rescheduled += 1
         } else if (outcome === "unrecovered") {
           unrecovered += 1
+        } else if (outcome === "awaiting_manual_resolution") {
+          parked += 1
         } else if (outcome === "blocked") {
           blocked += 1
         } else {
@@ -214,6 +217,7 @@ async function runJob(container: MedusaContainer) {
       message: "Dunning scheduler completed",
       metadata: {
         raw_count: rawCount,
+        parked_count: parked,
       },
     })
   } catch (error) {

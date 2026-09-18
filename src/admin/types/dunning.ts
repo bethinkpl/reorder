@@ -11,6 +11,7 @@ export enum DunningAttemptAdminStatus {
   PROCESSING = "processing",
   SUCCEEDED = "succeeded",
   FAILED = "failed",
+  ABORTED = "aborted",
 }
 
 export type DunningAdminSubscriptionSummary = {
@@ -72,6 +73,7 @@ export type DunningRetryBlockedReason =
   | "missing_renewal_order"
   | "missing_retry_schedule"
   | "retry_not_due"
+  | "manual_resolution_required"
 
 export type DunningCaseAdminDetail = {
   id: string

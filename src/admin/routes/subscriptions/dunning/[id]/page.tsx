@@ -1044,6 +1044,8 @@ function formatRetryBlockedReason(reason: DunningRetryBlockedReason) {
       return "the case has no retry schedule"
     case "retry_not_due":
       return "the next retry is not due yet"
+    case "manual_resolution_required":
+      return "the case needs manual resolution"
     default:
       reason satisfies never
       return reason
@@ -1075,6 +1077,8 @@ function formatAttemptStatus(status: DunningAttemptAdminStatus) {
       return "Succeeded"
     case DunningAttemptAdminStatus.FAILED:
       return "Failed"
+    case DunningAttemptAdminStatus.ABORTED:
+      return "Aborted"
   }
 }
 
@@ -1086,6 +1090,8 @@ function getAttemptStatusColor(status: DunningAttemptAdminStatus) {
       return "green"
     case DunningAttemptAdminStatus.FAILED:
       return "red"
+    case DunningAttemptAdminStatus.ABORTED:
+      return "grey"
   }
 }
 

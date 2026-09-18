@@ -16,6 +16,7 @@ export enum RetryBlockedReason {
   MISSING_RENEWAL_ORDER = "missing_renewal_order",
   MISSING_RETRY_SCHEDULE = "missing_retry_schedule",
   RETRY_NOT_DUE = "retry_not_due",
+  MANUAL_RESOLUTION_REQUIRED = "manual_resolution_required",
 }
 
 export type RetryEligibilityInput = {
@@ -26,6 +27,7 @@ export type RetryEligibilityInput = {
     renewal_order_id: string | null
     retry_schedule: unknown | null
     next_retry_at?: Date | string | null
+    metadata?: Record<string, unknown> | null
   } | null
   subscriptionStatus: SubscriptionStatus
   paymentContext: SubscriptionPaymentContext | null
@@ -34,6 +36,11 @@ export type RetryEligibilityInput = {
    * retry ignores the schedule, so callers asking "can this be retried now" leave it out.
    */
   now?: Date
+  /**
+   * Only the storefront sets this: a case parked by the retry engine needs an operator, and a
+   * customer-triggered retry would only park it again.
+   */
+  block_parked?: boolean
 }
 
 export type RetryEligibility = {
@@ -84,6 +91,14 @@ export function resolveRetryEligibility(input: RetryEligibilityInput): RetryElig
     return blocked(RetryBlockedReason.CASE_CLOSED)
   }
 
+  if (
+    input.block_parked &&
+    dunningCase.status === DunningCaseStatus.AWAITING_MANUAL_RESOLUTION &&
+    dunningCase.metadata?.park_reason
+  ) {
+    return blocked(RetryBlockedReason.MANUAL_RESOLUTION_REQUIRED)
+  }
+
   if (!CHARGEABLE_SUBSCRIPTION_STATUSES.includes(input.subscriptionStatus)) {
     return blocked(RetryBlockedReason.SUBSCRIPTION_NOT_RETRYABLE)
   }
@@ -130,6 +145,10 @@ export function toRetryBlockedError(
       return dunningErrors.maxAttemptsExceeded(dunningCase.id)
     case RetryBlockedReason.RETRY_NOT_DUE:
       return dunningErrors.retryNotDue(dunningCase.id)
+    case RetryBlockedReason.MANUAL_RESOLUTION_REQUIRED:
+      return dunningErrors.conflict(
+        `DunningCase '${dunningCase.id}' needs manual resolution before it can be retried`
+      )
     case RetryBlockedReason.MISSING_RENEWAL_ORDER:
       return dunningErrors.invalidData(
         `DunningCase '${dunningCase.id}' is missing renewal_order_id`

@@ -194,6 +194,8 @@ function mapAttemptStatus(status: DunningAttemptRecord["status"]) {
       return DunningAttemptAdminStatus.SUCCEEDED
     case DunningAttemptStatus.FAILED:
       return DunningAttemptAdminStatus.FAILED
+    case DunningAttemptStatus.ABORTED:
+      return DunningAttemptAdminStatus.ABORTED
   }
 
   throw dunningErrors.invalidData(

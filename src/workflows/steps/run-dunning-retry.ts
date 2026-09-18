@@ -435,10 +435,14 @@ function classifyPaymentRetryFailure(
     }
   }
 
+  // `card_declined` is the code behind nearly every soft decline: the reason that would tell them
+  // apart travels in Stripe's `decline_code`, which the provider drops on the way out. Settling on
+  // it would churn a customer whose bank would have taken the next attempt.
   if (
     normalizedErrorCode === "insufficient_funds" ||
     normalizedErrorCode === "generic_decline" ||
-    normalizedErrorCode === "do_not_honor"
+    normalizedErrorCode === "do_not_honor" ||
+    normalizedErrorCode === "card_declined"
   ) {
     return {
       kind: "temporary_failure",

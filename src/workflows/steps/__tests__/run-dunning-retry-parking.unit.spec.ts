@@ -438,9 +438,11 @@ describe("runDunningRetry - parking instead of churning", () => {
   })
 
   it("keeps retrying a thrown provider decline while the budget lasts", async () => {
+    // Stripe reports every soft decline as `card_declined` and keeps the reason in a `decline_code`
+    // the provider drops, so this must not read as a dead card on the first attempt.
     const { container } = buildContainer()
     mockPaymentSessionError(
-      thrownDecline("insufficient_funds", "Your card has insufficient funds.")
+      thrownDecline("card_declined", "Your card was declined.")
     )
 
     const response = await runDunningRetry(container, {
@@ -449,7 +451,7 @@ describe("runDunningRetry - parking instead of churning", () => {
 
     expect(response.output).toMatchObject({
       outcome: "retry_scheduled",
-      error_code: "insufficient_funds",
+      error_code: "card_declined",
     })
     expect(settleSubscriptionPaymentFailure).not.toHaveBeenCalled()
   })

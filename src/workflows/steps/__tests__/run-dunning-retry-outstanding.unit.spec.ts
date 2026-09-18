@@ -269,7 +269,7 @@ describe("executePaymentRetry - outstanding amount guard", () => {
     const outcome = await executePaymentRetry(container, subscription, "order_1")
 
     expect(outcome).toMatchObject({
-      kind: "permanent_failure",
+      kind: "temporary_failure",
       error_code: "card_declined",
       provider_reached: true,
     })

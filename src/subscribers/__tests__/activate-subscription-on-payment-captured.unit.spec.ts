@@ -58,8 +58,9 @@ function buildContainer(options: {
   staged: Staged
   paymentMethods: PaymentMethodStub[]
   captured: UpdateCall[]
+  errorLogs?: string[]
 }) {
-  const { staged, paymentMethods, captured } = options
+  const { staged, paymentMethods, captured, errorLogs = [] } = options
 
   const query = {
     graph: async ({ entity }: { entity: string }) => ({ data: staged[entity] ?? [] }),
@@ -72,6 +73,13 @@ function buildContainer(options: {
       captured.push(input)
 
       return input
+    },
+  }
+  const logger = {
+    info: () => {},
+    warn: () => {},
+    error: (message: string) => {
+      errorLogs.push(message)
     },
   }
 
@@ -88,6 +96,10 @@ function buildContainer(options: {
 
       if (key === SUBSCRIPTION_MODULE) {
         return subscriptionModule
+      }
+
+      if (key === "logger") {
+        return logger
       }
 
       throw new Error(`Unexpected resolve('${key}')`)
@@ -194,17 +206,47 @@ describe("activateSubscriptionOnPaymentCaptured", () => {
 
   it("does not resurrect a cancelled subscription", async () => {
     const captured: UpdateCall[] = []
+    const errorLogs: string[] = []
     const staged = defaultStaged()
     stagedSubscription(staged).status = SubscriptionStatus.CANCELLED
     const container = buildContainer({
       staged,
       paymentMethods: [{ id: "pm_new", data: { created: 200 } }],
       captured,
+      errorLogs,
     })
 
     await activateSubscriptionOnPaymentCaptured(container, "pay_1")
 
     expect(captured).toEqual([])
+    expect(errorLogs).toHaveLength(1)
+  })
+
+  it("logs an alertable line when a capture lands on a terminal subscription", async () => {
+    const captured: UpdateCall[] = []
+    const errorLogs: string[] = []
+    const staged = defaultStaged()
+    stagedSubscription(staged).status = SubscriptionStatus.PAYMENT_FAILED
+    const container = buildContainer({
+      staged,
+      paymentMethods: [{ id: "pm_new", data: { created: 200 } }],
+      captured,
+      errorLogs,
+    })
+
+    await activateSubscriptionOnPaymentCaptured(container, "pay_1")
+
+    expect(captured).toEqual([])
+    expect(errorLogs).toEqual([
+      JSON.stringify({
+        domain: "subscriptions",
+        event: "payment_captured_on_terminal_subscription",
+        subscription_id: "sub_1",
+        payment_id: "pay_1",
+        status: SubscriptionStatus.PAYMENT_FAILED,
+        alertable: true,
+      }),
+    ])
   })
 
   it("does nothing when the cart maps to no subscription", async () => {

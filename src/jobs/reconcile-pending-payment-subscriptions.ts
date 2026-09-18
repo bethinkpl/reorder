@@ -2,6 +2,7 @@ import { MedusaContainer } from "@medusajs/framework/types"
 import { Modules } from "@medusajs/framework/utils"
 import {
   reconcilePendingPaymentSubscriptions,
+  resolvePendingPaymentBatchSize,
   resolvePendingPaymentTtlMinutes,
 } from "../modules/subscription/utils/reconcile-pending-payment"
 
@@ -28,6 +29,7 @@ export default async function reconcilePendingPaymentSubscriptionsJob(
   const logger = getLogger(container)
   const locking = container.resolve(Modules.LOCKING)
   const ttlMinutes = resolvePendingPaymentTtlMinutes()
+  const batchSize = resolvePendingPaymentBatchSize()
   const startedAt = Date.now()
 
   try {
@@ -36,10 +38,11 @@ export default async function reconcilePendingPaymentSubscriptionsJob(
       async () => {
         const result = await reconcilePendingPaymentSubscriptions(container, {
           ttl_minutes: ttlMinutes,
+          batch_size: batchSize,
         })
 
         logger.info(
-          `[${JOB_NAME}] scanned ${result.scanned} pending_payment subscription(s), activated ${result.activated.length}, expired ${result.expired.length}, failed ${result.failed.length} (ttl ${ttlMinutes}m) in ${Date.now() - startedAt}ms`
+          `[${JOB_NAME}] scanned ${result.scanned} pending_payment subscription(s), activated ${result.activated.length}, expired ${result.expired.length}, deferred ${result.deferred.length}, failed ${result.failed.length} (ttl ${ttlMinutes}m, batch ${batchSize}) in ${Date.now() - startedAt}ms`
         )
       },
       {

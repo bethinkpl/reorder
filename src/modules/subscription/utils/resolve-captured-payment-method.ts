@@ -7,7 +7,21 @@ export type CapturedPaymentRecord = {
   captured_at: string | Date | null
 }
 
+export type LivePaymentRecord = {
+  id: string
+  payment_collection_id: string | null
+}
+
 type CartPaymentCollectionRecord = { payment_collection_id: string | null }
+
+type CartPaymentRecord = {
+  id: string
+  payment_collection_id: string | null
+  captured_at: string | Date | null
+  canceled_at: string | Date | null
+  amount: number | string | null
+  refunds?: { amount: number | string | null }[] | null
+}
 
 type CustomerAccountHolderRecord = {
   account_holders?:
@@ -82,13 +96,10 @@ export async function resolveLatestSavedPaymentMethod(
   }
 }
 
-/**
- * Finds a captured payment on the collection the cart was completed with.
- */
-export async function findCapturedPaymentForCart(
+async function listPaymentsForCart(
   container: MedusaContainer,
   cartId: string
-): Promise<CapturedPaymentRecord | null> {
+): Promise<CartPaymentRecord[]> {
   const query = container.resolve(ContainerRegistrationKeys.QUERY)
 
   const { data: cartLinks } = await query.graph({
@@ -102,17 +113,87 @@ export async function findCapturedPaymentForCart(
     .filter((id): id is string => !!id)
 
   if (!collectionIds.length) {
-    return null
+    return []
   }
 
   const { data: payments } = await query.graph({
     entity: "payment",
-    fields: ["id", "payment_collection_id", "captured_at"],
+    fields: [
+      "id",
+      "payment_collection_id",
+      "captured_at",
+      "canceled_at",
+      "amount",
+      "refunds.amount",
+    ],
     filters: { payment_collection_id: collectionIds },
   })
 
-  return (
-    (payments as CapturedPaymentRecord[]).find((payment) => !!payment.captured_at) ??
-    null
+  return payments as CartPaymentRecord[]
+}
+
+function isRefundedInFull(payment: CartPaymentRecord): boolean {
+  const amount = Number(payment.amount) || 0
+  const refunded = (payment.refunds ?? []).reduce(
+    (sum, refund) => sum + (Number(refund.amount) || 0),
+    0
   )
+
+  return amount > 0 && refunded >= amount
+}
+
+/**
+ * Finds a captured payment on the collection the cart was completed with. Excludes a payment
+ * that was later voided or refunded in full, and picks the most recently captured one when the
+ * cart carries more than one (a retried authorization after a decline, for example).
+ */
+export async function findCapturedPaymentForCart(
+  container: MedusaContainer,
+  cartId: string
+): Promise<CapturedPaymentRecord | null> {
+  const payments = await listPaymentsForCart(container, cartId)
+
+  const captured = payments.filter(
+    (payment) => !!payment.captured_at && !payment.canceled_at && !isRefundedInFull(payment)
+  )
+
+  if (!captured.length) {
+    return null
+  }
+
+  const newest = captured.reduce((latest, payment) =>
+    new Date(payment.captured_at as string).getTime() >
+      new Date(latest.captured_at as string).getTime()
+      ? payment
+      : latest
+  )
+
+  return {
+    id: newest.id,
+    payment_collection_id: newest.payment_collection_id,
+    captured_at: newest.captured_at,
+  }
+}
+
+/**
+ * Finds a payment on the cart that has been authorized but not yet captured or canceled. A
+ * `payment` row only exists once its session has been authorized, so `captured_at` and
+ * `canceled_at` both unset is exactly that live window — the whole life of a delayed-capture
+ * method (SEPA, bank debit, manual capture) before it settles. The `pending_payment` sweeper
+ * defers expiring a subscription while one of these is outstanding so a late capture is not
+ * orphaned.
+ */
+export async function findLivePaymentForCart(
+  container: MedusaContainer,
+  cartId: string
+): Promise<LivePaymentRecord | null> {
+  const payments = await listPaymentsForCart(container, cartId)
+
+  const live = payments.find((payment) => !payment.captured_at && !payment.canceled_at)
+
+  if (!live) {
+    return null
+  }
+
+  return { id: live.id, payment_collection_id: live.payment_collection_id }
 }

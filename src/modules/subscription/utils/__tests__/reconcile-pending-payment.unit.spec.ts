@@ -4,8 +4,10 @@ import { SUBSCRIPTION_MODULE } from "../.."
 import { SubscriptionStatus } from "../../types"
 import { ABANDONED_CHECKOUT_REASON } from "../cancel-abandoned-subscription"
 import {
+  DEFAULT_PENDING_PAYMENT_BATCH_SIZE,
   DEFAULT_PENDING_PAYMENT_TTL_MINUTES,
   reconcilePendingPaymentSubscriptions,
+  resolvePendingPaymentBatchSize,
   resolvePendingPaymentCutoff,
   resolvePendingPaymentTtlMinutes,
 } from "../reconcile-pending-payment"
@@ -30,32 +32,52 @@ type PendingRow = {
   metadata: Record<string, unknown> | null
 }
 
+type PaymentStub = {
+  captured_at: string | null
+  canceled_at?: string | null
+  amount?: number
+  refunds?: { amount: number }[]
+}
+
 const now = new Date("2026-09-14T12:00:00.000Z")
 
 function buildContainer(options: {
   pending: PendingRow[]
-  captures?: Record<string, string | null>
+  payments?: Record<string, PaymentStub[]>
   captured: UpdateCall[]
   throwOnRetrieve?: string[]
+  subscriptionPaginationCapture?: { value?: unknown }
 }) {
-  const { pending, captures = {}, captured, throwOnRetrieve = [] } = options
+  const {
+    pending,
+    payments = {},
+    captured,
+    throwOnRetrieve = [],
+    subscriptionPaginationCapture,
+  } = options
 
   const query = {
     graph: async ({
       entity,
       filters,
+      pagination,
     }: {
       entity: string
       filters?: Record<string, unknown>
+      pagination?: unknown
     }) => {
       if (entity === "subscription") {
+        if (subscriptionPaginationCapture) {
+          subscriptionPaginationCapture.value = pagination
+        }
+
         return { data: pending }
       }
 
       if (entity === "cart_payment_collection") {
         const cartId = filters?.cart_id as string
 
-        if (!(cartId in captures)) {
+        if (!(cartId in payments)) {
           return { data: [] }
         }
 
@@ -65,15 +87,17 @@ function buildContainer(options: {
       if (entity === "payment") {
         const collectionIds = filters?.payment_collection_id as string[]
         const cartId = collectionIds[0]?.replace("paycol_", "")
+        const stubs = payments[cartId ?? ""] ?? []
 
         return {
-          data: [
-            {
-              id: `pay_${cartId}`,
-              payment_collection_id: `paycol_${cartId}`,
-              captured_at: captures[cartId ?? ""] ?? null,
-            },
-          ],
+          data: stubs.map((stub, index) => ({
+            id: `pay_${cartId}_${index}`,
+            payment_collection_id: `paycol_${cartId}`,
+            captured_at: stub.captured_at,
+            canceled_at: stub.canceled_at ?? null,
+            amount: stub.amount ?? 1000,
+            refunds: stub.refunds ?? [],
+          })),
         }
       }
 
@@ -143,6 +167,22 @@ describe("resolvePendingPaymentCutoff", () => {
   })
 })
 
+describe("resolvePendingPaymentBatchSize", () => {
+  it("falls back to 200 when unset", () => {
+    expect(resolvePendingPaymentBatchSize(undefined)).toBe(DEFAULT_PENDING_PAYMENT_BATCH_SIZE)
+  })
+
+  it("falls back on a value that is not a positive integer", () => {
+    expect(resolvePendingPaymentBatchSize("0")).toBe(DEFAULT_PENDING_PAYMENT_BATCH_SIZE)
+    expect(resolvePendingPaymentBatchSize("-10")).toBe(DEFAULT_PENDING_PAYMENT_BATCH_SIZE)
+    expect(resolvePendingPaymentBatchSize("many")).toBe(DEFAULT_PENDING_PAYMENT_BATCH_SIZE)
+  })
+
+  it("honours a positive override", () => {
+    expect(resolvePendingPaymentBatchSize("50")).toBe(50)
+  })
+})
+
 describe("reconcilePendingPaymentSubscriptions", () => {
   beforeEach(() => {
     ensureNextRenewalCycleRun.mockClear()
@@ -159,7 +199,7 @@ describe("reconcilePendingPaymentSubscriptions", () => {
           metadata: null,
         },
       ],
-      captures: { cart_paid: "2026-09-14T09:00:00.000Z" },
+      payments: { cart_paid: [{ captured_at: "2026-09-14T09:00:00.000Z" }] },
       captured,
     })
 
@@ -172,6 +212,7 @@ describe("reconcilePendingPaymentSubscriptions", () => {
       scanned: 1,
       activated: ["sub_paid"],
       expired: [],
+      deferred: [],
       failed: [],
     })
     expect(captured).toEqual([{ id: "sub_paid", status: SubscriptionStatus.ACTIVE }])
@@ -181,7 +222,7 @@ describe("reconcilePendingPaymentSubscriptions", () => {
     })
   })
 
-  it("cancels a stale row whose payment never captured, keeping its existing metadata", async () => {
+  it("cancels a stale row whose cart never received a payment, keeping its existing metadata", async () => {
     const captured: UpdateCall[] = []
     const container = buildContainer({
       pending: [
@@ -192,7 +233,7 @@ describe("reconcilePendingPaymentSubscriptions", () => {
           metadata: { source_order_id: "order_1" },
         },
       ],
-      captures: { cart_stale: null },
+      payments: { cart_stale: [] },
       captured,
     })
 
@@ -205,6 +246,7 @@ describe("reconcilePendingPaymentSubscriptions", () => {
       scanned: 1,
       activated: [],
       expired: ["sub_stale"],
+      deferred: [],
       failed: [],
     })
     expect(captured).toHaveLength(1)
@@ -222,7 +264,108 @@ describe("reconcilePendingPaymentSubscriptions", () => {
     expect(ensureNextRenewalCycleRun).not.toHaveBeenCalled()
   })
 
-  it("leaves a fresh row without a captured payment alone", async () => {
+  it("defers a stale row whose cart still carries a live authorization, instead of cancelling it", async () => {
+    const captured: UpdateCall[] = []
+    const container = buildContainer({
+      pending: [
+        {
+          id: "sub_sepa",
+          cart_id: "cart_sepa",
+          created_at: "2026-09-13T10:00:00.000Z",
+          metadata: null,
+        },
+      ],
+      payments: { cart_sepa: [{ captured_at: null }] },
+      captured,
+    })
+
+    const result = await reconcilePendingPaymentSubscriptions(container, {
+      now,
+      ttl_minutes: 60,
+    })
+
+    expect(result).toEqual({
+      scanned: 1,
+      activated: [],
+      expired: [],
+      deferred: ["sub_sepa"],
+      failed: [],
+    })
+    expect(captured).toEqual([])
+    expect(ensureNextRenewalCycleRun).not.toHaveBeenCalled()
+  })
+
+  it("still expires a stale row whose only payment was canceled", async () => {
+    const captured: UpdateCall[] = []
+    const container = buildContainer({
+      pending: [
+        {
+          id: "sub_voided",
+          cart_id: "cart_voided",
+          created_at: "2026-09-13T10:00:00.000Z",
+          metadata: null,
+        },
+      ],
+      payments: {
+        cart_voided: [{ captured_at: null, canceled_at: "2026-09-13T11:00:00.000Z" }],
+      },
+      captured,
+    })
+
+    const result = await reconcilePendingPaymentSubscriptions(container, {
+      now,
+      ttl_minutes: 60,
+    })
+
+    expect(result).toEqual({
+      scanned: 1,
+      activated: [],
+      expired: ["sub_voided"],
+      deferred: [],
+      failed: [],
+    })
+  })
+
+  it("still expires a stale row whose only capture was refunded in full, since it is not a live authorization", async () => {
+    const captured: UpdateCall[] = []
+    const container = buildContainer({
+      pending: [
+        {
+          id: "sub_refunded",
+          cart_id: "cart_refunded",
+          created_at: "2026-09-13T10:00:00.000Z",
+          metadata: null,
+        },
+      ],
+      payments: {
+        cart_refunded: [
+          {
+            captured_at: "2026-09-13T11:00:00.000Z",
+            amount: 1000,
+            refunds: [{ amount: 1000 }],
+          },
+        ],
+      },
+      captured,
+    })
+
+    const result = await reconcilePendingPaymentSubscriptions(container, {
+      now,
+      ttl_minutes: 60,
+    })
+
+    expect(result).toEqual({
+      scanned: 1,
+      activated: [],
+      expired: ["sub_refunded"],
+      deferred: [],
+      failed: [],
+    })
+    expect(captured).toHaveLength(1)
+    expect(captured[0]).toMatchObject({ id: "sub_refunded", status: SubscriptionStatus.CANCELLED })
+  })
+
+  it("leaves a fresh row without any payment alone", async () => {
     const captured: UpdateCall[] = []
     const container = buildContainer({
       pending: [
@@ -233,7 +376,7 @@ describe("reconcilePendingPaymentSubscriptions", () => {
           metadata: null,
         },
       ],
-      captures: { cart_fresh: null },
+      payments: { cart_fresh: [] },
       captured,
     })
 
@@ -242,7 +385,7 @@ describe("reconcilePendingPaymentSubscriptions", () => {
       ttl_minutes: 60,
     })
 
-    expect(result).toEqual({ scanned: 1, activated: [], expired: [], failed: [] })
+    expect(result).toEqual({ scanned: 1, activated: [], expired: [], deferred: [], failed: [] })
     expect(captured).toEqual([])
     expect(ensureNextRenewalCycleRun).not.toHaveBeenCalled()
   })
@@ -276,6 +419,7 @@ describe("reconcilePendingPaymentSubscriptions", () => {
       scanned: 2,
       activated: [],
       expired: ["sub_no_cart_stale"],
+      deferred: [],
       failed: [],
     })
     expect(captured).toHaveLength(1)
@@ -299,7 +443,7 @@ describe("reconcilePendingPaymentSubscriptions", () => {
           metadata: null,
         },
       ],
-      captures: { cart_paid: "2026-09-14T09:00:00.000Z" },
+      payments: { cart_paid: [{ captured_at: "2026-09-14T09:00:00.000Z" }] },
       captured,
       throwOnRetrieve: ["sub_throw"],
     })
@@ -312,8 +456,41 @@ describe("reconcilePendingPaymentSubscriptions", () => {
     expect(result.scanned).toBe(2)
     expect(result.activated).toEqual(["sub_paid"])
     expect(result.expired).toEqual([])
+    expect(result.deferred).toEqual([])
     expect(result.failed).toEqual([{ id: "sub_throw", message: "boom: sub_throw" }])
     // The throw happens before the cutoff check, so the stale row is never cancelled either.
     expect(captured).toEqual([{ id: "sub_paid", status: SubscriptionStatus.ACTIVE }])
+  })
+
+  it("passes the configured batch size and oldest-first order to the subscription query", async () => {
+    const subscriptionPaginationCapture: { value?: unknown } = {}
+    const container = buildContainer({
+      pending: [],
+      captured: [],
+      subscriptionPaginationCapture,
+    })
+
+    await reconcilePendingPaymentSubscriptions(container, { now, ttl_minutes: 60, batch_size: 50 })
+
+    expect(subscriptionPaginationCapture.value).toEqual({
+      take: 50,
+      order: { created_at: "ASC" },
+    })
+  })
+
+  it("defaults the batch size when none is given", async () => {
+    const subscriptionPaginationCapture: { value?: unknown } = {}
+    const container = buildContainer({
+      pending: [],
+      captured: [],
+      subscriptionPaginationCapture,
+    })
+
+    await reconcilePendingPaymentSubscriptions(container, { now, ttl_minutes: 60 })
+
+    expect(subscriptionPaginationCapture.value).toEqual({
+      take: DEFAULT_PENDING_PAYMENT_BATCH_SIZE,
+      order: { created_at: "ASC" },
+    })
   })
 })

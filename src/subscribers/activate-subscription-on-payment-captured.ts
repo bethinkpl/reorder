@@ -83,6 +83,17 @@ export async function activateSubscriptionOnPaymentCaptured(
   }
 
   if (TERMINAL_SUBSCRIPTION_STATUSES.includes(subscription.status)) {
+    container.resolve("logger").error(
+      JSON.stringify({
+        domain: "subscriptions",
+        event: "payment_captured_on_terminal_subscription",
+        subscription_id: subscription.id,
+        payment_id: paymentId,
+        status: subscription.status,
+        alertable: true,
+      })
+    )
+
     return
   }
 

@@ -57,6 +57,12 @@ export const renewalErrors = {
       `Renewal order creation failed for renewal '${renewalCycleId}'`
     )
   },
+  customerPaymentInProgress(renewalCycleId: string, orderId: string) {
+    return new MedusaError(
+      MedusaError.Types.CONFLICT,
+      `Renewal '${renewalCycleId}' was skipped: the customer is paying order '${orderId}' themselves`
+    )
+  },
   cycleSuperseded(renewalCycleId: string, scheduledFor: Date, nextRenewalAt: Date | null) {
     return new MedusaError(
       MedusaError.Types.CONFLICT,

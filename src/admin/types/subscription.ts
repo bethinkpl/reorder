@@ -1,10 +1,12 @@
 import type { FrequencyInterval } from "../../common/types/frequency-interval"
 
 export enum SubscriptionAdminStatus {
+  PENDING_PAYMENT = "pending_payment",
   ACTIVE = "active",
   PAUSED = "paused",
   CANCELLED = "cancelled",
   PAST_DUE = "past_due",
+  PAYMENT_FAILED = "payment_failed",
 }
 
 export enum SubscriptionDiscountType {

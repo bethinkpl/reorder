@@ -19,6 +19,7 @@ import type SubscriptionModuleService from "../../modules/subscription/service"
 import { SubscriptionStatus } from "../../modules/subscription/types"
 import { subscriptionErrors } from "../../modules/subscription/utils/errors"
 import type { SubscriptionSettingsShape } from "../../modules/settings/utils/normalize-settings"
+import { toISOStringOrNull } from "../utils/date-output"
 import { getEffectiveSubscriptionSettings } from "../utils/subscription-settings"
 
 const ACTIVE_DUNNING_CASE_STATUSES = new Set<DunningCaseStatus>([
@@ -86,6 +87,9 @@ type StartDunningStepOutput = {
   dunning_case_id: string
   subscription_id: string
   subscription_status: SubscriptionStatus
+  renewal_cycle_id: string
+  attempt_count: number
+  next_retry_at: string | null
 }
 
 type StartDunningCompensation =
@@ -334,6 +338,9 @@ export const startDunningStep = createStep(
           dunning_case_id: created.id,
           subscription_id: subscription.id,
           subscription_status: SubscriptionStatus.PAST_DUE,
+          renewal_cycle_id: cycle.id,
+          attempt_count: 0,
+          next_retry_at: toISOStringOrNull(defaultNextRetryAt),
         },
         {
           action: "created",
@@ -350,6 +357,9 @@ export const startDunningStep = createStep(
           dunning_case_id: existingCase.id,
           subscription_id: subscription.id,
           subscription_status: subscription.status,
+          renewal_cycle_id: existingCase.renewal_cycle_id,
+          attempt_count: existingCase.attempt_count,
+          next_retry_at: toISOStringOrNull(existingCase.next_retry_at),
         },
         {
           action: "noop",
@@ -390,6 +400,9 @@ export const startDunningStep = createStep(
         dunning_case_id: updated.id,
         subscription_id: subscription.id,
         subscription_status: SubscriptionStatus.PAST_DUE,
+        renewal_cycle_id: updated.renewal_cycle_id,
+        attempt_count: updated.attempt_count,
+        next_retry_at: toISOStringOrNull(updated.next_retry_at),
       },
       {
         action: "updated",

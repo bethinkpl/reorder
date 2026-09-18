@@ -11,6 +11,7 @@ export enum DunningAttemptStatus {
   PROCESSING = "processing",
   SUCCEEDED = "succeeded",
   FAILED = "failed",
+  ABORTED = "aborted",
 }
 
 export type DunningRetrySchedule = {

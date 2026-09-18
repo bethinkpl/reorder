@@ -1,5 +1,6 @@
 import { z } from "zod"
 import { AnalyticsGroupBy } from "../../../admin/types/analytics"
+import { SubscriptionStatus } from "../../../modules/subscription/types"
 
 const optionalIsoDateTime = z.string().datetime().optional()
 const MAX_ANALYTICS_WINDOW_DAYS = 731
@@ -12,12 +13,7 @@ const stringArrayFilter = z.preprocess((value) => {
   return value
 }, z.array(z.string()).optional())
 
-const analyticsSubscriptionStatusSchema = z.enum([
-  "active",
-  "paused",
-  "cancelled",
-  "past_due",
-])
+const analyticsSubscriptionStatusSchema = z.nativeEnum(SubscriptionStatus)
 
 const statusArrayFilter = z.preprocess((value) => {
   if (typeof value === "string") {

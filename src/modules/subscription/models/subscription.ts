@@ -8,6 +8,8 @@ const Subscription = model
   .define("subscription", {
     id: model.id().primaryKey(),
     reference: model.text().unique(),
+    // Default is unreachable in production: create-subscription-record.ts sets
+    // PENDING_PAYMENT explicitly, which is the authoritative entry state.
     status: model.enum(SubscriptionStatus).default(SubscriptionStatus.ACTIVE),
     customer_id: model.text(),
     cart_id: model.text().nullable(),

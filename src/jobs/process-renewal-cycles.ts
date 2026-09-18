@@ -15,6 +15,7 @@ import {
   getRenewalErrorMessage,
   isAlertableRenewalFailure,
   logRenewalEvent,
+  type RenewalFailureKind,
 } from "../modules/renewal/utils/observability"
 import { processRenewalCycleWorkflow } from "../workflows"
 
@@ -77,6 +78,16 @@ const CONCURRENT_RENEWAL_BATCH_SIZE = positiveIntFromEnv(
 // Gap between consecutive concurrent chunks, in ms.
 const RENEWAL_SEPARATION_DELAY = 1000
 
+/** The failures that mean "not now", not "something is wrong". Exported for unit tests. */
+export function isBlockedRenewalOutcome(failureKind: RenewalFailureKind) {
+  return (
+    failureKind === "already_processing" ||
+    failureKind === "duplicate_execution" ||
+    failureKind === "cycle_superseded" ||
+    failureKind === "customer_payment_in_progress"
+  )
+}
+
 async function processCycle(
   container: MedusaContainer,
   logger: Logger,
@@ -112,10 +123,7 @@ async function processCycle(
   } catch (error) {
     const message = getRenewalErrorMessage(error)
     const failureKind = classifyRenewalFailure(error)
-    const isBlockedKind =
-      failureKind === "already_processing" ||
-      failureKind === "duplicate_execution" ||
-      failureKind === "cycle_superseded"
+    const isBlockedKind = isBlockedRenewalOutcome(failureKind)
     const level = isBlockedKind ? "warn" : "error"
 
     logRenewalEvent(logger, level, {

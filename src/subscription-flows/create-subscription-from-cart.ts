@@ -14,6 +14,7 @@ import {
   useQueryGraphStep,
 } from "@medusajs/medusa/core-flows"
 import { syncSubscriptionCartPricingStep } from "../workflows/steps/sync-subscription-cart-pricing"
+import { activateSubscriptionIfAlreadyPaidStep } from "../workflows/steps/activate-subscription-if-already-paid"
 import { createInitialRenewalCycleStep } from "../workflows/steps/create-initial-renewal-cycle"
 import { labelSubscriptionOrderAdjustmentsStep } from "../workflows/steps/label-subscription-order-adjustments"
 import {
@@ -26,6 +27,9 @@ import {
   type ValidateSubscriptionCartStepInput,
 } from "../workflows/steps/validate-subscription-cart"
 import { addCompleteAllowedMetadataEntryStep } from "./steps/add-complete-allowed-metadata-entry"
+// `advanceCadence` lives in `common/utils` so that workflow steps can reuse it
+// without importing this module (importing it composes this workflow).
+import { advanceCadence } from "../common/utils/advance-cadence"
 
 export type CreateSubscriptionFromCartWorkflowInput =
   ValidateSubscriptionCartStepInput
@@ -131,6 +135,11 @@ export const createSubscriptionFromCartWorkflow = createWorkflow(
         order_id: orderId,
       }).config({
         name: "create-subscription-commerce-links",
+      })
+
+      activateSubscriptionIfAlreadyPaidStep({
+        subscription_id: createdSubscription.id,
+        cart_id: validatedCart.cart_id,
       })
 
       createInitialRenewalCycleStep({
@@ -291,25 +300,4 @@ export function buildSubscriptionInput(
   }
 }
 
-export function advanceCadence(
-  date: Date,
-  interval: CreateSubscriptionRecordStepInput["frequency_interval"],
-  value: number
-) {
-  const next = new Date(date)
-
-  switch (interval) {
-    case "day":
-      next.setUTCDate(next.getUTCDate() + value)
-      return next
-    case "week":
-      next.setUTCDate(next.getUTCDate() + value * 7)
-      return next
-    case "month":
-      next.setUTCMonth(next.getUTCMonth() + value)
-      return next
-    case "year":
-      next.setUTCFullYear(next.getUTCFullYear() + value)
-      return next
-  }
-}
+export { advanceCadence }

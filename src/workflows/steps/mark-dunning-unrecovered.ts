@@ -3,9 +3,11 @@ import { DUNNING_MODULE } from "../../modules/dunning"
 import type DunningModuleService from "../../modules/dunning/service"
 import { DunningCaseStatus } from "../../modules/dunning/types"
 import { dunningErrors } from "../../modules/dunning/utils/errors"
+import { settleSubscriptionPaymentFailure } from "../utils/settle-subscription-payment-failure"
 
 type DunningCaseRecord = {
   id: string
+  subscription_id: string
   status: DunningCaseStatus
   next_retry_at: Date | null
   closed_at: Date | null
@@ -71,7 +73,7 @@ export const markDunningUnrecoveredStep = createStep(
 
     const changedAt = new Date()
 
-    const updated = await dunningModule.updateDunningCases({
+    const updated = (await dunningModule.updateDunningCases({
       id: dunningCase.id,
       status: DunningCaseStatus.UNRECOVERED,
       next_retry_at: null,
@@ -82,9 +84,23 @@ export const markDunningUnrecoveredStep = createStep(
         input,
         changedAt.toISOString()
       ),
-    } as any)
+    } as any)) as DunningCaseRecord
 
-    return new StepResponse(updated, dunningCase)
+    const settlement = await settleSubscriptionPaymentFailure(container, {
+      subscription_id: dunningCase.subscription_id,
+      dunning_case_id: dunningCase.id,
+      recovery_reason: "marked_unrecovered_by_admin",
+      at: changedAt,
+    })
+
+    return new StepResponse(
+      {
+        ...updated,
+        subscription_status: settlement.status,
+        settled_now: settlement.settled,
+      },
+      dunningCase
+    )
   },
   async function (previousCase: DunningCaseRecord | undefined, { container }) {
     if (!previousCase) {

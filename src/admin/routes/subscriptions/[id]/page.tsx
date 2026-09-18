@@ -2044,6 +2044,10 @@ function getStatusColor(status: SubscriptionAdminStatus) {
       return "red" as const
     case SubscriptionAdminStatus.PAST_DUE:
       return "grey" as const
+    case SubscriptionAdminStatus.PENDING_PAYMENT:
+      return "orange" as const
+    case SubscriptionAdminStatus.PAYMENT_FAILED:
+      return "red" as const
   }
 }
 
@@ -2057,6 +2061,10 @@ function formatStatus(status: SubscriptionAdminStatus) {
       return "Cancelled"
     case SubscriptionAdminStatus.PAST_DUE:
       return "Past due"
+    case SubscriptionAdminStatus.PENDING_PAYMENT:
+      return "Pending payment"
+    case SubscriptionAdminStatus.PAYMENT_FAILED:
+      return "Payment failed"
   }
 }
 

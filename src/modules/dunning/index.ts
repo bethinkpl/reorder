@@ -6,3 +6,5 @@ export const DUNNING_MODULE = "dunning"
 export default Module(DUNNING_MODULE, {
   service: DunningModuleService,
 })
+
+export { DunningEvents, type DunningEventName } from "./events"

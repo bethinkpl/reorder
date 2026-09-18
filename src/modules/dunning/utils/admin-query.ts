@@ -1,6 +1,7 @@
 import { MedusaContainer } from "@medusajs/framework/types"
 import { ContainerRegistrationKeys } from "@medusajs/framework/utils"
 import {
+  DunningAdminSubscriptionSummary,
   DunningAttemptAdminStatus,
   DunningCaseAdminListItem,
   DunningCaseAdminListResponse,
@@ -14,6 +15,11 @@ import {
   type DunningRetrySchedule,
 } from "../types"
 import { dunningErrors } from "./errors"
+import { resolveRetryEligibility } from "./retry-eligibility"
+import type {
+  SubscriptionPaymentContext,
+  SubscriptionStatus,
+} from "../../subscription/types"
 
 type DunningCaseRecord = {
   id: string
@@ -52,7 +58,7 @@ type DunningAttemptRecord = {
 type SubscriptionRecord = {
   id: string
   reference: string
-  status: "active" | "paused" | "cancelled" | "past_due"
+  status: DunningAdminSubscriptionSummary["status"]
   customer_snapshot: {
     full_name?: string | null
   } | null
@@ -61,9 +67,7 @@ type SubscriptionRecord = {
     variant_title?: string
     sku?: string | null
   } | null
-  payment_context: {
-    payment_provider_id?: string | null
-  } | null
+  payment_context: SubscriptionPaymentContext | null
 }
 
 type RenewalCycleRecord = {
@@ -190,6 +194,8 @@ function mapAttemptStatus(status: DunningAttemptRecord["status"]) {
       return DunningAttemptAdminStatus.SUCCEEDED
     case DunningAttemptStatus.FAILED:
       return DunningAttemptAdminStatus.FAILED
+    case DunningAttemptStatus.ABORTED:
+      return DunningAttemptAdminStatus.ABORTED
   }
 
   throw dunningErrors.invalidData(
@@ -757,6 +763,18 @@ export async function getAdminDunningDetail(
     order = (ordersData as OrderRecord[])[0] ?? null
   }
 
+  const retryEligibility = resolveRetryEligibility({
+    dunningCase: {
+      status: dunningCase.status,
+      attempt_count: dunningCase.attempt_count,
+      max_attempts: dunningCase.max_attempts,
+      renewal_order_id: dunningCase.renewal_order_id ?? null,
+      retry_schedule: dunningCase.retry_schedule ?? null,
+    },
+    subscriptionStatus: subscription.status as SubscriptionStatus,
+    paymentContext: subscription.payment_context ?? null,
+  })
+
   const detail: DunningCaseAdminDetail = {
     id: dunningCase.id,
     status: mapCaseStatus(dunningCase.status),
@@ -788,6 +806,8 @@ export async function getAdminDunningDetail(
           status: order.status,
         }
       : null,
+    retry_eligible: retryEligibility.eligible,
+    retry_blocked_reason: retryEligibility.blocked_reason,
     attempt_count: dunningCase.attempt_count,
     max_attempts: dunningCase.max_attempts,
     retry_schedule: dunningCase.retry_schedule,

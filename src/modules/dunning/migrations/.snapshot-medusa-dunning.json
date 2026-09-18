@@ -365,7 +365,8 @@
           "enumItems": [
             "processing",
             "succeeded",
-            "failed"
+            "failed",
+            "aborted"
           ],
           "mappedType": "enum"
         },

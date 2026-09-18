@@ -69,10 +69,12 @@
           "primary": false,
           "nullable": false,
           "enumItems": [
+            "pending_payment",
             "active",
             "paused",
             "cancelled",
-            "past_due"
+            "past_due",
+            "payment_failed"
           ],
           "mappedType": "enum"
         },

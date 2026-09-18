@@ -39,13 +39,17 @@ import {
   SubscriptionPendingUpdateData,
   SubscriptionStatus,
 } from "../../modules/subscription/types"
-import { addSubscriptionCadence } from "../../modules/subscription/utils/effective-next-renewal"
 import { subscriptionErrors } from "../../modules/subscription/utils/errors"
 import { startDunningWorkflow } from "../start-dunning"
 import { persistSubscriptionLogEvent } from "./create-subscription-log-event"
-import { buildPricingSnapshot } from "./validate-subscription-cart"
+import {
+  hasCustomerPaymentInProgress,
+  loadOrderPaymentCollections,
+} from "../utils/customer-payment-in-progress"
 import { toISOStringOrNull } from "../utils/date-output"
 import { recordOrderCaptureTransactions } from "../utils/record-order-capture-transactions"
+import { resolvePaymentCollection } from "../utils/resolve-payment-collection"
+import { settleRenewalCycleSucceeded } from "../utils/settle-renewal-cycle-succeeded"
 import {
   computeSubscriptionDiscountAmount,
   roundCurrency,
@@ -906,6 +910,20 @@ export async function createRenewalOrder(
     })
   }
 
+  // Linked here rather than at finalize only: a declined charge never reaches
+  // `finalizeRenewalCycleStep`, and without the link nothing can resolve the
+  // renewal order back to its subscription when the customer pays it later.
+  const link = container.resolve(ContainerRegistrationKeys.LINK)
+
+  await link.create({
+    [SUBSCRIPTION_MODULE]: {
+      subscription_id: subscription.id,
+    },
+    [Modules.ORDER]: {
+      order_id: order.id,
+    },
+  })
+
   const { total, pending } = await loadOrderAmounts(container, order.id)
 
   let paymentCollections: PaymentCollectionDTO[] | null = null
@@ -935,7 +953,9 @@ export async function createRenewalOrder(
         },
       })
 
-    const paymentCollection = paymentCollectionsResult.result[0]
+    const paymentCollection = resolvePaymentCollection<{ id: string }>(
+      paymentCollectionsResult.result as any
+    )
 
     if (!paymentCollection) {
       throw renewalErrors.renewalOrderCreationFailed(
@@ -961,6 +981,12 @@ export async function createRenewalOrder(
   }
 }
 
+function readProviderErrorCode(error: unknown) {
+  const code = (error as { code?: unknown } | null)?.code
+
+  return typeof code === "string" && code ? code : null
+}
+
 function createPaymentQualifiedRenewalError(
   error: unknown,
   source: PaymentQualifiedFailureSource,
@@ -972,7 +998,7 @@ function createPaymentQualifiedRenewalError(
 
   const typedError = nextError as PaymentQualifiedRenewalError
   typedError.dunning_payment_failure_source = source
-  typedError.dunning_payment_error_code = null
+  typedError.dunning_payment_error_code = readProviderErrorCode(error)
   typedError.dunning_renewal_order_id = renewalOrderId
 
   return typedError
@@ -1144,6 +1170,39 @@ async function recordRenewalFailure(
   })
 }
 
+/**
+ * Refuses to touch a renewal order the customer is paying themselves.
+ *
+ * Only a reused order can have anything on it: the run that created it left a payment collection
+ * behind, and the host app lets the customer pay that same order through its own checkout, under a
+ * different lock. Charging again from here would delete the session they are looking at, or cancel
+ * an authorization somebody else took.
+ *
+ * Exported for unit tests: `createStep` doesn't expose its handler.
+ */
+export async function assertNoCustomerPaymentInProgress(
+  container: MedusaContainer,
+  cycle: { id: string, generated_order_id?: string | null }
+) {
+  if (!cycle.generated_order_id) {
+    return
+  }
+
+  const paymentCollections = await loadOrderPaymentCollections(
+    container,
+    cycle.generated_order_id
+  )
+
+  if (!hasCustomerPaymentInProgress(paymentCollections, new Date())) {
+    return
+  }
+
+  throw renewalErrors.customerPaymentInProgress(
+    cycle.id,
+    cycle.generated_order_id
+  )
+}
+
 export const prepareRenewalCycleStep = createStep(
   "prepare-renewal-cycle",
   async function (
@@ -1188,6 +1247,7 @@ export const prepareRenewalCycleStep = createStep(
 
     try {
       await validateSubscriptionEligibility(container, cycle, subscription)
+      await assertNoCustomerPaymentInProgress(container, cycle)
 
       appliedPendingChanges = await resolveAppliedPendingChanges(
         container,
@@ -1439,6 +1499,9 @@ export const authorizeRenewalPaymentStep = createStep(
             provider_id: order_result.payment.payment_provider_id,
             customer_id: order_result.payment.customer_id,
             data,
+            // What tells a later renewal tick, and the dunning retry, that this session is one of
+            // ours rather than one the customer opened.
+            context: { renewal_cycle_id: context.renewal_cycle_id },
           },
         })
       } catch (error) {
@@ -1528,176 +1591,31 @@ export const finalizeRenewalCycleStep = createStep(
     },
     { container }
   ) {
-    const logger = container.resolve("logger")
-    const renewalModule = container.resolve<RenewalModuleService>(RENEWAL_MODULE)
-    const subscriptionModule =
-      container.resolve<SubscriptionModuleService>(SUBSCRIPTION_MODULE)
-
     const { context, order_result } = input
-    const subscription = context.subscription
-    const appliedPendingChanges = context.applied_pending_changes
     const generatedOrderId = order_result.generated_order_id
 
     try {
-      if (generatedOrderId) {
-        const link = container.resolve(ContainerRegistrationKeys.LINK)
-
-        await link.create({
-          [RENEWAL_MODULE]: {
-            renewal_cycle_id: context.renewal_cycle_id,
-          },
-          [Modules.ORDER]: {
-            order_id: generatedOrderId,
-          },
-        })
-
-        await link.create({
-          [SUBSCRIPTION_MODULE]: {
-            subscription_id: context.subscription_id,
-          },
-          [Modules.ORDER]: {
-            order_id: generatedOrderId,
-          },
-        })
-      }
-
-      const scheduledAnchor = new Date(context.scheduled_for)
-      const nextInterval =
-        appliedPendingChanges?.frequency_interval ??
-        subscription.frequency_interval
-      const nextValue =
-        appliedPendingChanges?.frequency_value ?? subscription.frequency_value
-      const nextRenewalAt = addSubscriptionCadence(
-        scheduledAnchor,
-        nextInterval,
-        nextValue
-      )
-      const finishedAt = new Date()
-
-      const nextProductSnapshot = appliedPendingChanges
-        ? {
-            ...subscription.product_snapshot,
-            variant_id: appliedPendingChanges.variant_id,
-            variant_title: appliedPendingChanges.variant_title,
-            sku: appliedPendingChanges.sku ?? subscription.product_snapshot.sku,
-          }
-        : subscription.product_snapshot
-
-      // A plan change re-negotiates the deal: the frozen pricing snapshot must
-      // be rebuilt from the live plan config for the NEW variant and frequency,
-      // or the signup discount would keep applying to the new plan's price on
-      // every future cycle.
-      let nextPricingSnapshot = subscription.pricing_snapshot
-
-      if (appliedPendingChanges) {
-        const effectiveConfig = await resolveProductSubscriptionConfig(container, {
-          product_id: subscription.product_id,
-          variant_id: appliedPendingChanges.variant_id,
-        })
-
-        nextPricingSnapshot = effectiveConfig.is_enabled
-          ? buildPricingSnapshot(
-              effectiveConfig.discount_per_frequency,
-              nextInterval as FrequencyInterval,
-              nextValue
-            )
-          : null
-      }
-
-      await subscriptionModule.updateSubscriptions({
-        id: subscription.id,
-        variant_id:
-          appliedPendingChanges?.variant_id ?? subscription.variant_id,
-        frequency_interval: nextInterval,
-        frequency_value: nextValue,
-        product_snapshot: nextProductSnapshot,
-        pricing_snapshot: nextPricingSnapshot,
-        next_renewal_at: nextRenewalAt,
-        last_renewal_at: finishedAt,
-        skip_next_cycle: false,
-        pending_update_data: appliedPendingChanges ? null : subscription.pending_update_data,
-        ...(order_result.resolved_source_snapshot ? { source_snapshot: order_result.resolved_source_snapshot } : {}),
-      })
-
-      const updatedCycle = await renewalModule.updateRenewalCycles({
-        id: context.renewal_cycle_id,
-        status: RenewalCycleStatus.SUCCEEDED,
-        processed_at: finishedAt,
-        generated_order_id: generatedOrderId,
-        last_error: null,
-      })
-
-      await renewalModule.updateRenewalAttempts({
-        id: context.attempt_id,
-        status: RenewalAttemptStatus.SUCCEEDED,
-        finished_at: finishedAt,
-        order_id: generatedOrderId,
-        error_code: null,
-        error_message: null,
-      })
-
-      logRenewalEvent(logger, "info", {
-        event: "renewal.execution",
-        outcome: "succeeded",
-        correlation_id: context.correlation_id,
-        renewal_cycle_id: context.renewal_cycle_id,
-        subscription_id: subscription.id,
-        trigger_type: context.trigger_type,
-        triggered_by: context.triggered_by ?? null,
-        attempt_no: context.attempt_no,
-        duration_ms: Date.now() - context.operation_started_at,
-        success_count: 1,
-        failure_count: 0,
-        metadata: {
-          generated_order_id: generatedOrderId,
-          applied_pending_changes: Boolean(appliedPendingChanges),
-        },
-      })
-
-      await persistSubscriptionLogEvent(container, normalizeActivityLogEvent({
-        subscription_id: subscription.id,
-        customer_id: subscription.customer_id,
-        event_type: ActivityLogEventType.RENEWAL_SUCCEEDED,
-        actor_type: getRenewalActivityLogActorType(context.trigger_type),
-        actor_id: context.triggered_by ?? null,
-        display: {
-          subscription_reference: subscription.reference,
-          customer_name: subscription.customer_snapshot?.full_name ?? null,
-          product_title: subscription.product_snapshot.product_title ?? null,
-          variant_title:
-            appliedPendingChanges?.variant_title ??
-            subscription.product_snapshot.variant_title ??
-            null,
-        },
-        previous_state: {
-          status: context.cycle_previous_state.status,
-          attempt_count: context.cycle_previous_state.attempt_count,
-          processed_at: context.cycle_previous_state.processed_at,
-          generated_order_id: context.cycle_previous_state.generated_order_id,
-          last_error: context.cycle_previous_state.last_error,
-        },
-        new_state: {
-          status: updatedCycle.status,
-          attempt_count: updatedCycle.attempt_count,
-          processed_at: toISOStringOrNull(updatedCycle.processed_at),
-          generated_order_id: updatedCycle.generated_order_id,
-          last_error: updatedCycle.last_error,
-          applied_pending_update_data: appliedPendingChanges,
-        },
-        metadata: {
-          source: context.trigger_type === "manual" ? "admin" : "scheduler",
+      const { renewal_cycle: updatedCycle } = await settleRenewalCycleSucceeded(
+        container,
+        {
           renewal_cycle_id: context.renewal_cycle_id,
+          subscription_id: context.subscription_id,
           order_id: generatedOrderId,
-          trigger_type: context.trigger_type,
-          scheduled_for: context.scheduled_for,
-        },
-        correlation_id: context.correlation_id,
-        dedupe: {
-          scope: "renewal",
-          target_id: context.renewal_cycle_id,
-          qualifier: toISOStringOrNull(updatedCycle.processed_at),
-        },
-      }))
+          finished_at: new Date(),
+          attempt_id: context.attempt_id,
+          source_snapshot: order_result.resolved_source_snapshot,
+          source: "renewal",
+          audit: {
+            correlation_id: context.correlation_id,
+            trigger_type: context.trigger_type,
+            triggered_by: context.triggered_by ?? null,
+            attempt_no: context.attempt_no,
+            operation_started_at: context.operation_started_at,
+            scheduled_for: context.scheduled_for,
+            previous_state: context.cycle_previous_state,
+          },
+        }
+      )
 
       return new StepResponse({
         renewal_cycle: updatedCycle,

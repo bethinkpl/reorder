@@ -163,6 +163,58 @@ describe("executePaymentRetry - outstanding amount guard", () => {
     ])
   })
 
+  it("sends the hook-provided payment session data verbatim", async () => {
+    const { container } = buildContainer({
+      id: "order_1",
+      total: 100,
+      summary: { pending_difference: 40 },
+    })
+
+    await executePaymentRetry(container, subscription, "order_1", {
+      mode: "recurring",
+      payment_method: "pm_1",
+    })
+
+    const run = (createPaymentSessionsWorkflow as unknown as jest.Mock).mock
+      .results[0].value.run
+
+    expect(run).toHaveBeenCalledWith({
+      input: {
+        payment_collection_id: "paycol_1",
+        provider_id: "pp_stripe-checkout-session_stripe",
+        customer_id: "cus_1",
+        data: { mode: "recurring", payment_method: "pm_1" },
+      },
+    })
+  })
+
+  it("falls back to the stock Stripe payload when no hook data is given", async () => {
+    const { container } = buildContainer({
+      id: "order_1",
+      total: 100,
+      summary: { pending_difference: 40 },
+    })
+
+    await executePaymentRetry(container, subscription, "order_1")
+
+    const run = (createPaymentSessionsWorkflow as unknown as jest.Mock).mock
+      .results[0].value.run
+
+    expect(run).toHaveBeenCalledWith({
+      input: {
+        payment_collection_id: "paycol_1",
+        provider_id: "pp_stripe-checkout-session_stripe",
+        customer_id: "cus_1",
+        data: {
+          payment_method: "pm_1",
+          off_session: true,
+          confirm: true,
+          capture_method: "automatic",
+        },
+      },
+    })
+  })
+
   it("treats a missing summary as nothing paid yet", async () => {
     const { container } = buildContainer({ id: "order_1", total: 100 })
 

@@ -123,6 +123,7 @@ export type RunDunningRetryStepInput = {
   triggered_by?: string | null
   reason?: string | null
   correlation_id?: string | null
+  payment_session_data?: Record<string, unknown>
 }
 
 type RunDunningRetryStepOutput = {
@@ -446,7 +447,8 @@ function readNestedErrorCode(value: unknown): string | null {
 export async function executePaymentRetry(
   container: MedusaContainer,
   subscription: SubscriptionRecord,
-  renewalOrderId: string
+  renewalOrderId: string,
+  paymentSessionData?: Record<string, unknown>
 ): Promise<PaymentRetryOutcome> {
   let paymentSession: PaymentSessionRecord | null = null
 
@@ -503,7 +505,7 @@ export async function executePaymentRetry(
         payment_collection_id: paymentCollection.id,
         provider_id: paymentContext.payment_provider_id,
         customer_id: subscription.customer_id,
-        data: {
+        data: paymentSessionData ?? {
           payment_method: paymentContext.payment_method_id,
           off_session: true,
           confirm: true,
@@ -709,7 +711,8 @@ export const runDunningRetryStep = createStep(
       const outcome = await executePaymentRetry(
         container,
         subscription,
-        dunningCase.renewal_order_id!
+        dunningCase.renewal_order_id!,
+        input.payment_session_data
       )
       const finishedAt = new Date()
 

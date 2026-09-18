@@ -12,6 +12,7 @@ export type RenewalFailureKind =
   | "already_processing"
   | "duplicate_execution"
   | "cycle_superseded"
+  | "customer_payment_in_progress"
   | "subscription_not_eligible"
   | "approval_blocked"
   | "offer_policy_blocked"
@@ -60,6 +61,11 @@ export function classifyRenewalFailure(error: unknown): RenewalFailureKind {
     return "cycle_superseded"
   }
 
+  // Ahead of the order-creation rule: the message names the order the customer is paying.
+  if (message.includes("the customer is paying")) {
+    return "customer_payment_in_progress"
+  }
+
   if (message.includes("isn't eligible for renewal")) {
     return "subscription_not_eligible"
   }
@@ -93,7 +99,12 @@ export function classifyRenewalFailure(error: unknown): RenewalFailureKind {
 }
 
 export function isAlertableRenewalFailure(kind: RenewalFailureKind) {
-  return !["already_processing", "duplicate_execution", "cycle_superseded"].includes(kind)
+  return ![
+    "already_processing",
+    "duplicate_execution",
+    "cycle_superseded",
+    "customer_payment_in_progress",
+  ].includes(kind)
 }
 
 export function getRenewalErrorMessage(error: unknown) {

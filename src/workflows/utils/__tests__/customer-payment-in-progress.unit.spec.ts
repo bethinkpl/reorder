@@ -96,6 +96,15 @@ describe("isCustomerLiveSession", () => {
     ).toBe(false)
   })
 
+  it("does not count a session a renewal run opened", () => {
+    expect(
+      isCustomerLiveSession(
+        customerSession({ context: { renewal_cycle_id: "rc_1" } }),
+        now
+      )
+    ).toBe(false)
+  })
+
   it("counts a session the host app says the customer started", () => {
     expect(
       isCustomerLiveSession(
@@ -140,6 +149,27 @@ describe("hasCustomerPaymentInProgress", () => {
       ).toBe(true)
     }
   )
+
+  it("does not step aside for a collection a renewal run authorized", () => {
+    expect(
+      hasCustomerPaymentInProgress(
+        [
+          collection({
+            status: "authorized",
+            payment_sessions: [
+              {
+                id: "payses_1",
+                status: "authorized",
+                context: { renewal_cycle_id: "rc_1" },
+                created_at: new Date(now.getTime() - 5 * MINUTE),
+              },
+            ],
+          }),
+        ],
+        now
+      )
+    ).toBe(false)
+  })
 
   it.each(["authorized", "partially_authorized"])(
     "does not step aside for our own '%s' collection",

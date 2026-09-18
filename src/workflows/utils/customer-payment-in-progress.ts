@@ -84,9 +84,15 @@ function isExpiredSessionData(
   return typeof expiresAt === "number" && expiresAt * 1000 <= now.getTime()
 }
 
-/** Whether we opened this session ourselves rather than the customer. */
+/**
+ * Whether one of our own automatic charges opened this session rather than the customer. The two
+ * markers are what keep the renewal job and the dunning retry from reading each other's sessions as
+ * a customer's and stepping aside forever.
+ */
 function isOurSession(session: PaymentSessionRecord) {
-  return Boolean(session.context?.dunning_case_id)
+  return Boolean(
+    session.context?.dunning_case_id || session.context?.renewal_cycle_id
+  )
 }
 
 /**

@@ -42,6 +42,10 @@ import {
 import { subscriptionErrors } from "../../modules/subscription/utils/errors"
 import { startDunningWorkflow } from "../start-dunning"
 import { persistSubscriptionLogEvent } from "./create-subscription-log-event"
+import {
+  hasCustomerPaymentInProgress,
+  loadOrderPaymentCollections,
+} from "../utils/customer-payment-in-progress"
 import { toISOStringOrNull } from "../utils/date-output"
 import { recordOrderCaptureTransactions } from "../utils/record-order-capture-transactions"
 import { settleRenewalCycleSucceeded } from "../utils/settle-renewal-cycle-succeeded"
@@ -1157,6 +1161,39 @@ async function recordRenewalFailure(
   })
 }
 
+/**
+ * Refuses to touch a renewal order the customer is paying themselves.
+ *
+ * Only a reused order can have anything on it: the run that created it left a payment collection
+ * behind, and the host app lets the customer pay that same order through its own checkout, under a
+ * different lock. Charging again from here would delete the session they are looking at, or cancel
+ * an authorization somebody else took.
+ *
+ * Exported for unit tests: `createStep` doesn't expose its handler.
+ */
+export async function assertNoCustomerPaymentInProgress(
+  container: MedusaContainer,
+  cycle: { id: string, generated_order_id?: string | null }
+) {
+  if (!cycle.generated_order_id) {
+    return
+  }
+
+  const paymentCollections = await loadOrderPaymentCollections(
+    container,
+    cycle.generated_order_id
+  )
+
+  if (!hasCustomerPaymentInProgress(paymentCollections, new Date())) {
+    return
+  }
+
+  throw renewalErrors.customerPaymentInProgress(
+    cycle.id,
+    cycle.generated_order_id
+  )
+}
+
 export const prepareRenewalCycleStep = createStep(
   "prepare-renewal-cycle",
   async function (
@@ -1201,6 +1238,7 @@ export const prepareRenewalCycleStep = createStep(
 
     try {
       await validateSubscriptionEligibility(container, cycle, subscription)
+      await assertNoCustomerPaymentInProgress(container, cycle)
 
       appliedPendingChanges = await resolveAppliedPendingChanges(
         container,
@@ -1452,6 +1490,9 @@ export const authorizeRenewalPaymentStep = createStep(
             provider_id: order_result.payment.payment_provider_id,
             customer_id: order_result.payment.customer_id,
             data,
+            // What tells a later renewal tick, and the dunning retry, that this session is one of
+            // ours rather than one the customer opened.
+            context: { renewal_cycle_id: context.renewal_cycle_id },
           },
         })
       } catch (error) {

@@ -40,7 +40,10 @@ import {
 } from "../utils/customer-payment-in-progress"
 import { recordOrderCaptureTransactions } from "../utils/record-order-capture-transactions"
 import { settleDunningCaseRecovered } from "../utils/settle-dunning-recovery"
-import { settleRenewalCycleSucceeded } from "../utils/settle-renewal-cycle-succeeded"
+import {
+  type RenewalSettlementSource,
+  settleRenewalCycleSucceeded,
+} from "../utils/settle-renewal-cycle-succeeded"
 import { settleSubscriptionPaymentFailure } from "../utils/settle-subscription-payment-failure"
 import { SUBSCRIPTION_MODULE } from "../../modules/subscription"
 import type SubscriptionModuleService from "../../modules/subscription/service"
@@ -1032,6 +1035,8 @@ async function finalizeRecoveredRenewal(
     finishedAt: Date
     correlationId: string
     refreshPaymentContext: boolean
+    /** Who actually paid, for the audit entry the settlement writes. */
+    source: RenewalSettlementSource
   }
 ) {
   const { dunningCase, subscription } = input
@@ -1060,12 +1065,19 @@ async function finalizeRecoveredRenewal(
   }
 
   await nonFatal("settling its renewal cycle", async () => {
-    await settleRenewalCycleSucceeded(container, {
+    const settlement = await settleRenewalCycleSucceeded(container, {
       renewal_cycle_id: dunningCase.renewal_cycle_id,
       subscription_id: subscription.id,
       order_id: dunningCase.renewal_order_id,
       finished_at: input.finishedAt,
+      source: input.source,
     })
+
+    // Billing has already moved past the cycle this case was opened for, so the next cycle is
+    // somebody else's and already correct: scheduling one here would delete it.
+    if (settlement.reason === "cycle_superseded") {
+      return
+    }
 
     await ensureNextRenewalCycleWorkflow(container).run({
       input: { subscription_id: subscription.id },
@@ -1283,6 +1295,10 @@ export async function runDunningRetry(
         // A recovery without a payment of its own is one someone else already paid, so the card
         // that settled it is not the one the subscription is holding.
         refreshPaymentContext: outcome.payment_reference === null,
+        source:
+          outcome.payment_reference === null
+            ? "customer_payment"
+            : "dunning_retry",
       })
 
       const createdAt = updatedCase.created_at

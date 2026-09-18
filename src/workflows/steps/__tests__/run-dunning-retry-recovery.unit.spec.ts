@@ -200,8 +200,48 @@ describe("runDunningRetry - recovery branch", () => {
         renewal_cycle_id: "rc_1",
         subscription_id: "sub_1",
         order_id: "order_1",
+        source: "dunning_retry",
       })
     )
+    expect(ensureNextRenewalCycleRun).toHaveBeenCalledWith({
+      input: { subscription_id: "sub_1" },
+    })
+  })
+
+  it("credits the settlement to the customer when the retry charged nothing", async () => {
+    const { container } = buildContainer({ pendingDifference: 0 })
+
+    await runDunningRetry(container, { dunning_case_id: "dun_1" })
+
+    expect(settleRenewalCycleSucceeded).toHaveBeenCalledWith(
+      container,
+      expect.objectContaining({ source: "customer_payment" })
+    )
+  })
+
+  it("leaves the next cycle alone when billing has moved past this one", async () => {
+    // Scheduling one here would delete the cycle that is actually due.
+    const { container } = buildContainer()
+    ;(settleRenewalCycleSucceeded as jest.Mock).mockResolvedValueOnce({
+      settled: false,
+      reason: "cycle_superseded",
+    })
+
+    const response = await runDunningRetry(container, { dunning_case_id: "dun_1" })
+
+    expect(response.output.outcome).toBe("recovered")
+    expect(ensureNextRenewalCycleRun).not.toHaveBeenCalled()
+  })
+
+  it("still schedules the next cycle when the settlement found this one done", async () => {
+    const { container } = buildContainer()
+    ;(settleRenewalCycleSucceeded as jest.Mock).mockResolvedValueOnce({
+      settled: false,
+      reason: "already_succeeded",
+    })
+
+    await runDunningRetry(container, { dunning_case_id: "dun_1" })
+
     expect(ensureNextRenewalCycleRun).toHaveBeenCalledWith({
       input: { subscription_id: "sub_1" },
     })

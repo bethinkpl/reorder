@@ -3,6 +3,7 @@ import { Modules } from "@medusajs/framework/utils"
 import {
   reconcilePendingPaymentSubscriptions,
   resolvePendingPaymentBatchSize,
+  resolvePendingPaymentMaxDeferMinutes,
   resolvePendingPaymentTtlMinutes,
 } from "../modules/subscription/utils/reconcile-pending-payment"
 
@@ -30,6 +31,7 @@ export default async function reconcilePendingPaymentSubscriptionsJob(
   const locking = container.resolve(Modules.LOCKING)
   const ttlMinutes = resolvePendingPaymentTtlMinutes()
   const batchSize = resolvePendingPaymentBatchSize()
+  const maxDeferMinutes = resolvePendingPaymentMaxDeferMinutes()
   const startedAt = Date.now()
 
   try {
@@ -39,11 +41,26 @@ export default async function reconcilePendingPaymentSubscriptionsJob(
         const result = await reconcilePendingPaymentSubscriptions(container, {
           ttl_minutes: ttlMinutes,
           batch_size: batchSize,
+          max_defer_minutes: maxDeferMinutes,
         })
 
         logger.info(
-          `[${JOB_NAME}] scanned ${result.scanned} pending_payment subscription(s), activated ${result.activated.length}, expired ${result.expired.length}, deferred ${result.deferred.length}, failed ${result.failed.length} (ttl ${ttlMinutes}m, batch ${batchSize}) in ${Date.now() - startedAt}ms`
+          `[${JOB_NAME}] scanned ${result.scanned} pending_payment subscription(s), activated ${result.activated.length}, expired ${result.expired.length}, deferred ${result.deferred.length}, force_expired ${result.force_expired.length}, failed ${result.failed.length} (ttl ${ttlMinutes}m, batch ${batchSize}, max_defer ${maxDeferMinutes}m) in ${Date.now() - startedAt}ms`
         )
+
+        if (result.force_expired.length > 0) {
+          logger.warn(
+            JSON.stringify({
+              event: `${JOB_NAME}.force_expired`,
+              job_name: JOB_NAME,
+              alertable: true,
+              force_expired_count: result.force_expired.length,
+              force_expired_ids: result.force_expired,
+              message:
+                "pending_payment subscription(s) force-expired past the max defer window while still carrying a live authorization - check whether money is stuck authorized on a now-cancelled subscription",
+            })
+          )
+        }
       },
       {
         timeout: 1,

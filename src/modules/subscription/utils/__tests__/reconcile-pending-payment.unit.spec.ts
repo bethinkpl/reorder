@@ -5,10 +5,12 @@ import { SubscriptionStatus } from "../../types"
 import { ABANDONED_CHECKOUT_REASON } from "../cancel-abandoned-subscription"
 import {
   DEFAULT_PENDING_PAYMENT_BATCH_SIZE,
+  DEFAULT_PENDING_PAYMENT_MAX_DEFER_MINUTES,
   DEFAULT_PENDING_PAYMENT_TTL_MINUTES,
   reconcilePendingPaymentSubscriptions,
   resolvePendingPaymentBatchSize,
   resolvePendingPaymentCutoff,
+  resolvePendingPaymentMaxDeferMinutes,
   resolvePendingPaymentTtlMinutes,
 } from "../reconcile-pending-payment"
 
@@ -183,6 +185,26 @@ describe("resolvePendingPaymentBatchSize", () => {
   })
 })
 
+describe("resolvePendingPaymentMaxDeferMinutes", () => {
+  it("falls back to 3 days when unset", () => {
+    expect(resolvePendingPaymentMaxDeferMinutes(undefined)).toBe(
+      DEFAULT_PENDING_PAYMENT_MAX_DEFER_MINUTES
+    )
+  })
+
+  it("falls back on a value that is not a positive integer", () => {
+    expect(resolvePendingPaymentMaxDeferMinutes("0")).toBe(DEFAULT_PENDING_PAYMENT_MAX_DEFER_MINUTES)
+    expect(resolvePendingPaymentMaxDeferMinutes("-10")).toBe(DEFAULT_PENDING_PAYMENT_MAX_DEFER_MINUTES)
+    expect(resolvePendingPaymentMaxDeferMinutes("forever")).toBe(
+      DEFAULT_PENDING_PAYMENT_MAX_DEFER_MINUTES
+    )
+  })
+
+  it("honours a positive override", () => {
+    expect(resolvePendingPaymentMaxDeferMinutes("120")).toBe(120)
+  })
+})
+
 describe("reconcilePendingPaymentSubscriptions", () => {
   beforeEach(() => {
     ensureNextRenewalCycleRun.mockClear()
@@ -213,6 +235,7 @@ describe("reconcilePendingPaymentSubscriptions", () => {
       activated: ["sub_paid"],
       expired: [],
       deferred: [],
+      force_expired: [],
       failed: [],
     })
     expect(captured).toEqual([{ id: "sub_paid", status: SubscriptionStatus.ACTIVE }])
@@ -247,6 +270,7 @@ describe("reconcilePendingPaymentSubscriptions", () => {
       activated: [],
       expired: ["sub_stale"],
       deferred: [],
+      force_expired: [],
       failed: [],
     })
     expect(captured).toHaveLength(1)
@@ -289,10 +313,79 @@ describe("reconcilePendingPaymentSubscriptions", () => {
       activated: [],
       expired: [],
       deferred: ["sub_sepa"],
+      force_expired: [],
       failed: [],
     })
     expect(captured).toEqual([])
     expect(ensureNextRenewalCycleRun).not.toHaveBeenCalled()
+  })
+
+  it("keeps deferring a row still inside the max-defer window", async () => {
+    const captured: UpdateCall[] = []
+    const container = buildContainer({
+      pending: [
+        {
+          id: "sub_sepa_recent",
+          cart_id: "cart_sepa_recent",
+          created_at: "2026-09-13T10:00:00.000Z",
+          metadata: null,
+        },
+      ],
+      payments: { cart_sepa_recent: [{ captured_at: null }] },
+      captured,
+    })
+
+    const result = await reconcilePendingPaymentSubscriptions(container, {
+      now,
+      ttl_minutes: 60,
+      max_defer_minutes: 60 * 24 * 2,
+    })
+
+    expect(result).toEqual({
+      scanned: 1,
+      activated: [],
+      expired: [],
+      deferred: ["sub_sepa_recent"],
+      force_expired: [],
+      failed: [],
+    })
+    expect(captured).toEqual([])
+  })
+
+  it("force-expires a row deferred past the max-defer window, cancelling it and reporting it separately", async () => {
+    const captured: UpdateCall[] = []
+    const container = buildContainer({
+      pending: [
+        {
+          id: "sub_sepa_stuck",
+          cart_id: "cart_sepa_stuck",
+          created_at: "2026-09-13T10:00:00.000Z",
+          metadata: null,
+        },
+      ],
+      payments: { cart_sepa_stuck: [{ captured_at: null }] },
+      captured,
+    })
+
+    const result = await reconcilePendingPaymentSubscriptions(container, {
+      now,
+      ttl_minutes: 60,
+      max_defer_minutes: 60,
+    })
+
+    expect(result).toEqual({
+      scanned: 1,
+      activated: [],
+      expired: ["sub_sepa_stuck"],
+      deferred: [],
+      force_expired: ["sub_sepa_stuck"],
+      failed: [],
+    })
+    expect(captured).toHaveLength(1)
+    expect(captured[0]).toMatchObject({
+      id: "sub_sepa_stuck",
+      status: SubscriptionStatus.CANCELLED,
+    })
   })
 
   it("still expires a stale row whose only payment was canceled", async () => {
@@ -322,6 +415,7 @@ describe("reconcilePendingPaymentSubscriptions", () => {
       activated: [],
       expired: ["sub_voided"],
       deferred: [],
+      force_expired: [],
       failed: [],
     })
   })
@@ -359,6 +453,7 @@ describe("reconcilePendingPaymentSubscriptions", () => {
       activated: [],
       expired: ["sub_refunded"],
       deferred: [],
+      force_expired: [],
       failed: [],
     })
     expect(captured).toHaveLength(1)
@@ -385,7 +480,14 @@ describe("reconcilePendingPaymentSubscriptions", () => {
       ttl_minutes: 60,
     })
 
-    expect(result).toEqual({ scanned: 1, activated: [], expired: [], deferred: [], failed: [] })
+    expect(result).toEqual({
+      scanned: 1,
+      activated: [],
+      expired: [],
+      deferred: [],
+      force_expired: [],
+      failed: [],
+    })
     expect(captured).toEqual([])
     expect(ensureNextRenewalCycleRun).not.toHaveBeenCalled()
   })
@@ -420,6 +522,7 @@ describe("reconcilePendingPaymentSubscriptions", () => {
       activated: [],
       expired: ["sub_no_cart_stale"],
       deferred: [],
+      force_expired: [],
       failed: [],
     })
     expect(captured).toHaveLength(1)
@@ -457,6 +560,7 @@ describe("reconcilePendingPaymentSubscriptions", () => {
     expect(result.activated).toEqual(["sub_paid"])
     expect(result.expired).toEqual([])
     expect(result.deferred).toEqual([])
+    expect(result.force_expired).toEqual([])
     expect(result.failed).toEqual([{ id: "sub_throw", message: "boom: sub_throw" }])
     // The throw happens before the cutoff check, so the stale row is never cancelled either.
     expect(captured).toEqual([{ id: "sub_paid", status: SubscriptionStatus.ACTIVE }])

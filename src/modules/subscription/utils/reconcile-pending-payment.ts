@@ -8,12 +8,14 @@ import { SubscriptionStatus } from "../types"
 
 export const DEFAULT_PENDING_PAYMENT_TTL_MINUTES = 24 * 60
 export const DEFAULT_PENDING_PAYMENT_BATCH_SIZE = 200
+export const DEFAULT_PENDING_PAYMENT_MAX_DEFER_MINUTES = 3 * 24 * 60
 
 export type ReconcilePendingPaymentResult = {
   scanned: number
   activated: string[]
   expired: string[]
   deferred: string[]
+  force_expired: string[]
   failed: { id: string, message: string }[]
 }
 
@@ -60,6 +62,22 @@ export function resolvePendingPaymentBatchSize(
   return parsed
 }
 
+export function resolvePendingPaymentMaxDeferMinutes(
+  raw: string | undefined = process.env.SUBSCRIPTION_PENDING_PAYMENT_MAX_DEFER_MINUTES
+): number {
+  if (!raw) {
+    return DEFAULT_PENDING_PAYMENT_MAX_DEFER_MINUTES
+  }
+
+  const parsed = Number.parseInt(raw, 10)
+
+  if (!Number.isSafeInteger(parsed) || parsed <= 0) {
+    return DEFAULT_PENDING_PAYMENT_MAX_DEFER_MINUTES
+  }
+
+  return parsed
+}
+
 /**
  * The backstop for both directions a webhook can go missing. `activate-subscription-on-payment-captured`
  * and `cancel-pending-subscription-on-payment-failure` cover the event-driven cases; this scans a bounded,
@@ -67,17 +85,23 @@ export function resolvePendingPaymentBatchSize(
  * quickly, and only falls back to cancelling once a row has sat there longer than the TTL. A row is left
  * pending (`deferred`) instead of cancelled when its cart still carries a live authorization — a payment
  * that has been authorized but not yet captured or canceled — so a delayed capture is not orphaned.
+ * Deferral is bounded, though: a capture that never lands would otherwise defer forever and, since the
+ * scan is oldest-first, could permanently crowd the batch window out for newer rows. Once a deferred row's
+ * `created_at` is older than the max-defer window, it is force-expired instead and reported separately in
+ * `force_expired` so an operator can check whether money is stuck authorized on a now-cancelled subscription.
  */
 export async function reconcilePendingPaymentSubscriptions(
   container: MedusaContainer,
-  options: { now?: Date, ttl_minutes?: number, batch_size?: number } = {}
+  options: { now?: Date, ttl_minutes?: number, batch_size?: number, max_defer_minutes?: number } = {}
 ): Promise<ReconcilePendingPaymentResult> {
   const query = container.resolve(ContainerRegistrationKeys.QUERY)
 
   const now = options.now ?? new Date()
   const ttlMinutes = options.ttl_minutes ?? resolvePendingPaymentTtlMinutes()
   const batchSize = options.batch_size ?? resolvePendingPaymentBatchSize()
+  const maxDeferMinutes = options.max_defer_minutes ?? resolvePendingPaymentMaxDeferMinutes()
   const cutoff = resolvePendingPaymentCutoff(now, ttlMinutes)
+  const maxDeferCutoff = resolvePendingPaymentCutoff(now, maxDeferMinutes)
 
   const { data } = await query.graph({
     entity: "subscription",
@@ -95,6 +119,7 @@ export async function reconcilePendingPaymentSubscriptions(
   const activated: string[] = []
   const expired: string[] = []
   const deferred: string[] = []
+  const forceExpired: string[] = []
   const failed: { id: string, message: string }[] = []
 
   for (const subscription of subscriptions) {
@@ -123,7 +148,14 @@ export async function reconcilePendingPaymentSubscriptions(
           : null
 
         if (livePayment) {
-          deferred.push(subscription.id)
+          if (new Date(subscription.created_at).getTime() < maxDeferCutoff.getTime()) {
+            await cancelAbandonedSubscription(container, subscription, now)
+
+            expired.push(subscription.id)
+            forceExpired.push(subscription.id)
+          } else {
+            deferred.push(subscription.id)
+          }
         } else {
           await cancelAbandonedSubscription(container, subscription, now)
 
@@ -143,6 +175,7 @@ export async function reconcilePendingPaymentSubscriptions(
     activated,
     expired,
     deferred,
+    force_expired: forceExpired,
     failed,
   }
 }

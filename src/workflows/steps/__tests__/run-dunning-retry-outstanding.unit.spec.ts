@@ -191,6 +191,7 @@ describe("executePaymentRetry - outstanding amount guard", () => {
         provider_id: "pp_stripe-checkout-session_stripe",
         customer_id: "cus_1",
         data: { mode: "recurring", payment_method: "pm_1" },
+        context: { dunning_case_id: null, dunning_attempt_id: null },
       },
     })
   })
@@ -218,6 +219,7 @@ describe("executePaymentRetry - outstanding amount guard", () => {
           confirm: true,
           capture_method: "automatic",
         },
+        context: { dunning_case_id: null, dunning_attempt_id: null },
       },
     })
   })

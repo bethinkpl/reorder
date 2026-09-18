@@ -104,6 +104,18 @@ type PaymentSessionRecord = {
   status?: string | null
   context?: Record<string, unknown> | null
   data?: Record<string, unknown> | null
+  created_at?: Date | string | null
+}
+
+type PaymentCollectionRecord = {
+  id: string
+  status?: string | null
+  payment_sessions?: PaymentSessionRecord[] | null
+}
+
+type OrderPaymentCollectionsRecord = {
+  id: string
+  payment_collections?: PaymentCollectionRecord[] | null
 }
 
 type PaymentRecord = {
@@ -114,6 +126,7 @@ type PaymentRecord = {
 type PaymentRetryFailureOutcome = {
   kind:
     | "setup_failure"
+    | "session_conflict"
     | "requires_action"
     | "temporary_failure"
     | "permanent_failure"
@@ -146,6 +159,20 @@ const SETUP_FAILURE_RETRY_MINUTES = 60
 
 /** How many setup failures in a row hand the case to an operator instead of rescheduling it. */
 const SETUP_FAILURE_STREAK_LIMIT = 3
+
+/** How long a session the customer opened counts as one they may still be paying on. */
+const CUSTOMER_SESSION_LIVE_MINUTES = 60
+
+/**
+ * The statuses a session the customer could still be paying on carries. String literals rather than
+ * `PaymentSessionStatus`: `pending_authorization` is missing from this Medusa version's enum but is
+ * where newer hosts leave a redirect flow the customer has yet to come back from.
+ */
+const CUSTOMER_LIVE_SESSION_STATUSES: readonly string[] = [
+  "pending",
+  "pending_authorization",
+  "requires_more",
+]
 
 /**
  * The provider codes that name a dead card. Every other decline may still be taken later: Stripe
@@ -384,6 +411,107 @@ export async function loadOrderAmounts(
   }
 }
 
+/**
+ * Every payment session on every payment collection of the order.
+ *
+ * Creating a retry session deletes every session already on the collection it lands on, and an
+ * authorized collection is cancelled and recreated, so a retry has to see what is there before it
+ * touches anything.
+ */
+async function loadOrderPaymentCollections(
+  container: MedusaContainer,
+  id: string
+): Promise<PaymentCollectionRecord[]> {
+  const query = container.resolve(ContainerRegistrationKeys.QUERY)
+  const { data } = await query.graph({
+    entity: "order",
+    fields: [
+      "id",
+      "payment_collections.id",
+      "payment_collections.status",
+      "payment_collections.payment_sessions.id",
+      "payment_collections.payment_sessions.status",
+      "payment_collections.payment_sessions.context",
+      "payment_collections.payment_sessions.data",
+      "payment_collections.payment_sessions.created_at",
+    ],
+    filters: {
+      id: [id],
+    },
+  })
+
+  const order = (data as OrderPaymentCollectionsRecord[])[0]
+
+  return order?.payment_collections ?? []
+}
+
+/** A hosted checkout session the provider already timed out is not one anybody is still paying on. */
+function isExpiredSessionData(
+  data: Record<string, unknown> | null | undefined,
+  now: Date
+) {
+  const expiresAt = data?.expiresAt
+
+  return typeof expiresAt === "number" && expiresAt * 1000 <= now.getTime()
+}
+
+/**
+ * Whether the customer may be paying on this session right now.
+ *
+ * Retry sessions mark themselves with `context.dunning_case_id`, so a session without that marker
+ * belongs to someone else - the host app's own checkout - and deleting it drops the customer out of
+ * a payment they are in the middle of. A session whose `created_at` can't be read counts as not
+ * live: this outcome never escalates, so a predicate that can never age out would loop the case
+ * hourly forever.
+ */
+function isCustomerLiveSession(session: PaymentSessionRecord, now: Date) {
+  if (
+    !CUSTOMER_LIVE_SESSION_STATUSES.includes(
+      String(session.status ?? "").toLowerCase()
+    )
+  ) {
+    return false
+  }
+
+  const context = session.context ?? {}
+
+  if (context.initiated_by !== "customer" && context.dunning_case_id) {
+    return false
+  }
+
+  const createdAt = session.created_at ? new Date(session.created_at) : null
+
+  if (!createdAt || Number.isNaN(createdAt.getTime())) {
+    return false
+  }
+
+  if (
+    now.getTime() - createdAt.getTime() >=
+    CUSTOMER_SESSION_LIVE_MINUTES * 60 * 1000
+  ) {
+    return false
+  }
+
+  return !isExpiredSessionData(session.data, now)
+}
+
+/**
+ * Whether starting a retry would destroy a payment already under way: a session the customer is on,
+ * or an authorized collection `createOrUpdateOrderPaymentCollectionWorkflow` cancels and recreates.
+ */
+function hasCustomerPaymentInProgress(
+  paymentCollections: PaymentCollectionRecord[],
+  now: Date
+) {
+  return paymentCollections.some(
+    (collection) =>
+      String(collection.status ?? "").toLowerCase() === "authorized" ||
+      (collection.payment_sessions ?? []).some((session) =>
+        isCustomerLiveSession(session, now)
+      )
+  )
+}
+
 async function settleNonRetryableCase(
   dunningModule: DunningModuleService,
   dunningCase: DunningCaseRecord,
@@ -506,17 +634,20 @@ function classifyPaymentRetryFailure(
   return { kind: "temporary_failure", ...failure }
 }
 
-function readSetupFailureStreak(
-  metadata: Record<string, unknown> | null | undefined
+function readRetryCounter(
+  metadata: Record<string, unknown> | null | undefined,
+  key: string
 ) {
-  const streak = Number(metadata?.setup_failure_streak ?? 0)
+  const count = Number(metadata?.[key] ?? 0)
 
-  return Number.isFinite(streak) && streak > 0 ? Math.floor(streak) : 0
+  return Number.isFinite(count) && count > 0 ? Math.floor(count) : 0
 }
 
-function clearSetupFailureStreak(metadata: Record<string, unknown>) {
+/** The counters that only track retries that never charged anything. */
+function clearUnchargedRetryCounters(metadata: Record<string, unknown>) {
   const next = { ...metadata }
   delete next.setup_failure_streak
+  delete next.session_conflict_count
 
   return next
 }
@@ -613,7 +744,8 @@ export async function executePaymentRetry(
   subscription: SubscriptionRecord,
   renewalOrderId: string,
   paymentSessionData?: Record<string, unknown>,
-  attemptId?: string | null
+  attemptId?: string | null,
+  dunningCaseId?: string | null
 ): Promise<PaymentRetryOutcome> {
   let paymentSession: PaymentSessionRecord | null = null
 
@@ -650,6 +782,25 @@ export async function executePaymentRetry(
       }
     }
 
+    // The host app lets the customer pay the same renewal order through its own checkout, on a
+    // collection of this order and under a different lock. Creating a retry session deletes every
+    // session on the collection it picks, so a tick that lands mid-checkout would expire the page
+    // the customer is looking at.
+    if (
+      hasCustomerPaymentInProgress(
+        await loadOrderPaymentCollections(container, renewalOrderId),
+        new Date()
+      )
+    ) {
+      return {
+        kind: "session_conflict",
+        payment_reference: null,
+        error_code: "customer_payment_in_progress",
+        error_message: `Renewal order '${renewalOrderId}' has a payment the customer is in the middle of`,
+        provider_reached: false,
+      }
+    }
+
     const paymentCollections =
       await createOrUpdateOrderPaymentCollectionWorkflow(container).run({
         input: {
@@ -676,6 +827,12 @@ export async function executePaymentRetry(
           off_session: true,
           confirm: true,
           capture_method: "automatic",
+        },
+        // What tells the next tick - and the host app - that this session is ours, so that skipping
+        // a customer's session never skips our own leftover one.
+        context: {
+          dunning_case_id: dunningCaseId ?? null,
+          dunning_attempt_id: attemptId ?? null,
         },
       },
     })
@@ -890,6 +1047,86 @@ async function parkForManualResolution(
   })
 
   return new StepResponse<RunDunningRetryStepOutput>(output)
+}
+
+type RescheduleUnchargedAttemptInput = {
+  dunningCase: DunningCaseRecord
+  caseMetadata: Record<string, unknown>
+  attempt: DunningAttemptRecord
+  attemptNo: number
+  /** The budget the case keeps: an attempt that charged nothing hands its slot back. */
+  attemptCount: number
+  outcome: PaymentRetryFailureOutcome
+  finishedAt: Date
+  correlationId: string
+  subscriptionStatus: SubscriptionStatus
+}
+
+/**
+ * Ends an attempt that never charged anything: its audit row is aborted, the attempt slot goes back
+ * to the budget and the scheduler is pointed at a later tick. Shared by the setup failure that
+ * never reached the provider and the tick that stepped aside for the customer's own payment.
+ */
+async function rescheduleUnchargedAttempt(
+  container: MedusaContainer,
+  input: RescheduleUnchargedAttemptInput
+): Promise<{
+  output: RunDunningRetryStepOutput
+  updatedCase: DunningCaseRecord
+  retryAt: Date
+}> {
+  const dunningModule = container.resolve<DunningModuleService>(DUNNING_MODULE)
+  const retryAt = new Date(
+    input.finishedAt.getTime() + SETUP_FAILURE_RETRY_MINUTES * 60 * 1000
+  )
+
+  await dunningModule.updateDunningAttempts({
+    id: input.attempt.id,
+    finished_at: input.finishedAt,
+    status: DunningAttemptStatus.ABORTED,
+    error_code: input.outcome.error_code,
+    error_message: input.outcome.error_message,
+    payment_reference: null,
+    metadata: {
+      ...(input.attempt.metadata ?? {}),
+      provider_reached: input.outcome.provider_reached,
+    },
+  } as any)
+
+  const updatedCase = (await dunningModule.updateDunningCases({
+    id: input.dunningCase.id,
+    status: DunningCaseStatus.RETRY_SCHEDULED,
+    attempt_count: input.attemptCount,
+    next_retry_at: retryAt,
+    last_attempt_at: input.finishedAt,
+    last_payment_error_code: input.outcome.error_code,
+    last_payment_error_message: input.outcome.error_message,
+    recovered_at: null,
+    closed_at: null,
+    recovery_reason: null,
+    metadata: input.caseMetadata,
+  } as any)) as DunningCaseRecord
+
+  return {
+    updatedCase,
+    retryAt,
+    output: {
+      dunning_case_id: updatedCase.id,
+      dunning_attempt_id: input.attempt.id,
+      outcome: "retry_scheduled",
+      subscription_id: updatedCase.subscription_id,
+      subscription_status: input.subscriptionStatus,
+      renewal_order_id: input.dunningCase.renewal_order_id,
+      settled_now: false,
+      recovered_now: false,
+      correlation_id: input.correlationId,
+      attempt_no: input.attemptNo,
+      error_code: input.outcome.error_code,
+      next_retry_at: retryAt.toISOString(),
+      recovery_reason: null,
+      park_reason: null,
+    },
+  }
 }
 
 /** Exported for unit tests: `createStep` doesn't expose its handler. */
@@ -1107,12 +1344,13 @@ export async function runDunningRetry(
       subscription,
       dunningCase.renewal_order_id!,
       input.payment_session_data,
-      attempt.id
+      attempt.id,
+      dunningCase.id
     )
     const finishedAt = new Date()
     // Any answer from the provider ends whatever setup-failure streak the case was carrying.
     const caseMetadata = outcome.provider_reached
-      ? clearSetupFailureStreak(retryMetadata)
+      ? clearUnchargedRetryCounters(retryMetadata)
       : retryMetadata
 
     if (outcome.kind === "recovery") {
@@ -1198,12 +1436,62 @@ export async function runDunningRetry(
       })
     }
 
+    // The customer is paying the renewal order themselves right now. Our own session would delete
+    // theirs mid-checkout, so this tick steps aside whole: nothing was charged, the attempt slot
+    // goes back and the scheduler comes round later. It never parks - the customer finishing that
+    // payment is the outcome we want, and no operator can help it along.
+    if (outcome.kind === "session_conflict") {
+      const sessionConflictCount =
+        readRetryCounter(dunningCase.metadata, "session_conflict_count") + 1
+      const { output, updatedCase, retryAt } = await rescheduleUnchargedAttempt(
+        container,
+        {
+          dunningCase,
+          caseMetadata: {
+            ...retryMetadata,
+            session_conflict_count: sessionConflictCount,
+          },
+          attempt,
+          attemptNo,
+          attemptCount: transitionSnapshot.attempt_count,
+          outcome,
+          finishedAt,
+          correlationId,
+          subscriptionStatus: subscription.status,
+        }
+      )
+
+      logDunningEvent(logger, "info", {
+        event: "dunning.retry",
+        outcome: "blocked",
+        correlation_id: correlationId,
+        dunning_case_id: updatedCase.id,
+        subscription_id: updatedCase.subscription_id,
+        renewal_cycle_id: updatedCase.renewal_cycle_id,
+        attempt_no: attemptNo,
+        duration_ms: Date.now() - startedAtMs,
+        blocked_count: 1,
+        rescheduled_count: 1,
+        alertable: false,
+        message: outcome.error_message,
+        metadata: {
+          retry_outcome: "retry_scheduled",
+          error_code: outcome.error_code,
+          session_conflict_count: sessionConflictCount,
+          next_retry_at: retryAt.toISOString(),
+        },
+      })
+
+      return new StepResponse<RunDunningRetryStepOutput>(output)
+    }
+
     // No payment session was ever created, so nothing was charged. Keep the audit row, give the
     // budget its attempt back and let the scheduler try again once the fault has had time to clear:
     // a provider outage of a few minutes must not park every case that retried during it. Only a
     // fault that keeps coming back is something an operator has to look at.
     if (outcome.kind === "setup_failure") {
-      const setupFailureStreak = readSetupFailureStreak(dunningCase.metadata) + 1
+      const setupFailureStreak =
+        readRetryCounter(dunningCase.metadata, "setup_failure_streak") + 1
       const setupFailureMetadata = {
         ...retryMetadata,
         setup_failure_streak: setupFailureStreak,
@@ -1227,44 +1515,28 @@ export async function runDunningRetry(
         })
       }
 
-      const setupRetryAt = new Date(
-        finishedAt.getTime() + SETUP_FAILURE_RETRY_MINUTES * 60 * 1000
+      const { output, updatedCase, retryAt } = await rescheduleUnchargedAttempt(
+        container,
+        {
+          dunningCase,
+          caseMetadata: setupFailureMetadata,
+          attempt,
+          attemptNo,
+          attemptCount: transitionSnapshot.attempt_count,
+          outcome,
+          finishedAt,
+          correlationId,
+          subscriptionStatus: subscription.status,
+        }
       )
-
-      await dunningModule.updateDunningAttempts({
-        id: attempt.id,
-        finished_at: finishedAt,
-        status: DunningAttemptStatus.ABORTED,
-        error_code: outcome.error_code,
-        error_message: outcome.error_message,
-        payment_reference: null,
-        metadata: {
-          ...(attempt.metadata ?? {}),
-          provider_reached: outcome.provider_reached,
-        },
-      } as any)
-
-      const rescheduledCase = await dunningModule.updateDunningCases({
-        id: dunningCase.id,
-        status: DunningCaseStatus.RETRY_SCHEDULED,
-        attempt_count: transitionSnapshot.attempt_count,
-        next_retry_at: setupRetryAt,
-        last_attempt_at: finishedAt,
-        last_payment_error_code: outcome.error_code,
-        last_payment_error_message: outcome.error_message,
-        recovered_at: null,
-        closed_at: null,
-        recovery_reason: null,
-        metadata: setupFailureMetadata,
-      } as any)
 
       logDunningEvent(logger, "warn", {
         event: "dunning.retry",
         outcome: "failed",
         correlation_id: correlationId,
-        dunning_case_id: rescheduledCase.id,
-        subscription_id: rescheduledCase.subscription_id,
-        renewal_cycle_id: rescheduledCase.renewal_cycle_id,
+        dunning_case_id: updatedCase.id,
+        subscription_id: updatedCase.subscription_id,
+        renewal_cycle_id: updatedCase.renewal_cycle_id,
         attempt_no: attemptNo,
         duration_ms: Date.now() - startedAtMs,
         failure_count: 1,
@@ -1277,26 +1549,11 @@ export async function runDunningRetry(
           retry_outcome: "retry_scheduled",
           error_code: outcome.error_code,
           setup_failure_streak: setupFailureStreak,
-          next_retry_at: setupRetryAt.toISOString(),
+          next_retry_at: retryAt.toISOString(),
         },
       })
 
-      return new StepResponse<RunDunningRetryStepOutput>({
-        dunning_case_id: rescheduledCase.id,
-        dunning_attempt_id: attempt.id,
-        outcome: "retry_scheduled",
-        subscription_id: rescheduledCase.subscription_id,
-        subscription_status: subscription.status,
-        renewal_order_id: dunningCase.renewal_order_id,
-        settled_now: false,
-        recovered_now: false,
-        correlation_id: correlationId,
-        attempt_no: attemptNo,
-        error_code: outcome.error_code,
-        next_retry_at: setupRetryAt.toISOString(),
-        recovery_reason: null,
-        park_reason: null,
-      })
+      return new StepResponse<RunDunningRetryStepOutput>(output)
     }
 
     // The provider was reached and asked for cardholder authentication, so the attempt counts -

@@ -1042,6 +1042,11 @@ function formatRetryBlockedReason(reason: DunningRetryBlockedReason) {
       return "the case has no renewal order"
     case "missing_retry_schedule":
       return "the case has no retry schedule"
+    case "retry_not_due":
+      return "the next retry is not due yet"
+    default:
+      reason satisfies never
+      return reason
   }
 }
 

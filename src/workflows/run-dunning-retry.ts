@@ -100,11 +100,13 @@ export const runDunningRetryWorkflow = createWorkflow(
 
     const result = runDunningRetryStep(stepInput)
 
+    // A reschedule that charged nothing handed its attempt back, so telling the customer their
+    // payment failed would be a lie - and the loudest possible one while they are mid-checkout.
     when(
       "emit-dunning-attempt-failed",
       { result },
       function ({ result }) {
-        return result.outcome === "retry_scheduled"
+        return result.outcome === "retry_scheduled" && result.attempt_counted === true
       }
     ).then(function () {
       emitDunningEventStep({

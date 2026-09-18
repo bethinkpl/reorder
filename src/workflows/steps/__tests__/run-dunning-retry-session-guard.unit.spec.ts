@@ -46,6 +46,8 @@ type PaymentCollectionFixture = {
 }
 
 type BuildContainerOptions = {
+  caseStatus?: DunningCaseStatus
+  attemptCount?: number
   caseMetadata?: Record<string, unknown> | null
   paymentCollections?: PaymentCollectionFixture[]
 }
@@ -68,8 +70,8 @@ function buildContainer(options: BuildContainerOptions = {}) {
     subscription_id: "sub_1",
     renewal_cycle_id: "rc_1",
     renewal_order_id: "order_1",
-    status: DunningCaseStatus.RETRY_SCHEDULED,
-    attempt_count: 1,
+    status: options.caseStatus ?? DunningCaseStatus.RETRY_SCHEDULED,
+    attempt_count: options.attemptCount ?? 1,
     max_attempts: 3,
     retry_schedule: retrySchedule,
     next_retry_at: new Date("2026-01-01T00:00:00.000Z"),
@@ -182,6 +184,7 @@ function buildContainer(options: BuildContainerOptions = {}) {
   return {
     container,
     logger,
+    authorizePaymentSession,
     updateDunningCases,
     updateDunningAttempts,
   }
@@ -259,6 +262,7 @@ describe("runDunningRetry - customer payment session guard", () => {
       park_reason: null,
       settled_now: false,
       recovered_now: false,
+      attempt_counted: false,
       error_code: "customer_payment_in_progress",
     })
     expect(updateDunningAttempts).toHaveBeenCalledWith(
@@ -406,30 +410,73 @@ describe("runDunningRetry - customer payment session guard", () => {
     }
   )
 
-  it("steps aside for an authorized sibling collection", async () => {
-    // Core cancels and recreates an authorized collection, which would throw away a payment the
-    // customer already authorized.
-    const { container, updateDunningCases } = buildContainer({
-      paymentCollections: [
-        { id: "paycol_1", status: "not_paid", payment_sessions: [] },
-        { id: "paycol_2", status: "authorized", payment_sessions: [] },
-      ],
-    })
+  it.each(["authorized", "partially_authorized"])(
+    "steps aside for a '%s' sibling collection",
+    async (status) => {
+      // Core cancels and recreates either one, throwing away a payment the customer already
+      // authorized.
+      const { container, updateDunningCases } = buildContainer({
+        paymentCollections: [
+          { id: "paycol_1", status: "not_paid", payment_sessions: [] },
+          { id: "paycol_2", status, payment_sessions: [] },
+        ],
+      })
+
+      const response = await runDunningRetry(container, {
+        dunning_case_id: "dun_1",
+      })
+
+      expect(collectionRun).not.toHaveBeenCalled()
+      expect(sessionRun).not.toHaveBeenCalled()
+      expect(response.output).toMatchObject({
+        outcome: "retry_scheduled",
+        park_reason: null,
+        error_code: "customer_payment_in_progress",
+      })
+      expect(
+        caseUpdate(updateDunningCases, DunningCaseStatus.RETRY_SCHEDULED)
+      ).toMatchObject({ attempt_count: 1 })
+    }
+  )
+
+  it("hands the case over once the customer has stalled for a day", async () => {
+    const { container, updateDunningCases, updateDunningAttempts } =
+      buildContainer({
+        caseMetadata: { session_conflict_count: 23 },
+        paymentCollections: [
+          { id: "paycol_1", status: "awaiting", payment_sessions: [customerSession()] },
+        ],
+      })
 
     const response = await runDunningRetry(container, {
       dunning_case_id: "dun_1",
     })
 
-    expect(collectionRun).not.toHaveBeenCalled()
     expect(sessionRun).not.toHaveBeenCalled()
     expect(response.output).toMatchObject({
-      outcome: "retry_scheduled",
-      park_reason: null,
-      error_code: "customer_payment_in_progress",
+      outcome: "awaiting_manual_resolution",
+      park_reason: "customer_payment_stalled",
+      next_retry_at: null,
+      attempt_counted: false,
+    })
+    expect(updateDunningAttempts).toHaveBeenCalledWith(
+      expect.objectContaining({
+        status: DunningAttemptStatus.ABORTED,
+        payment_reference: null,
+      })
+    )
+    expect(
+      caseUpdate(updateDunningCases, DunningCaseStatus.AWAITING_MANUAL_RESOLUTION)
+    ).toMatchObject({
+      attempt_count: 1,
+      metadata: expect.objectContaining({
+        park_reason: "customer_payment_stalled",
+        session_conflict_count: 24,
+      }),
     })
     expect(
       caseUpdate(updateDunningCases, DunningCaseStatus.RETRY_SCHEDULED)
-    ).toMatchObject({ attempt_count: 1 })
+    ).toBeUndefined()
   })
 
   it("skips an admin retry-now just the same", async () => {
@@ -492,6 +539,7 @@ describe("runDunningRetry - customer payment session guard", () => {
     expect(response.output).toMatchObject({
       outcome: "retry_scheduled",
       park_reason: null,
+      attempt_counted: false,
       error_code: "payment_session_setup_failed",
     })
     expect(updateDunningAttempts).toHaveBeenCalledWith(
@@ -516,6 +564,46 @@ describe("runDunningRetry - customer payment session guard", () => {
     expect(
       caseUpdate(updateDunningCases, DunningCaseStatus.AWAITING_MANUAL_RESOLUTION)
     ).toBeUndefined()
+  })
+
+  it("lets an operator retry a stalled case that has spent its budget", async () => {
+    const { container } = buildContainer({
+      caseStatus: DunningCaseStatus.AWAITING_MANUAL_RESOLUTION,
+      attemptCount: 3,
+      caseMetadata: {
+        park_reason: "customer_payment_stalled",
+        session_conflict_count: 24,
+      },
+    })
+
+    const response = await runDunningRetry(container, {
+      dunning_case_id: "dun_1",
+      ignore_schedule: true,
+      triggered_by: "admin_1",
+    })
+
+    expect(sessionRun).toHaveBeenCalled()
+    expect(response.output.outcome).toBe("recovered")
+  })
+
+  it("counts the attempt when the provider declined it", async () => {
+    // The budget paid for this one, so the customer is told about it and the next tick has one
+    // attempt less to spend.
+    const { container, authorizePaymentSession, updateDunningCases } =
+      buildContainer()
+    authorizePaymentSession.mockRejectedValue(new Error("Try again later"))
+
+    const response = await runDunningRetry(container, {
+      dunning_case_id: "dun_1",
+    })
+
+    expect(response.output).toMatchObject({
+      outcome: "retry_scheduled",
+      attempt_counted: true,
+    })
+    expect(
+      caseUpdate(updateDunningCases, DunningCaseStatus.RETRYING)
+    ).toMatchObject({ attempt_count: 2 })
   })
 
   it("forgets the conflict count once the provider answers again", async () => {

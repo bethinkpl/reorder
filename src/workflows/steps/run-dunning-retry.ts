@@ -151,6 +151,7 @@ type PaymentRetryOutcome =
 type DunningParkReason =
   | "requires_action"
   | "setup_failure"
+  | "customer_payment_stalled"
   | "unreached_provider"
   | "indeterminate_provider_response"
 
@@ -159,6 +160,13 @@ const SETUP_FAILURE_RETRY_MINUTES = 60
 
 /** How many setup failures in a row hand the case to an operator instead of rescheduling it. */
 const SETUP_FAILURE_STREAK_LIMIT = 3
+
+/**
+ * How many ticks in a row may step aside for the customer before an operator is asked to look.
+ * Parking costs the customer nothing: their own payment still recovers a parked case through the
+ * capture subscriber.
+ */
+const SESSION_CONFLICT_LIMIT = 24
 
 /** How long a session the customer opened counts as one they may still be paying on. */
 const CUSTOMER_SESSION_LIVE_MINUTES = 60
@@ -172,6 +180,12 @@ const CUSTOMER_LIVE_SESSION_STATUSES: readonly string[] = [
   "pending",
   "pending_authorization",
   "requires_more",
+]
+
+/** The collection statuses core cancels and recreates, throwing away whatever they hold. */
+const AUTHORIZED_COLLECTION_STATUSES: readonly string[] = [
+  "authorized",
+  "partially_authorized",
 ]
 
 /**
@@ -216,6 +230,11 @@ export type RunDunningRetryStepOutput = {
   settled_now: boolean
   /** True only when this run closed the case. A run that found it closed must not notify again. */
   recovered_now: boolean
+  /**
+   * Whether this run spent one of the case's attempts. A reschedule that charged nothing hands its
+   * slot back, and nothing downstream may tell the customer their payment was tried and failed.
+   */
+  attempt_counted: boolean
   correlation_id: string
   attempt_no: number
   error_code: string | null
@@ -505,7 +524,9 @@ function hasCustomerPaymentInProgress(
 ) {
   return paymentCollections.some(
     (collection) =>
-      String(collection.status ?? "").toLowerCase() === "authorized" ||
+      AUTHORIZED_COLLECTION_STATUSES.includes(
+        String(collection.status ?? "").toLowerCase()
+      ) ||
       (collection.payment_sessions ?? []).some((session) =>
         isCustomerLiveSession(session, now)
       )
@@ -956,6 +977,8 @@ type ParkForManualResolutionInput = {
   attemptStatus: DunningAttemptStatus
   attemptNo: number
   attemptCount: number
+  /** Whether the parked attempt kept its budget slot. False for an aborted, uncharged attempt. */
+  attemptCounted: boolean
   parkReason: DunningParkReason
   outcome: PaymentRetryFailureOutcome
   finishedAt: Date
@@ -1008,6 +1031,7 @@ async function parkForManualResolution(
     next_retry_at: null,
     recovery_reason: null,
     park_reason: input.parkReason,
+    attempt_counted: input.attemptCounted,
   }
 
   input.markCaseParked(output)
@@ -1125,6 +1149,7 @@ async function rescheduleUnchargedAttempt(
       next_retry_at: retryAt.toISOString(),
       recovery_reason: null,
       park_reason: null,
+      attempt_counted: false,
     },
   }
 }
@@ -1260,6 +1285,7 @@ export async function runDunningRetry(
         next_retry_at: null,
         recovery_reason: dunningCase.recovery_reason,
         park_reason: null,
+        attempt_counted: false,
       })
     }
 
@@ -1432,6 +1458,7 @@ export async function runDunningRetry(
         next_retry_at: null,
         recovery_reason: "payment_recovered",
         park_reason: null,
+        attempt_counted: true,
         time_to_recover_ms: timeToRecoverMs,
       })
     }
@@ -1443,6 +1470,29 @@ export async function runDunningRetry(
     if (outcome.kind === "session_conflict") {
       const sessionConflictCount =
         readRetryCounter(dunningCase.metadata, "session_conflict_count") + 1
+
+      if (sessionConflictCount >= SESSION_CONFLICT_LIMIT) {
+        return await parkForManualResolution(container, {
+          dunningCase,
+          caseMetadata: {
+            ...retryMetadata,
+            session_conflict_count: sessionConflictCount,
+          },
+          attempt,
+          attemptStatus: DunningAttemptStatus.ABORTED,
+          attemptNo,
+          attemptCount: transitionSnapshot.attempt_count,
+          attemptCounted: false,
+          parkReason: "customer_payment_stalled",
+          outcome,
+          finishedAt,
+          correlationId,
+          durationMs: Date.now() - startedAtMs,
+          subscriptionStatus: subscription.status,
+          markCaseParked,
+        })
+      }
+
       const { output, updatedCase, retryAt } = await rescheduleUnchargedAttempt(
         container,
         {
@@ -1505,6 +1555,7 @@ export async function runDunningRetry(
           attemptStatus: DunningAttemptStatus.ABORTED,
           attemptNo,
           attemptCount: transitionSnapshot.attempt_count,
+          attemptCounted: false,
           parkReason: "setup_failure",
           outcome,
           finishedAt,
@@ -1566,6 +1617,7 @@ export async function runDunningRetry(
         attemptStatus: DunningAttemptStatus.FAILED,
         attemptNo,
         attemptCount: consumedAttempts,
+        attemptCounted: true,
         parkReason: "requires_action",
         outcome,
         finishedAt,
@@ -1586,6 +1638,7 @@ export async function runDunningRetry(
         attemptStatus: DunningAttemptStatus.FAILED,
         attemptNo,
         attemptCount: consumedAttempts,
+        attemptCounted: true,
         parkReason: "indeterminate_provider_response",
         outcome,
         finishedAt,
@@ -1622,6 +1675,7 @@ export async function runDunningRetry(
           attemptStatus: DunningAttemptStatus.FAILED,
           attemptNo,
           attemptCount: consumedAttempts,
+          attemptCounted: true,
           parkReason: "unreached_provider",
           outcome,
           finishedAt,
@@ -1693,6 +1747,7 @@ export async function runDunningRetry(
         next_retry_at: null,
         recovery_reason: recoveryReason,
         park_reason: null,
+        attempt_counted: true,
       })
     }
 
@@ -1711,6 +1766,7 @@ export async function runDunningRetry(
           attemptStatus: DunningAttemptStatus.FAILED,
           attemptNo,
           attemptCount: consumedAttempts,
+          attemptCounted: true,
           parkReason: "unreached_provider",
           outcome,
           finishedAt,
@@ -1777,6 +1833,7 @@ export async function runDunningRetry(
         next_retry_at: null,
         recovery_reason: "retry_schedule_exhausted",
         park_reason: null,
+        attempt_counted: true,
       })
     }
 
@@ -1831,6 +1888,7 @@ export async function runDunningRetry(
       next_retry_at: nextRetryAt.toISOString(),
       recovery_reason: null,
       park_reason: null,
+      attempt_counted: true,
     })
   } catch (error) {
     const failureKind = classifyDunningFailure(error)

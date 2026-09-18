@@ -39,13 +39,12 @@ import {
   SubscriptionPendingUpdateData,
   SubscriptionStatus,
 } from "../../modules/subscription/types"
-import { addSubscriptionCadence } from "../../modules/subscription/utils/effective-next-renewal"
 import { subscriptionErrors } from "../../modules/subscription/utils/errors"
 import { startDunningWorkflow } from "../start-dunning"
 import { persistSubscriptionLogEvent } from "./create-subscription-log-event"
-import { buildPricingSnapshot } from "./validate-subscription-cart"
 import { toISOStringOrNull } from "../utils/date-output"
 import { recordOrderCaptureTransactions } from "../utils/record-order-capture-transactions"
+import { settleRenewalCycleSucceeded } from "../utils/settle-renewal-cycle-succeeded"
 import {
   computeSubscriptionDiscountAmount,
   roundCurrency,
@@ -1543,9 +1542,6 @@ export const finalizeRenewalCycleStep = createStep(
     { container }
   ) {
     const logger = container.resolve("logger")
-    const renewalModule = container.resolve<RenewalModuleService>(RENEWAL_MODULE)
-    const subscriptionModule =
-      container.resolve<SubscriptionModuleService>(SUBSCRIPTION_MODULE)
 
     const { context, order_result } = input
     const subscription = context.subscription
@@ -1553,102 +1549,17 @@ export const finalizeRenewalCycleStep = createStep(
     const generatedOrderId = order_result.generated_order_id
 
     try {
-      if (generatedOrderId) {
-        const link = container.resolve(ContainerRegistrationKeys.LINK)
-
-        await link.create({
-          [RENEWAL_MODULE]: {
-            renewal_cycle_id: context.renewal_cycle_id,
-          },
-          [Modules.ORDER]: {
-            order_id: generatedOrderId,
-          },
-        })
-
-        await link.create({
-          [SUBSCRIPTION_MODULE]: {
-            subscription_id: context.subscription_id,
-          },
-          [Modules.ORDER]: {
-            order_id: generatedOrderId,
-          },
-        })
-      }
-
-      const scheduledAnchor = new Date(context.scheduled_for)
-      const nextInterval =
-        appliedPendingChanges?.frequency_interval ??
-        subscription.frequency_interval
-      const nextValue =
-        appliedPendingChanges?.frequency_value ?? subscription.frequency_value
-      const nextRenewalAt = addSubscriptionCadence(
-        scheduledAnchor,
-        nextInterval,
-        nextValue
+      const { renewal_cycle: updatedCycle } = await settleRenewalCycleSucceeded(
+        container,
+        {
+          renewal_cycle_id: context.renewal_cycle_id,
+          subscription_id: context.subscription_id,
+          order_id: generatedOrderId,
+          finished_at: new Date(),
+          attempt_id: context.attempt_id,
+          source_snapshot: order_result.resolved_source_snapshot,
+        }
       )
-      const finishedAt = new Date()
-
-      const nextProductSnapshot = appliedPendingChanges
-        ? {
-            ...subscription.product_snapshot,
-            variant_id: appliedPendingChanges.variant_id,
-            variant_title: appliedPendingChanges.variant_title,
-            sku: appliedPendingChanges.sku ?? subscription.product_snapshot.sku,
-          }
-        : subscription.product_snapshot
-
-      // A plan change re-negotiates the deal: the frozen pricing snapshot must
-      // be rebuilt from the live plan config for the NEW variant and frequency,
-      // or the signup discount would keep applying to the new plan's price on
-      // every future cycle.
-      let nextPricingSnapshot = subscription.pricing_snapshot
-
-      if (appliedPendingChanges) {
-        const effectiveConfig = await resolveProductSubscriptionConfig(container, {
-          product_id: subscription.product_id,
-          variant_id: appliedPendingChanges.variant_id,
-        })
-
-        nextPricingSnapshot = effectiveConfig.is_enabled
-          ? buildPricingSnapshot(
-              effectiveConfig.discount_per_frequency,
-              nextInterval as FrequencyInterval,
-              nextValue
-            )
-          : null
-      }
-
-      await subscriptionModule.updateSubscriptions({
-        id: subscription.id,
-        variant_id:
-          appliedPendingChanges?.variant_id ?? subscription.variant_id,
-        frequency_interval: nextInterval,
-        frequency_value: nextValue,
-        product_snapshot: nextProductSnapshot,
-        pricing_snapshot: nextPricingSnapshot,
-        next_renewal_at: nextRenewalAt,
-        last_renewal_at: finishedAt,
-        skip_next_cycle: false,
-        pending_update_data: appliedPendingChanges ? null : subscription.pending_update_data,
-        ...(order_result.resolved_source_snapshot ? { source_snapshot: order_result.resolved_source_snapshot } : {}),
-      })
-
-      const updatedCycle = await renewalModule.updateRenewalCycles({
-        id: context.renewal_cycle_id,
-        status: RenewalCycleStatus.SUCCEEDED,
-        processed_at: finishedAt,
-        generated_order_id: generatedOrderId,
-        last_error: null,
-      })
-
-      await renewalModule.updateRenewalAttempts({
-        id: context.attempt_id,
-        status: RenewalAttemptStatus.SUCCEEDED,
-        finished_at: finishedAt,
-        order_id: generatedOrderId,
-        error_code: null,
-        error_message: null,
-      })
 
       logRenewalEvent(logger, "info", {
         event: "renewal.execution",

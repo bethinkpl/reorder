@@ -32,12 +32,16 @@ import {
   resolveRetryEligibility,
   toRetryBlockedError,
 } from "../../modules/dunning/utils/retry-eligibility"
+import { ensureNextRenewalCycleWorkflow } from "../ensure-next-renewal-cycle"
 import { recordOrderCaptureTransactions } from "../utils/record-order-capture-transactions"
+import { settleDunningCaseRecovered } from "../utils/settle-dunning-recovery"
+import { settleRenewalCycleSucceeded } from "../utils/settle-renewal-cycle-succeeded"
 import { settleSubscriptionPaymentFailure } from "../utils/settle-subscription-payment-failure"
 import { SUBSCRIPTION_MODULE } from "../../modules/subscription"
 import type SubscriptionModuleService from "../../modules/subscription/service"
 import { type SubscriptionPaymentContext, SubscriptionStatus } from "../../modules/subscription/types"
 import { subscriptionErrors } from "../../modules/subscription/utils/errors"
+import { refreshSubscriptionPaymentContext } from "../../modules/subscription/utils/resolve-captured-payment-method"
 
 type SubscriptionRecord = {
   id: string
@@ -180,6 +184,7 @@ export type RunDunningRetryStepOutput = {
     | "awaiting_manual_resolution"
   subscription_id: string
   subscription_status: SubscriptionStatus
+  renewal_order_id: string | null
   /** True only when this run moved the subscription to `payment_failed`. */
   settled_now: boolean
   correlation_id: string
@@ -281,6 +286,26 @@ async function getNextAttemptNo(
   return Math.max(dunningCase.attempt_count, highestAttemptNo) + 1
 }
 
+async function getLatestAttemptId(
+  container: MedusaContainer,
+  dunningCaseId: string
+) {
+  const dunningModule = container.resolve<DunningModuleService>(DUNNING_MODULE)
+  const attempts = (await dunningModule.listDunningAttempts({
+    dunning_case_id: dunningCaseId,
+  } as any)) as DunningAttemptRecord[]
+
+  const latest = attempts.reduce<DunningAttemptRecord | null>(
+    (highest, attempt) =>
+      !highest || (attempt.attempt_no ?? 0) >= (highest.attempt_no ?? 0)
+        ? attempt
+        : highest,
+    null
+  )
+
+  return latest?.id ?? ""
+}
+
 /**
  * Whether any attempt on this case ever reached the provider. A decline the provider throws never
  * leaves a session behind, so the attempt row records that it got there; without either marker
@@ -329,7 +354,7 @@ function isProviderDecline(error: unknown) {
  * and makes `createOrUpdateOrderPaymentCollectionWorkflow` throw
  * "Amount cannot be greater than ...".
  */
-async function loadOrderAmounts(
+export async function loadOrderAmounts(
   container: MedusaContainer,
   id: string
 ): Promise<{ total: number, pending: number }> {
@@ -815,6 +840,7 @@ async function parkForManualResolution(
     outcome: "awaiting_manual_resolution",
     subscription_id: updatedCase.subscription_id,
     subscription_status: input.subscriptionStatus,
+    renewal_order_id: input.dunningCase.renewal_order_id,
     settled_now: false,
     correlation_id: input.correlationId,
     attempt_no: input.attemptNo,
@@ -864,14 +890,67 @@ async function parkForManualResolution(
 }
 
 /** Exported for unit tests: `createStep` doesn't expose its handler. */
+/**
+ * The bookkeeping a recovered charge owes the renewal cycle it paid for.
+ *
+ * Deliberately non-fatal: the case is closed and the money is in by the time this runs, and a
+ * throw would land in the caller's catch, which rolls the case back to where the retry found it.
+ */
+async function finalizeRecoveredRenewal(
+  container: MedusaContainer,
+  input: {
+    dunningCase: DunningCaseRecord
+    subscription: SubscriptionRecord
+    finishedAt: Date
+    correlationId: string
+    refreshPaymentContext: boolean
+  }
+) {
+  const { dunningCase, subscription } = input
+
+  const nonFatal = async (what: string, run: () => Promise<unknown>) => {
+    try {
+      await run()
+    } catch (error) {
+      logDunningEvent(container.resolve("logger"), "error", {
+        event: "dunning.retry",
+        outcome: "failed",
+        correlation_id: input.correlationId,
+        dunning_case_id: dunningCase.id,
+        subscription_id: subscription.id,
+        renewal_cycle_id: dunningCase.renewal_cycle_id,
+        alertable: true,
+        message: `DunningCase '${dunningCase.id}' was recovered but ${what} failed: ${getDunningErrorMessage(error)}`,
+      })
+    }
+  }
+
+  if (input.refreshPaymentContext) {
+    await nonFatal("refreshing its payment context", () =>
+      refreshSubscriptionPaymentContext(container, subscription)
+    )
+  }
+
+  await nonFatal("settling its renewal cycle", async () => {
+    await settleRenewalCycleSucceeded(container, {
+      renewal_cycle_id: dunningCase.renewal_cycle_id,
+      subscription_id: subscription.id,
+      order_id: dunningCase.renewal_order_id,
+      finished_at: input.finishedAt,
+    })
+
+    await ensureNextRenewalCycleWorkflow(container).run({
+      input: { subscription_id: subscription.id },
+    })
+  })
+}
+
 export async function runDunningRetry(
   container: MedusaContainer,
   input: RunDunningRetryStepInput
 ): Promise<StepResponse<RunDunningRetryStepOutput>> {
   const logger = container.resolve("logger")
   const dunningModule = container.resolve<DunningModuleService>(DUNNING_MODULE)
-  const subscriptionModule =
-    container.resolve<SubscriptionModuleService>(SUBSCRIPTION_MODULE)
   const now = normalizeNow(input.now)
   const startedAtMs = Date.now()
   const correlationId =
@@ -917,6 +996,31 @@ export async function runDunningRetry(
       container,
       dunningCase.subscription_id
     )
+
+    // A case the customer's own payment already closed, with a run the scheduler was still
+    // holding: the order owes nothing, so this is a no-op rather than the `alreadyRecovered`
+    // conflict the eligibility guard would raise.
+    if (
+      dunningCase.status === DunningCaseStatus.RECOVERED &&
+      dunningCase.renewal_order_id &&
+      (await loadOrderAmounts(container, dunningCase.renewal_order_id)).pending <= 0
+    ) {
+      return new StepResponse<RunDunningRetryStepOutput>({
+        dunning_case_id: dunningCase.id,
+        dunning_attempt_id: await getLatestAttemptId(container, dunningCase.id),
+        outcome: "recovered",
+        subscription_id: dunningCase.subscription_id,
+        subscription_status: subscription.status,
+        renewal_order_id: dunningCase.renewal_order_id,
+        settled_now: false,
+        correlation_id: correlationId,
+        attempt_no: dunningCase.attempt_count,
+        error_code: null,
+        next_retry_at: null,
+        recovery_reason: dunningCase.recovery_reason,
+        park_reason: null,
+      })
+    }
 
     const eligibility = validateRetryableCase(
       dunningCase,
@@ -1021,25 +1125,27 @@ export async function runDunningRetry(
         },
       } as any)
 
-      const updatedCase = await dunningModule.updateDunningCases({
-        id: dunningCase.id,
-        status: DunningCaseStatus.RECOVERED,
-        next_retry_at: null,
-        last_attempt_at: finishedAt,
-        last_payment_error_code: null,
-        last_payment_error_message: null,
-        recovered_at: finishedAt,
-        closed_at: finishedAt,
-        recovery_reason: "payment_recovered",
-        metadata: caseMetadata,
-      } as any)
+      const { dunning_case: updatedCase } = await settleDunningCaseRecovered(
+        container,
+        {
+          dunning_case: dunningCase,
+          subscription,
+          finished_at: finishedAt,
+          recovery_reason: "payment_recovered",
+          payment_reference: outcome.payment_reference,
+          metadata: caseMetadata,
+        }
+      )
 
-      if (subscription.status === SubscriptionStatus.PAST_DUE) {
-        await subscriptionModule.updateSubscriptions({
-          id: subscription.id,
-          status: SubscriptionStatus.ACTIVE,
-        })
-      }
+      await finalizeRecoveredRenewal(container, {
+        dunningCase,
+        subscription,
+        finishedAt,
+        correlationId,
+        // A recovery without a payment of its own is one someone else already paid, so the card
+        // that settled it is not the one the subscription is holding.
+        refreshPaymentContext: outcome.payment_reference === null,
+      })
 
       const createdAt = updatedCase.created_at
         ? new Date(updatedCase.created_at)
@@ -1075,6 +1181,7 @@ export async function runDunningRetry(
         outcome: "recovered",
         subscription_id: updatedCase.subscription_id,
         subscription_status: SubscriptionStatus.ACTIVE,
+        renewal_order_id: dunningCase.renewal_order_id,
         settled_now: false,
         correlation_id: correlationId,
         attempt_no: attemptNo,
@@ -1175,6 +1282,7 @@ export async function runDunningRetry(
         outcome: "retry_scheduled",
         subscription_id: rescheduledCase.subscription_id,
         subscription_status: subscription.status,
+        renewal_order_id: dunningCase.renewal_order_id,
         settled_now: false,
         correlation_id: correlationId,
         attempt_no: attemptNo,
@@ -1313,6 +1421,7 @@ export async function runDunningRetry(
         outcome: "unrecovered",
         subscription_id: updatedCase.subscription_id,
         subscription_status: settlement.status,
+        renewal_order_id: dunningCase.renewal_order_id,
         settled_now: settlement.settled,
         correlation_id: correlationId,
         attempt_no: attemptNo,
@@ -1395,6 +1504,7 @@ export async function runDunningRetry(
         outcome: "unrecovered",
         subscription_id: updatedCase.subscription_id,
         subscription_status: settlement.status,
+        renewal_order_id: dunningCase.renewal_order_id,
         settled_now: settlement.settled,
         correlation_id: correlationId,
         attempt_no: attemptNo,
@@ -1447,6 +1557,7 @@ export async function runDunningRetry(
       outcome: "retry_scheduled",
       subscription_id: updatedCase.subscription_id,
       subscription_status: subscription.status,
+      renewal_order_id: dunningCase.renewal_order_id,
       settled_now: false,
       correlation_id: correlationId,
       attempt_no: attemptNo,

@@ -1,5 +1,8 @@
 import type { IPaymentModuleService, MedusaContainer } from "@medusajs/framework/types"
 import { ContainerRegistrationKeys, Modules } from "@medusajs/framework/utils"
+import { SUBSCRIPTION_MODULE } from ".."
+import type SubscriptionModuleService from "../service"
+import type { SubscriptionPaymentContext } from "../types"
 
 export type CapturedPaymentRecord = {
   id: string
@@ -94,6 +97,58 @@ export async function resolveLatestSavedPaymentMethod(
     account_holder_id: accountHolder.id,
     payment_method_id: latest.id,
   }
+}
+
+/**
+ * Points the subscription at the card that is now newest on its account holder.
+ *
+ * A customer who pays an outstanding renewal order themselves saves a new card doing it; without
+ * this the next cycle would keep charging the one that already declined.
+ */
+export async function refreshSubscriptionPaymentContext(
+  container: MedusaContainer,
+  subscription: {
+    id: string
+    customer_id: string
+    payment_context: SubscriptionPaymentContext | null
+  }
+): Promise<boolean> {
+  const paymentContext = subscription.payment_context
+  const providerId = paymentContext?.payment_provider_id
+
+  if (!providerId) {
+    return false
+  }
+
+  const resolved = await resolveLatestSavedPaymentMethod(container, {
+    customer_id: subscription.customer_id,
+    provider_id: providerId,
+  })
+
+  if (!resolved) {
+    return false
+  }
+
+  if (
+    paymentContext?.payment_method_id === resolved.payment_method_id &&
+    paymentContext?.account_holder_id === resolved.account_holder_id
+  ) {
+    return false
+  }
+
+  const subscriptionModule =
+    container.resolve<SubscriptionModuleService>(SUBSCRIPTION_MODULE)
+
+  await subscriptionModule.updateSubscriptions({
+    id: subscription.id,
+    payment_context: {
+      payment_provider_id: providerId,
+      account_holder_id: resolved.account_holder_id,
+      payment_method_id: resolved.payment_method_id,
+    } satisfies SubscriptionPaymentContext,
+  })
+
+  return true
 }
 
 async function listPaymentsForCart(

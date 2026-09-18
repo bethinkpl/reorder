@@ -83,6 +83,10 @@ export {
   default as runDunningRetryWorkflowDefault,
 } from "./run-dunning-retry"
 export {
+  recoverDunningFromCapturedPaymentWorkflow,
+  default as recoverDunningFromCapturedPaymentWorkflowDefault,
+} from "./recover-dunning-from-captured-payment"
+export {
   markDunningRecoveredWorkflow,
   default as markDunningRecoveredWorkflowDefault,
 } from "./mark-dunning-recovered"

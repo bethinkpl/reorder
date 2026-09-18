@@ -1,5 +1,7 @@
 import type { MedusaContainer } from "@medusajs/framework/types"
 import { ContainerRegistrationKeys, Modules } from "@medusajs/framework/utils"
+import { DUNNING_MODULE } from "../../modules/dunning"
+import { DunningCaseStatus } from "../../modules/dunning/types"
 import { SUBSCRIPTION_MODULE } from "../../modules/subscription"
 import { SubscriptionStatus } from "../../modules/subscription/types"
 import { activateSubscriptionOnPaymentCaptured } from "../activate-subscription-on-payment-captured"
@@ -12,6 +14,19 @@ jest.mock("../../workflows/ensure-next-renewal-cycle", () => ({
   ensureNextRenewalCycleWorkflow: () => ({
     run: (input: { input: { subscription_id: string } }) =>
       ensureNextRenewalCycleRun(input),
+  }),
+}))
+
+const recoverDunningRun = jest.fn(
+  async (_input: { input: { dunning_case_id: string, payment_id: string } }) => ({
+    result: {},
+  })
+)
+
+jest.mock("../../workflows/recover-dunning-from-captured-payment", () => ({
+  recoverDunningFromCapturedPaymentWorkflow: () => ({
+    run: (input: { input: { dunning_case_id: string, payment_id: string } }) =>
+      recoverDunningRun(input),
   }),
 }))
 
@@ -59,8 +74,9 @@ function buildContainer(options: {
   paymentMethods: PaymentMethodStub[]
   captured: UpdateCall[]
   errorLogs?: string[]
+  dunningCases?: { id: string, status: DunningCaseStatus }[]
 }) {
-  const { staged, paymentMethods, captured, errorLogs = [] } = options
+  const { staged, paymentMethods, captured, errorLogs = [], dunningCases = [] } = options
 
   const query = {
     graph: async ({ entity }: { entity: string }) => ({ data: staged[entity] ?? [] }),
@@ -98,6 +114,10 @@ function buildContainer(options: {
         return subscriptionModule
       }
 
+      if (key === DUNNING_MODULE) {
+        return { listDunningCases: async () => dunningCases }
+      }
+
       if (key === "logger") {
         return logger
       }
@@ -107,9 +127,23 @@ function buildContainer(options: {
   } as unknown as MedusaContainer
 }
 
+function pastDueStaged(): Staged {
+  const staged = defaultStaged()
+
+  stagedSubscription(staged).status = SubscriptionStatus.PAST_DUE
+  staged.cart_payment_collection = []
+  staged.order_payment_collection = [{ order_id: "order_1" }]
+  staged.order = [
+    { id: "order_1", subscription: null, metadata: { subscription_id: "sub_1" } },
+  ]
+
+  return staged
+}
+
 describe("activateSubscriptionOnPaymentCaptured", () => {
   beforeEach(() => {
     ensureNextRenewalCycleRun.mockClear()
+    recoverDunningRun.mockClear()
   })
 
   it("activates the subscription and writes the latest saved method back onto it", async () => {
@@ -262,6 +296,79 @@ describe("activateSubscriptionOnPaymentCaptured", () => {
     await activateSubscriptionOnPaymentCaptured(container, "pay_1")
 
     expect(captured).toEqual([])
+  })
+
+  it("recovers the dunning case a past_due renewal order still has open", async () => {
+    const captured: UpdateCall[] = []
+    const container = buildContainer({
+      staged: pastDueStaged(),
+      paymentMethods: [{ id: "pm_new", data: { created: 200 } }],
+      captured,
+      dunningCases: [{ id: "dun_1", status: DunningCaseStatus.OPEN }],
+    })
+
+    await activateSubscriptionOnPaymentCaptured(container, "pay_1")
+
+    // The new card lands first, so a failing recovery cannot cost the subscription its card.
+    expect(captured).toEqual([
+      {
+        id: "sub_1",
+        payment_context: {
+          payment_provider_id: "pp_stripe_stripe",
+          account_holder_id: "acch_1",
+          payment_method_id: "pm_new",
+        },
+      },
+    ])
+    expect(recoverDunningRun).toHaveBeenCalledTimes(1)
+    expect(recoverDunningRun).toHaveBeenCalledWith({
+      input: { dunning_case_id: "dun_1", payment_id: "pay_1" },
+    })
+  })
+
+  it("heals the newest recovered case when no case is open any more", async () => {
+    const container = buildContainer({
+      staged: pastDueStaged(),
+      paymentMethods: [],
+      captured: [],
+      dunningCases: [
+        { id: "dun_2", status: DunningCaseStatus.RECOVERED },
+        { id: "dun_1", status: DunningCaseStatus.UNRECOVERED },
+      ],
+    })
+
+    await activateSubscriptionOnPaymentCaptured(container, "pay_1")
+
+    expect(recoverDunningRun).toHaveBeenCalledWith({
+      input: { dunning_case_id: "dun_2", payment_id: "pay_1" },
+    })
+  })
+
+  it("runs no recovery for an order that never entered dunning", async () => {
+    const container = buildContainer({
+      staged: pastDueStaged(),
+      paymentMethods: [],
+      captured: [],
+      dunningCases: [],
+    })
+
+    await activateSubscriptionOnPaymentCaptured(container, "pay_1")
+
+    expect(recoverDunningRun).not.toHaveBeenCalled()
+  })
+
+  it("runs no recovery for a checkout payment that has no order", async () => {
+    const container = buildContainer({
+      staged: defaultStaged(),
+      paymentMethods: [{ id: "pm_new", data: { created: 200 } }],
+      captured: [],
+      dunningCases: [{ id: "dun_1", status: DunningCaseStatus.OPEN }],
+    })
+
+    await activateSubscriptionOnPaymentCaptured(container, "pay_1")
+
+    expect(ensureNextRenewalCycleRun).toHaveBeenCalledTimes(1)
+    expect(recoverDunningRun).not.toHaveBeenCalled()
   })
 
   it("is idempotent when the resolved method already matches the stored context", async () => {

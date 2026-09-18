@@ -1,6 +1,7 @@
 import { WorkflowManager } from "@medusajs/framework/orchestration"
 import { DunningEvents } from "../../modules/dunning/events"
 import { markDunningUnrecoveredWorkflow } from "../mark-dunning-unrecovered"
+import { recoverDunningFromCapturedPaymentWorkflow } from "../recover-dunning-from-captured-payment"
 import { runDunningRetryWorkflow } from "../run-dunning-retry"
 import { startDunningWorkflow } from "../start-dunning"
 
@@ -19,6 +20,7 @@ describe("dunning lifecycle events", () => {
       ATTEMPT_FAILED: "subscription.dunning_attempt_failed",
       PAYMENT_FAILED: "subscription.payment_failed",
       PARKED: "subscription.dunning_parked",
+      RECOVERED: "subscription.dunning_recovered",
     })
   })
 
@@ -26,6 +28,7 @@ describe("dunning lifecycle events", () => {
     expect(typeof startDunningWorkflow).toBe("function")
     expect(typeof runDunningRetryWorkflow).toBe("function")
     expect(typeof markDunningUnrecoveredWorkflow).toBe("function")
+    expect(typeof recoverDunningFromCapturedPaymentWorkflow).toBe("function")
   })
 
   it("registers all three retry emits under distinct step names", () => {
@@ -49,6 +52,14 @@ describe("dunning lifecycle events", () => {
     expect(
       stepHandlers("mark-dunning-unrecovered").get(
         "emit-dunning-payment-failed-event"
+      )
+    ).toBeDefined()
+  })
+
+  it("registers the customer recovery emit", () => {
+    expect(
+      stepHandlers("recover-dunning-from-captured-payment").get(
+        "emit-dunning-recovered-event"
       )
     ).toBeDefined()
   })

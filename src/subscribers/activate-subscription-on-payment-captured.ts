@@ -1,6 +1,9 @@
 import type { SubscriberArgs, SubscriberConfig } from "@medusajs/framework"
 import type { MedusaContainer } from "@medusajs/framework/types"
 import { ContainerRegistrationKeys, PaymentEvents } from "@medusajs/framework/utils"
+import { DUNNING_MODULE } from "../modules/dunning"
+import type DunningModuleService from "../modules/dunning/service"
+import { DunningCaseStatus } from "../modules/dunning/types"
 import { SUBSCRIPTION_MODULE } from "../modules/subscription"
 import type SubscriptionModuleService from "../modules/subscription/service"
 import {
@@ -8,9 +11,10 @@ import {
   SubscriptionStatus,
   TERMINAL_SUBSCRIPTION_STATUSES,
 } from "../modules/subscription/types"
-import { findSubscriptionIdForPaymentCollection } from "../modules/subscription/utils/find-subscription-for-payment"
-import { resolveLatestSavedPaymentMethod } from "../modules/subscription/utils/resolve-captured-payment-method"
+import { findSubscriptionAndOrderForPaymentCollection } from "../modules/subscription/utils/find-subscription-for-payment"
+import { refreshSubscriptionPaymentContext } from "../modules/subscription/utils/resolve-captured-payment-method"
 import { ensureNextRenewalCycleWorkflow } from "../workflows/ensure-next-renewal-cycle"
+import { recoverDunningFromCapturedPaymentWorkflow } from "../workflows/recover-dunning-from-captured-payment"
 
 type PaymentRecord = {
   id: string
@@ -24,6 +28,16 @@ type SubscriptionRecord = {
   payment_context: SubscriptionPaymentContext | null
 }
 
+type DunningCaseRecord = {
+  id: string
+  status: DunningCaseStatus
+}
+
+const CLOSED_DUNNING_STATUSES: readonly DunningCaseStatus[] = [
+  DunningCaseStatus.RECOVERED,
+  DunningCaseStatus.UNRECOVERED,
+]
+
 export default async function activateSubscriptionOnPaymentCapturedHandler({
   event: { data },
   container,
@@ -33,6 +47,28 @@ export default async function activateSubscriptionOnPaymentCapturedHandler({
 
 export const config: SubscriberConfig = {
   event: PaymentEvents.CAPTURED,
+}
+
+/**
+ * The case this capture should close: the newest open one on the order, or - failing that - the
+ * newest closed-as-recovered one, whose renewal cycle may still be waiting to be settled.
+ */
+async function findDunningCaseForOrder(
+  container: MedusaContainer,
+  orderId: string
+) {
+  const dunningModule = container.resolve<DunningModuleService>(DUNNING_MODULE)
+
+  const cases = (await dunningModule.listDunningCases(
+    { renewal_order_id: orderId } as never,
+    { order: { created_at: "DESC" } }
+  )) as DunningCaseRecord[]
+
+  return (
+    cases.find((entry) => !CLOSED_DUNNING_STATUSES.includes(entry.status)) ??
+    cases.find((entry) => entry.status === DunningCaseStatus.RECOVERED) ??
+    null
+  )
 }
 
 export async function activateSubscriptionOnPaymentCaptured(
@@ -51,10 +87,11 @@ export async function activateSubscriptionOnPaymentCaptured(
     return
   }
 
-  const subscriptionId = await findSubscriptionIdForPaymentCollection(
-    container,
-    paymentCollectionId
-  )
+  const { subscription_id: subscriptionId, order_id: orderId } =
+    await findSubscriptionAndOrderForPaymentCollection(
+      container,
+      paymentCollectionId
+    )
   if (!subscriptionId) {
     return
   }
@@ -97,33 +134,22 @@ export async function activateSubscriptionOnPaymentCaptured(
     return
   }
 
-  const paymentContext = subscription.payment_context
-  const providerId = paymentContext?.payment_provider_id
-  if (!providerId) {
+  // Runs before the recovery below, and independently of it: the card the customer just paid with
+  // has to land on the subscription even if closing the dunning case throws.
+  await refreshSubscriptionPaymentContext(container, subscription)
+
+  if (!orderId) {
     return
   }
 
-  const resolved = await resolveLatestSavedPaymentMethod(container, {
-    customer_id: subscription.customer_id,
-    provider_id: providerId,
-  })
-  if (!resolved) {
+  const dunningCase = await findDunningCaseForOrder(container, orderId)
+
+  if (!dunningCase) {
     return
   }
 
-  if (
-    paymentContext?.payment_method_id === resolved.payment_method_id &&
-    paymentContext?.account_holder_id === resolved.account_holder_id
-  ) {
-    return
-  }
-
-  await subscriptionModule.updateSubscriptions({
-    id: subscription.id,
-    payment_context: {
-      payment_provider_id: providerId,
-      account_holder_id: resolved.account_holder_id,
-      payment_method_id: resolved.payment_method_id,
-    } satisfies SubscriptionPaymentContext,
+  // Deliberately unguarded: a failure here has to reach the event bus, which redelivers.
+  await recoverDunningFromCapturedPaymentWorkflow(container).run({
+    input: { dunning_case_id: dunningCase.id, payment_id: paymentId },
   })
 }

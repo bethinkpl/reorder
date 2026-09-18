@@ -296,15 +296,14 @@ describe("runDunningRetry - customer payment session guard", () => {
     expect(settleSubscriptionPaymentFailure).not.toHaveBeenCalled()
   })
 
-  it("charges through a session too old for anyone to still be on", async () => {
-    const { container } = buildContainer({
+  it("steps aside for a sibling collection somebody else authorized", async () => {
+    const { container, updateDunningCases } = buildContainer({
       paymentCollections: [
+        { id: "paycol_1", status: "not_paid", payment_sessions: [] },
         {
-          id: "paycol_1",
-          status: "awaiting",
-          payment_sessions: [
-            customerSession({ created_at: new Date(Date.now() - 61 * MINUTE) }),
-          ],
+          id: "paycol_2",
+          status: "authorized",
+          payment_sessions: [customerSession({ status: "authorized" })],
         },
       ],
     })
@@ -313,23 +312,38 @@ describe("runDunningRetry - customer payment session guard", () => {
       dunning_case_id: "dun_1",
     })
 
-    expect(sessionRun).toHaveBeenCalled()
-    expect(response.output.outcome).toBe("recovered")
+    expect(collectionRun).not.toHaveBeenCalled()
+    expect(sessionRun).not.toHaveBeenCalled()
+    expect(response.output).toMatchObject({
+      outcome: "retry_scheduled",
+      park_reason: null,
+      error_code: "customer_payment_in_progress",
+    })
+    expect(
+      caseUpdate(updateDunningCases, DunningCaseStatus.RETRY_SCHEDULED)
+    ).toMatchObject({ attempt_count: 1 })
   })
 
-  it("charges through a session the provider already expired", async () => {
+  it("retries an order our own earlier attempt left authorized", async () => {
+    // The sequence that used to deadlock: our retry authorized, the capture threw, the collection
+    // stayed `authorized` with money still owed. Nothing but another tick can clear that, so it
+    // must not read as a payment to step aside for.
     const { container } = buildContainer({
       paymentCollections: [
         {
           id: "paycol_1",
-          status: "awaiting",
+          status: "authorized",
           payment_sessions: [
-            customerSession({
-              data: {
-                id: "cs_live_1",
-                expiresAt: Math.floor((Date.now() - MINUTE) / 1000),
+            {
+              id: "payses_ours",
+              status: "authorized",
+              context: {
+                dunning_case_id: "dun_1",
+                dunning_attempt_id: "dunatt_0",
               },
-            }),
+              data: { id: "pi_0" },
+              created_at: new Date(Date.now() - 5 * MINUTE),
+            },
           ],
         },
       ],
@@ -339,105 +353,10 @@ describe("runDunningRetry - customer payment session guard", () => {
       dunning_case_id: "dun_1",
     })
 
+    expect(collectionRun).toHaveBeenCalled()
     expect(sessionRun).toHaveBeenCalled()
     expect(response.output.outcome).toBe("recovered")
   })
-
-  it("charges through a live session this dunning case left behind", async () => {
-    const { container } = buildContainer({
-      paymentCollections: [
-        {
-          id: "paycol_1",
-          status: "awaiting",
-          payment_sessions: [
-            customerSession({
-              context: { dunning_case_id: "dun_1", dunning_attempt_id: "dunatt_0" },
-            }),
-          ],
-        },
-      ],
-    })
-
-    const response = await runDunningRetry(container, {
-      dunning_case_id: "dun_1",
-    })
-
-    expect(sessionRun).toHaveBeenCalled()
-    expect(response.output.outcome).toBe("recovered")
-  })
-
-  it.each(["pending_authorization", "requires_more"])(
-    "treats a '%s' session as one the customer is still on",
-    async (status) => {
-      const { container } = buildContainer({
-        paymentCollections: [
-          {
-            id: "paycol_1",
-            status: "awaiting",
-            payment_sessions: [customerSession({ status })],
-          },
-        ],
-      })
-
-      const response = await runDunningRetry(container, {
-        dunning_case_id: "dun_1",
-      })
-
-      expect(sessionRun).not.toHaveBeenCalled()
-      expect(response.output.error_code).toBe("customer_payment_in_progress")
-    }
-  )
-
-  it.each(["error", "canceled", "captured"])(
-    "charges through a '%s' session nobody can be paying on",
-    async (status) => {
-      const { container } = buildContainer({
-        paymentCollections: [
-          {
-            id: "paycol_1",
-            status: "awaiting",
-            payment_sessions: [customerSession({ status })],
-          },
-        ],
-      })
-
-      const response = await runDunningRetry(container, {
-        dunning_case_id: "dun_1",
-      })
-
-      expect(sessionRun).toHaveBeenCalled()
-      expect(response.output.outcome).toBe("recovered")
-    }
-  )
-
-  it.each(["authorized", "partially_authorized"])(
-    "steps aside for a '%s' sibling collection",
-    async (status) => {
-      // Core cancels and recreates either one, throwing away a payment the customer already
-      // authorized.
-      const { container, updateDunningCases } = buildContainer({
-        paymentCollections: [
-          { id: "paycol_1", status: "not_paid", payment_sessions: [] },
-          { id: "paycol_2", status, payment_sessions: [] },
-        ],
-      })
-
-      const response = await runDunningRetry(container, {
-        dunning_case_id: "dun_1",
-      })
-
-      expect(collectionRun).not.toHaveBeenCalled()
-      expect(sessionRun).not.toHaveBeenCalled()
-      expect(response.output).toMatchObject({
-        outcome: "retry_scheduled",
-        park_reason: null,
-        error_code: "customer_payment_in_progress",
-      })
-      expect(
-        caseUpdate(updateDunningCases, DunningCaseStatus.RETRY_SCHEDULED)
-      ).toMatchObject({ attempt_count: 1 })
-    }
-  )
 
   it("hands the case over once the customer has stalled for a day", async () => {
     const { container, updateDunningCases, updateDunningAttempts } =

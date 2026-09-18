@@ -219,6 +219,28 @@ describe("runDunningRetry - recovery branch", () => {
     expect(write.metadata).not.toHaveProperty("setup_failure_streak")
   })
 
+  it("credits whoever paid when the order came back already settled", async () => {
+    // This retry charged nothing, so reporting it as a payment the retry recovered would name the
+    // wrong payer in the case and in the `dunning_recovered` event.
+    const { container, updateDunningCases } = buildContainer({
+      pendingDifference: 0,
+    })
+
+    const response = await runDunningRetry(container, { dunning_case_id: "dun_1" })
+
+    expect(response.output).toMatchObject({
+      outcome: "recovered",
+      recovery_reason: "customer_payment",
+      recovered_now: true,
+    })
+    expect(updateDunningCases).toHaveBeenCalledWith(
+      expect.objectContaining({
+        status: DunningCaseStatus.RECOVERED,
+        recovery_reason: "customer_payment",
+      })
+    )
+  })
+
   it("adopts the newest saved card when someone else paid the order", async () => {
     // Nothing was charged here, so the card that settled the order is not the one on the
     // subscription: the customer paid it themselves with a new one.

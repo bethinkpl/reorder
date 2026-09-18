@@ -33,6 +33,11 @@ import {
   toRetryBlockedError,
 } from "../../modules/dunning/utils/retry-eligibility"
 import { ensureNextRenewalCycleWorkflow } from "../ensure-next-renewal-cycle"
+import {
+  hasCustomerPaymentInProgress,
+  loadOrderPaymentCollections,
+  type PaymentSessionRecord,
+} from "../utils/customer-payment-in-progress"
 import { recordOrderCaptureTransactions } from "../utils/record-order-capture-transactions"
 import { settleDunningCaseRecovered } from "../utils/settle-dunning-recovery"
 import { settleRenewalCycleSucceeded } from "../utils/settle-renewal-cycle-succeeded"
@@ -99,25 +104,6 @@ type OrderRecord = {
   } | null
 }
 
-type PaymentSessionRecord = {
-  id: string
-  status?: string | null
-  context?: Record<string, unknown> | null
-  data?: Record<string, unknown> | null
-  created_at?: Date | string | null
-}
-
-type PaymentCollectionRecord = {
-  id: string
-  status?: string | null
-  payment_sessions?: PaymentSessionRecord[] | null
-}
-
-type OrderPaymentCollectionsRecord = {
-  id: string
-  payment_collections?: PaymentCollectionRecord[] | null
-}
-
 type PaymentRecord = {
   id: string
   amount: BigNumberInput
@@ -167,26 +153,6 @@ const SETUP_FAILURE_STREAK_LIMIT = 3
  * capture subscriber.
  */
 const SESSION_CONFLICT_LIMIT = 24
-
-/** How long a session the customer opened counts as one they may still be paying on. */
-const CUSTOMER_SESSION_LIVE_MINUTES = 60
-
-/**
- * The statuses a session the customer could still be paying on carries. String literals rather than
- * `PaymentSessionStatus`: `pending_authorization` is missing from this Medusa version's enum but is
- * where newer hosts leave a redirect flow the customer has yet to come back from.
- */
-const CUSTOMER_LIVE_SESSION_STATUSES: readonly string[] = [
-  "pending",
-  "pending_authorization",
-  "requires_more",
-]
-
-/** The collection statuses core cancels and recreates, throwing away whatever they hold. */
-const AUTHORIZED_COLLECTION_STATUSES: readonly string[] = [
-  "authorized",
-  "partially_authorized",
-]
 
 /**
  * The provider codes that name a dead card. Every other decline may still be taken later: Stripe
@@ -428,109 +394,6 @@ export async function loadOrderAmounts(
     total,
     pending: pendingDifference == null ? total : Number(pendingDifference),
   }
-}
-
-/**
- * Every payment session on every payment collection of the order.
- *
- * Creating a retry session deletes every session already on the collection it lands on, and an
- * authorized collection is cancelled and recreated, so a retry has to see what is there before it
- * touches anything.
- */
-async function loadOrderPaymentCollections(
-  container: MedusaContainer,
-  id: string
-): Promise<PaymentCollectionRecord[]> {
-  const query = container.resolve(ContainerRegistrationKeys.QUERY)
-  const { data } = await query.graph({
-    entity: "order",
-    fields: [
-      "id",
-      "payment_collections.id",
-      "payment_collections.status",
-      "payment_collections.payment_sessions.id",
-      "payment_collections.payment_sessions.status",
-      "payment_collections.payment_sessions.context",
-      "payment_collections.payment_sessions.data",
-      "payment_collections.payment_sessions.created_at",
-    ],
-    filters: {
-      id: [id],
-    },
-  })
-
-  const order = (data as OrderPaymentCollectionsRecord[])[0]
-
-  return order?.payment_collections ?? []
-}
-
-/** A hosted checkout session the provider already timed out is not one anybody is still paying on. */
-function isExpiredSessionData(
-  data: Record<string, unknown> | null | undefined,
-  now: Date
-) {
-  const expiresAt = data?.expiresAt
-
-  return typeof expiresAt === "number" && expiresAt * 1000 <= now.getTime()
-}
-
-/**
- * Whether the customer may be paying on this session right now.
- *
- * Retry sessions mark themselves with `context.dunning_case_id`, so a session without that marker
- * belongs to someone else - the host app's own checkout - and deleting it drops the customer out of
- * a payment they are in the middle of. A session whose `created_at` can't be read counts as not
- * live: this outcome never escalates, so a predicate that can never age out would loop the case
- * hourly forever.
- */
-function isCustomerLiveSession(session: PaymentSessionRecord, now: Date) {
-  if (
-    !CUSTOMER_LIVE_SESSION_STATUSES.includes(
-      String(session.status ?? "").toLowerCase()
-    )
-  ) {
-    return false
-  }
-
-  const context = session.context ?? {}
-
-  if (context.initiated_by !== "customer" && context.dunning_case_id) {
-    return false
-  }
-
-  const createdAt = session.created_at ? new Date(session.created_at) : null
-
-  if (!createdAt || Number.isNaN(createdAt.getTime())) {
-    return false
-  }
-
-  if (
-    now.getTime() - createdAt.getTime() >=
-    CUSTOMER_SESSION_LIVE_MINUTES * 60 * 1000
-  ) {
-    return false
-  }
-
-  return !isExpiredSessionData(session.data, now)
-}
-
-/**
- * Whether starting a retry would destroy a payment already under way: a session the customer is on,
- * or an authorized collection `createOrUpdateOrderPaymentCollectionWorkflow` cancels and recreates.
- */
-function hasCustomerPaymentInProgress(
-  paymentCollections: PaymentCollectionRecord[],
-  now: Date
-) {
-  return paymentCollections.some(
-    (collection) =>
-      AUTHORIZED_COLLECTION_STATUSES.includes(
-        String(collection.status ?? "").toLowerCase()
-      ) ||
-      (collection.payment_sessions ?? []).some((session) =>
-        isCustomerLiveSession(session, now)
-      )
-  )
 }
 
 async function settleNonRetryableCase(
@@ -1393,13 +1256,20 @@ export async function runDunningRetry(
         },
       } as any)
 
+      // A recovery with no payment of its own is one the order came back already settled from, so
+      // the credit belongs to whoever actually paid it rather than to this retry.
+      const recoveryReason =
+        outcome.payment_reference === null
+          ? "customer_payment"
+          : "payment_recovered"
+
       const { dunning_case: updatedCase } = await settleDunningCaseRecovered(
         container,
         {
           dunning_case: dunningCase,
           subscription,
           finished_at: finishedAt,
-          recovery_reason: "payment_recovered",
+          recovery_reason: recoveryReason,
           payment_reference: outcome.payment_reference,
           metadata: caseMetadata,
         }
@@ -1456,7 +1326,7 @@ export async function runDunningRetry(
         attempt_no: attemptNo,
         error_code: null,
         next_retry_at: null,
-        recovery_reason: "payment_recovered",
+        recovery_reason: recoveryReason,
         park_reason: null,
         attempt_counted: true,
         time_to_recover_ms: timeToRecoverMs,

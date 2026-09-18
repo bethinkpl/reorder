@@ -580,6 +580,14 @@ async function stampAttemptPaymentReference(
 }
 
 /** Exported for unit tests: covers the already-settled double-charge guard. */
+function isIndeterminateSessionData(data: Record<string, unknown> | null | undefined) {
+  if (!data || Object.keys(data).length === 0) {
+    return true
+  }
+
+  return "indeterminate_due_to" in data
+}
+
 export async function executePaymentRetry(
   container: MedusaContainer,
   subscription: SubscriptionRecord,
@@ -656,9 +664,10 @@ export async function executePaymentRetry(
 
     await stampAttemptPaymentReference(container, attemptId, paymentSession.id)
 
-    // The provider answered without the reference it charges against, so we can't tell whether the
-    // money moved. Another retry would delete this session and charge a second time.
-    if (!paymentSession.data?.id) {
+    // A provider that swallows its API error hands back a session with empty data (the stock Stripe
+    // provider marks it `indeterminate_due_to`), so we can't tell whether the money moved. Another
+    // retry would delete this session and charge a second time.
+    if (isIndeterminateSessionData(paymentSession.data)) {
       return {
         kind: "indeterminate",
         payment_reference: paymentSession.id,

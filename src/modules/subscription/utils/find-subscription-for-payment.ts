@@ -38,9 +38,8 @@ async function subscriptionExists(
  * (`/store/orders/:id/payment-session`) gets a fresh collection linked only to the order, so the
  * cart lookup alone misses every retry.
  *
- * A renewal order is only linked to its subscription once its cycle finalizes, which never happens
- * for a declined charge - so `order.metadata.subscription_id`, written when the order is created,
- * is the last resort.
+ * `order.metadata.subscription_id`, written when the order is created, is the last resort: it is
+ * the only marker an order carries that predates this plugin linking renewal orders at creation.
  */
 export async function findSubscriptionAndOrderForPaymentCollection(
   container: MedusaContainer,

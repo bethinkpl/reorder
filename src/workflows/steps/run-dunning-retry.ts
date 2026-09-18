@@ -145,9 +145,13 @@ export type RunDunningRetryStepOutput = {
     | "retry_scheduled"
     | "unrecovered"
     | "awaiting_manual_resolution"
+  subscription_id: string
   subscription_status: SubscriptionStatus
   correlation_id: string
   attempt_no: number
+  error_code: string | null
+  next_retry_at: string | null
+  recovery_reason: string | null
   time_to_recover_ms?: number | null
 }
 
@@ -712,9 +716,13 @@ async function parkForManualResolution(
     dunning_case_id: updatedCase.id,
     dunning_attempt_id: input.attempt.id,
     outcome: "awaiting_manual_resolution",
+    subscription_id: updatedCase.subscription_id,
     subscription_status: input.subscriptionStatus,
     correlation_id: input.correlationId,
     attempt_no: input.attemptNo,
+    error_code: input.outcome.error_code,
+    next_retry_at: null,
+    recovery_reason: null,
   })
 }
 
@@ -907,9 +915,13 @@ export async function runDunningRetry(
         dunning_case_id: updatedCase.id,
         dunning_attempt_id: attempt.id,
         outcome: "recovered",
+        subscription_id: updatedCase.subscription_id,
         subscription_status: SubscriptionStatus.ACTIVE,
         correlation_id: correlationId,
         attempt_no: attemptNo,
+        error_code: null,
+        next_retry_at: null,
+        recovery_reason: "payment_recovered",
         time_to_recover_ms: timeToRecoverMs,
       })
     }
@@ -1032,9 +1044,13 @@ export async function runDunningRetry(
         dunning_case_id: updatedCase.id,
         dunning_attempt_id: attempt.id,
         outcome: "unrecovered",
+        subscription_id: updatedCase.subscription_id,
         subscription_status: settledStatus,
         correlation_id: correlationId,
         attempt_no: attemptNo,
+        error_code: outcome.error_code,
+        next_retry_at: null,
+        recovery_reason: recoveryReason,
       })
     }
 
@@ -1106,9 +1122,13 @@ export async function runDunningRetry(
         dunning_case_id: updatedCase.id,
         dunning_attempt_id: attempt.id,
         outcome: "unrecovered",
+        subscription_id: updatedCase.subscription_id,
         subscription_status: settledStatus,
         correlation_id: correlationId,
         attempt_no: attemptNo,
+        error_code: outcome.error_code,
+        next_retry_at: null,
+        recovery_reason: "retry_schedule_exhausted",
       })
     }
 
@@ -1151,9 +1171,13 @@ export async function runDunningRetry(
       dunning_case_id: updatedCase.id,
       dunning_attempt_id: attempt.id,
       outcome: "retry_scheduled",
+      subscription_id: updatedCase.subscription_id,
       subscription_status: subscription.status,
       correlation_id: correlationId,
       attempt_no: attemptNo,
+      error_code: outcome.error_code,
+      next_retry_at: nextRetryAt.toISOString(),
+      recovery_reason: null,
     })
   } catch (error) {
     const failureKind = classifyDunningFailure(error)

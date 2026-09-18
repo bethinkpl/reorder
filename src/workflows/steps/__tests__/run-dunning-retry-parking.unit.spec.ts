@@ -253,6 +253,13 @@ describe("runDunningRetry - parking instead of churning", () => {
     })
 
     expect(response.output.outcome).toBe("unrecovered")
+    expect(response.output).toMatchObject({
+      subscription_id: "sub_1",
+      subscription_status: SubscriptionStatus.PAYMENT_FAILED,
+      error_code: "insufficient_funds",
+      next_retry_at: null,
+      recovery_reason: "retry_limit_exhausted",
+    })
     expect(settleSubscriptionPaymentFailure).toHaveBeenCalledWith(
       container,
       expect.objectContaining({ recovery_reason: "retry_limit_exhausted" })
@@ -295,8 +302,17 @@ describe("runDunningRetry - parking instead of churning", () => {
       buildContainer()
     authorizePaymentSession.mockRejectedValue(declineError())
 
-    await runDunningRetry(container, { dunning_case_id: "dun_1" })
+    const response = await runDunningRetry(container, {
+      dunning_case_id: "dun_1",
+    })
 
+    expect(response.output).toMatchObject({
+      outcome: "retry_scheduled",
+      subscription_id: "sub_1",
+      error_code: "insufficient_funds",
+      next_retry_at: expect.any(String),
+      recovery_reason: null,
+    })
     expect(
       caseUpdate(updateDunningCases, DunningCaseStatus.RETRYING)
     ).toMatchObject({
@@ -344,5 +360,23 @@ describe("runDunningRetry - parking instead of churning", () => {
     expect(
       scheduled.next_retry_at.getTime() - scheduled.last_attempt_at.getTime()
     ).toBe(retrySchedule.intervals[1] * 60 * 1000)
+  })
+
+  it("reports a recovered retry without an error or a next retry", async () => {
+    const { container, authorizePaymentSession } = buildContainer()
+    authorizePaymentSession.mockResolvedValue({ id: "pay_1", amount: 100 })
+
+    const response = await runDunningRetry(container, {
+      dunning_case_id: "dun_1",
+    })
+
+    expect(response.output).toMatchObject({
+      outcome: "recovered",
+      subscription_id: "sub_1",
+      subscription_status: SubscriptionStatus.ACTIVE,
+      error_code: null,
+      next_retry_at: null,
+      recovery_reason: "payment_recovered",
+    })
   })
 })

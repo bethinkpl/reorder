@@ -73,7 +73,7 @@ export const markDunningUnrecoveredStep = createStep(
 
     const changedAt = new Date()
 
-    const updated = await dunningModule.updateDunningCases({
+    const updated = (await dunningModule.updateDunningCases({
       id: dunningCase.id,
       status: DunningCaseStatus.UNRECOVERED,
       next_retry_at: null,
@@ -84,16 +84,22 @@ export const markDunningUnrecoveredStep = createStep(
         input,
         changedAt.toISOString()
       ),
-    } as any)
+    } as any)) as DunningCaseRecord
 
-    await settleSubscriptionPaymentFailure(container, {
+    const subscriptionStatus = await settleSubscriptionPaymentFailure(container, {
       subscription_id: dunningCase.subscription_id,
       dunning_case_id: dunningCase.id,
       recovery_reason: "marked_unrecovered_by_admin",
       at: changedAt,
     })
 
-    return new StepResponse(updated, dunningCase)
+    return new StepResponse(
+      {
+        ...updated,
+        subscription_status: subscriptionStatus,
+      },
+      dunningCase
+    )
   },
   async function (previousCase: DunningCaseRecord | undefined, { container }) {
     if (!previousCase) {

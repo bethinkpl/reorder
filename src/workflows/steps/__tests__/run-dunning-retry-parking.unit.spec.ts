@@ -7,6 +7,7 @@ jest.mock("../../utils/settle-subscription-payment-failure", () => ({
   settleSubscriptionPaymentFailure: jest.fn(),
 }))
 
+import { MedusaError } from "@medusajs/framework/utils"
 import {
   createOrUpdateOrderPaymentCollectionWorkflow,
   createPaymentSessionsWorkflow,
@@ -31,6 +32,9 @@ type BuildContainerOptions = {
   maxAttempts?: number
   attempts?: Record<string, unknown>[]
   paymentSessionStatus?: string
+  caseStatus?: DunningCaseStatus
+  caseMetadata?: Record<string, unknown> | null
+  hasPaymentMethod?: boolean
 }
 
 function buildContainer(options: BuildContainerOptions = {}) {
@@ -39,7 +43,7 @@ function buildContainer(options: BuildContainerOptions = {}) {
     subscription_id: "sub_1",
     renewal_cycle_id: "rc_1",
     renewal_order_id: "order_1",
-    status: DunningCaseStatus.RETRY_SCHEDULED,
+    status: options.caseStatus ?? DunningCaseStatus.RETRY_SCHEDULED,
     attempt_count: options.attemptCount ?? 0,
     max_attempts: options.maxAttempts ?? 3,
     retry_schedule: retrySchedule,
@@ -50,7 +54,7 @@ function buildContainer(options: BuildContainerOptions = {}) {
     recovered_at: null,
     closed_at: null,
     recovery_reason: null,
-    metadata: null,
+    metadata: options.caseMetadata ?? null,
     created_at: new Date("2026-01-01T00:00:00.000Z"),
   }
 
@@ -60,7 +64,7 @@ function buildContainer(options: BuildContainerOptions = {}) {
     customer_id: "cus_1",
     payment_context: {
       payment_provider_id: "pp_stripe-checkout-session_stripe",
-      payment_method_id: "pm_1",
+      payment_method_id: options.hasPaymentMethod === false ? null : "pm_1",
     },
   }
 
@@ -148,6 +152,27 @@ function buildContainer(options: BuildContainerOptions = {}) {
   }
 }
 
+function mockPaymentSession(session: Record<string, unknown>) {
+  ;(createPaymentSessionsWorkflow as unknown as jest.Mock).mockReturnValue({
+    run: jest.fn().mockResolvedValue({ result: session }),
+  })
+}
+
+function mockPaymentSessionError(error: unknown) {
+  ;(createPaymentSessionsWorkflow as unknown as jest.Mock).mockReturnValue({
+    run: jest.fn().mockRejectedValue(error),
+  })
+}
+
+/** What the production provider raises for a real decline: it throws, so no session survives. */
+function thrownDecline(code: string, message: string) {
+  return new MedusaError(
+    MedusaError.Types.PAYMENT_AUTHORIZATION_ERROR,
+    message,
+    code
+  )
+}
+
 function caseUpdate(mock: jest.Mock, status: DunningCaseStatus) {
   return mock.mock.calls
     .map((call) => call[0])
@@ -171,19 +196,18 @@ describe("runDunningRetry - parking instead of churning", () => {
     ).mockReturnValue({
       run: jest.fn().mockResolvedValue({ result: [{ id: "paycol_1" }] }),
     })
-    ;(createPaymentSessionsWorkflow as unknown as jest.Mock).mockReturnValue({
-      run: jest.fn().mockResolvedValue({
-        result: { id: "payses_1", status: "pending", context: {} },
-      }),
+    mockPaymentSession({
+      id: "payses_1",
+      status: "pending",
+      context: {},
+      data: { id: "pi_1" },
     })
   })
 
   it("parks the case and gives the attempt back when the session is never created", async () => {
     const { container, updateDunningCases, updateDunningAttempts } =
       buildContainer()
-    ;(createPaymentSessionsWorkflow as unknown as jest.Mock).mockReturnValue({
-      run: jest.fn().mockRejectedValue(new Error("provider is not registered")),
-    })
+    mockPaymentSessionError(new Error("provider is not registered"))
 
     const response = await runDunningRetry(container, {
       dunning_case_id: "dun_1",
@@ -360,6 +384,248 @@ describe("runDunningRetry - parking instead of churning", () => {
     expect(
       scheduled.next_retry_at.getTime() - scheduled.last_attempt_at.getTime()
     ).toBe(retrySchedule.intervals[1] * 60 * 1000)
+  })
+
+  it("settles a thrown provider decline once the attempt budget is spent", async () => {
+    // The provider throws on a real decline, so the current attempt never gets a session. Reading
+    // that as our own setup failure would keep every declining subscription alive forever.
+    const { container, updateDunningCases, updateDunningAttempts } = buildContainer({
+      attemptCount: 2,
+      maxAttempts: 3,
+      attempts: [
+        {
+          attempt_no: 1,
+          status: "failed",
+          payment_reference: null,
+          metadata: { provider_reached: true },
+        },
+        {
+          attempt_no: 2,
+          status: "failed",
+          payment_reference: null,
+          metadata: { provider_reached: true },
+        },
+      ],
+    })
+    mockPaymentSessionError(
+      thrownDecline("insufficient_funds", "Your card has insufficient funds.")
+    )
+
+    const response = await runDunningRetry(container, {
+      dunning_case_id: "dun_1",
+    })
+
+    expect(response.output).toMatchObject({
+      outcome: "unrecovered",
+      error_code: "insufficient_funds",
+      recovery_reason: "retry_limit_exhausted",
+      park_reason: null,
+    })
+    expect(updateDunningAttempts).toHaveBeenCalledWith(
+      expect.objectContaining({
+        status: DunningAttemptStatus.FAILED,
+        error_code: "insufficient_funds",
+        metadata: expect.objectContaining({ provider_reached: true }),
+      })
+    )
+    expect(settleSubscriptionPaymentFailure).toHaveBeenCalledWith(
+      container,
+      expect.objectContaining({ recovery_reason: "retry_limit_exhausted" })
+    )
+    expect(
+      caseUpdate(updateDunningCases, DunningCaseStatus.AWAITING_MANUAL_RESOLUTION)
+    ).toBeUndefined()
+  })
+
+  it("keeps retrying a thrown provider decline while the budget lasts", async () => {
+    const { container } = buildContainer()
+    mockPaymentSessionError(
+      thrownDecline("insufficient_funds", "Your card has insufficient funds.")
+    )
+
+    const response = await runDunningRetry(container, {
+      dunning_case_id: "dun_1",
+    })
+
+    expect(response.output).toMatchObject({
+      outcome: "retry_scheduled",
+      error_code: "insufficient_funds",
+    })
+    expect(settleSubscriptionPaymentFailure).not.toHaveBeenCalled()
+  })
+
+  it("gives the budget back when the provider itself was never reached", async () => {
+    const { container, updateDunningCases, updateDunningAttempts } = buildContainer()
+    mockPaymentSessionError(
+      new MedusaError(
+        MedusaError.Types.UNEXPECTED_STATE,
+        "An error occurred while processing payment",
+        "api_connection_error"
+      )
+    )
+
+    const response = await runDunningRetry(container, {
+      dunning_case_id: "dun_1",
+    })
+
+    expect(response.output).toMatchObject({
+      outcome: "awaiting_manual_resolution",
+      park_reason: "setup_failure",
+    })
+    expect(updateDunningAttempts).toHaveBeenCalledWith(
+      expect.objectContaining({
+        status: DunningAttemptStatus.ABORTED,
+        metadata: expect.objectContaining({ provider_reached: false }),
+      })
+    )
+    expect(
+      caseUpdate(updateDunningCases, DunningCaseStatus.AWAITING_MANUAL_RESOLUTION)
+    ).toMatchObject({ attempt_count: 0 })
+    expect(settleSubscriptionPaymentFailure).not.toHaveBeenCalled()
+  })
+
+  it("reschedules an infrastructure error that only reads like a dead card", async () => {
+    // "expired" in the text of a transport error must not settle a case whose session is still
+    // pending: the card was never actually refused.
+    const { container, authorizePaymentSession } = buildContainer()
+    authorizePaymentSession.mockRejectedValue(
+      new Error("Stripe request expired before it was answered")
+    )
+
+    const response = await runDunningRetry(container, {
+      dunning_case_id: "dun_1",
+    })
+
+    expect(response.output).toMatchObject({
+      outcome: "retry_scheduled",
+      next_retry_at: expect.any(String),
+    })
+    expect(settleSubscriptionPaymentFailure).not.toHaveBeenCalled()
+  })
+
+  it("parks an indeterminate provider response instead of charging again", async () => {
+    const { container, updateDunningCases, updateDunningAttempts, authorizePaymentSession } =
+      buildContainer()
+    mockPaymentSession({ id: "payses_1", status: "pending", context: {}, data: {} })
+
+    const response = await runDunningRetry(container, {
+      dunning_case_id: "dun_1",
+    })
+
+    expect(response.output).toMatchObject({
+      outcome: "awaiting_manual_resolution",
+      park_reason: "indeterminate_provider_response",
+      error_code: "provider_response_indeterminate",
+    })
+    expect(authorizePaymentSession).not.toHaveBeenCalled()
+    expect(updateDunningAttempts).toHaveBeenCalledWith(
+      expect.objectContaining({
+        status: DunningAttemptStatus.FAILED,
+        payment_reference: "payses_1",
+        metadata: expect.objectContaining({ provider_reached: true }),
+      })
+    )
+    expect(
+      caseUpdate(updateDunningCases, DunningCaseStatus.AWAITING_MANUAL_RESOLUTION)
+    ).toMatchObject({
+      attempt_count: 1,
+      metadata: expect.objectContaining({
+        park_reason: "indeterminate_provider_response",
+      }),
+    })
+  })
+
+  it("records the payment session on the attempt row before authorizing", async () => {
+    const { container, updateDunningAttempts, authorizePaymentSession } =
+      buildContainer()
+    authorizePaymentSession.mockResolvedValue({ id: "pay_1", amount: 100 })
+
+    await runDunningRetry(container, { dunning_case_id: "dun_1" })
+
+    expect(updateDunningAttempts).toHaveBeenNthCalledWith(1, {
+      id: "dunatt_1",
+      payment_reference: "payses_1",
+    })
+  })
+
+  it("leaves a half-written park alone instead of rolling the case back", async () => {
+    const { container, updateDunningCases, updateDunningAttempts } = buildContainer()
+    mockPaymentSessionError(new Error("provider is not registered"))
+    updateDunningAttempts.mockImplementation(async (payload) => {
+      if (payload.status === DunningAttemptStatus.ABORTED) {
+        throw new Error("attempt row write failed")
+      }
+
+      return payload
+    })
+
+    await expect(
+      runDunningRetry(container, { dunning_case_id: "dun_1" })
+    ).rejects.toThrow("attempt row write failed")
+
+    const lastCaseUpdate =
+      updateDunningCases.mock.calls[updateDunningCases.mock.calls.length - 1][0]
+
+    expect(lastCaseUpdate).toMatchObject({
+      status: DunningCaseStatus.AWAITING_MANUAL_RESOLUTION,
+      metadata: expect.objectContaining({ park_reason: "setup_failure" }),
+    })
+    expect(
+      caseUpdate(updateDunningCases, DunningCaseStatus.RETRY_SCHEDULED)
+    ).toBeUndefined()
+  })
+
+  it("lets an admin retry a case parked on its last budget slot", async () => {
+    const { container, authorizePaymentSession } = buildContainer({
+      attemptCount: 3,
+      maxAttempts: 3,
+      caseStatus: DunningCaseStatus.AWAITING_MANUAL_RESOLUTION,
+      caseMetadata: { park_reason: "requires_action" },
+    })
+    authorizePaymentSession.mockResolvedValue({ id: "pay_1", amount: 100 })
+
+    const response = await runDunningRetry(container, {
+      dunning_case_id: "dun_1",
+      ignore_schedule: true,
+      triggered_by: "admin_1",
+    })
+
+    expect(response.output).toMatchObject({ outcome: "recovered" })
+  })
+
+  it("still blocks an admin retry on a spent case that was never parked", async () => {
+    const { container } = buildContainer({
+      attemptCount: 3,
+      maxAttempts: 3,
+      caseStatus: DunningCaseStatus.AWAITING_MANUAL_RESOLUTION,
+      caseMetadata: null,
+    })
+
+    await expect(
+      runDunningRetry(container, {
+        dunning_case_id: "dun_1",
+        ignore_schedule: true,
+        triggered_by: "admin_1",
+      })
+    ).rejects.toThrow(/max attempts exceeded/)
+  })
+
+  it("clears the park reason when the customer only has to add a card", async () => {
+    const { container, updateDunningCases } = buildContainer({
+      hasPaymentMethod: false,
+      caseMetadata: { park_reason: "requires_action" },
+    })
+
+    await expect(
+      runDunningRetry(container, { dunning_case_id: "dun_1" })
+    ).rejects.toThrow(/no saved payment method/)
+
+    expect(
+      caseUpdate(updateDunningCases, DunningCaseStatus.AWAITING_MANUAL_RESOLUTION)
+    ).toMatchObject({
+      next_retry_at: null,
+      metadata: expect.objectContaining({ park_reason: null }),
+    })
   })
 
   it("reports a recovered retry without an error or a next retry", async () => {

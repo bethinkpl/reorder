@@ -261,6 +261,23 @@ describe("recoverDunningFromCapturedPayment", () => {
     expect(ensureNextRenewalCycleRun).not.toHaveBeenCalled()
   })
 
+  it("leaves the upcoming cycle alone while healing an older superseded recovery", async () => {
+    // What the reconciler mostly finds on old data: a case closed long ago whose cycle the
+    // subscription has already billed past.
+    const { container } = buildContainer({
+      caseStatus: DunningCaseStatus.RECOVERED,
+      subscriptionStatus: SubscriptionStatus.ACTIVE,
+    })
+    ;(settleRenewalCycleSucceeded as jest.Mock).mockResolvedValueOnce({
+      settled: false,
+      reason: "cycle_superseded",
+    })
+
+    await run(container)
+
+    expect(ensureNextRenewalCycleRun).not.toHaveBeenCalled()
+  })
+
   it("names the customer as the settlement source", async () => {
     const { container } = buildContainer()
 

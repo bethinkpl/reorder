@@ -137,6 +137,29 @@ type DunningParkReason =
   | "unreached_provider"
   | "indeterminate_provider_response"
 
+/** How long a failure that never reached the provider waits before the scheduler tries again. */
+const SETUP_FAILURE_RETRY_MINUTES = 60
+
+/** How many setup failures in a row hand the case to an operator instead of rescheduling it. */
+const SETUP_FAILURE_STREAK_LIMIT = 3
+
+/**
+ * The provider codes that name a dead card. Every other decline may still be taken later: Stripe
+ * reports soft declines as `card_declined` and keeps the reason in a `decline_code` the provider
+ * drops, so nothing but one of these codes may settle a case.
+ */
+const PERMANENT_DECLINE_CODES: readonly string[] = [
+  "expired_card",
+  "incorrect_number",
+  "invalid_number",
+  "lost_card",
+  "stolen_card",
+  "pickup_card",
+  "card_not_supported",
+  "invalid_account",
+  "new_account_information_available",
+]
+
 export type RunDunningRetryStepInput = {
   dunning_case_id: string
   now?: string | Date | null
@@ -369,13 +392,23 @@ function validateRetryableCase(
   now: Date,
   ignoreSchedule?: boolean
 ): RetryEligibility {
+  const parkReason = dunningCase.metadata?.park_reason
+  const isParked =
+    dunningCase.status === DunningCaseStatus.AWAITING_MANUAL_RESOLUTION
+
+  // The provider may already have taken this charge, and a new session would delete the one holding
+  // it and charge again. Only an operator who reconciled it may reopen the case.
+  if (isParked && parkReason === "indeterminate_provider_response") {
+    throw dunningErrors.conflict(
+      `DunningCase '${dunningCase.id}' has an unreconciled provider charge: reconcile it manually before retrying`
+    )
+  }
+
   // An admin retry-now on a parked case: the park, not the budget, is why the case is still open,
   // so its last spent slot must not dead-end it. Relaxing the ceiling rather than tolerating the
   // blocked reason keeps the checks that come after it (renewal order, retry schedule) running.
   const tolerateSpentBudget =
-    Boolean(ignoreSchedule) &&
-    dunningCase.status === DunningCaseStatus.AWAITING_MANUAL_RESOLUTION &&
-    Boolean(dunningCase.metadata?.park_reason)
+    Boolean(ignoreSchedule) && isParked && Boolean(parkReason)
 
   const relaxedCase = {
     ...dunningCase,
@@ -408,99 +441,57 @@ function classifyPaymentRetryFailure(
 ): PaymentRetryFailureOutcome {
   const message =
     error instanceof Error ? error.message : "Dunning payment retry failed"
-  const normalizedMessage = message.toLowerCase()
   const normalizedStatus = String(paymentSessionStatus ?? "").toLowerCase()
   const normalizedErrorCode = readPaymentErrorCode(error)
-  // The provider raises this for its own transport and API faults, which say nothing about the card.
-  const isInfrastructureFault =
-    !normalizedStatus &&
-    isMedusaErrorOfType(error, MedusaError.Types.UNEXPECTED_STATE)
-
-  // A routine 3DS/SCA challenge, not a dead card: the cardholder has to authenticate.
-  if (normalizedStatus === "requires_more") {
-    return {
-      kind: "requires_action",
-      payment_reference: null,
-      error_code: "requires_more",
-      error_message: message,
-      provider_reached: true,
-    }
-  }
-
-  if (normalizedStatus === "canceled" || normalizedStatus === "cancelled") {
-    return {
-      kind: "permanent_failure",
-      payment_reference: null,
-      error_code: normalizedStatus,
-      error_message: message,
-      provider_reached: true,
-    }
-  }
-
-  // `card_declined` is the code behind nearly every soft decline: the reason that would tell them
-  // apart travels in Stripe's `decline_code`, which the provider drops on the way out. Settling on
-  // it would churn a customer whose bank would have taken the next attempt.
-  if (
-    normalizedErrorCode === "insufficient_funds" ||
-    normalizedErrorCode === "generic_decline" ||
-    normalizedErrorCode === "do_not_honor" ||
-    normalizedErrorCode === "card_declined"
-  ) {
-    return {
-      kind: "temporary_failure",
-      payment_reference: null,
-      error_code: normalizedErrorCode,
-      error_message: message,
-      provider_reached: true,
-    }
-  }
-
-  // Ahead of the wording check below on purpose: an infrastructure error whose text happens to
-  // carry "expired" must reschedule while the session is still pending, not settle the case.
-  if (
-    normalizedStatus === "pending" ||
-    normalizedStatus === "error" ||
-    isInfrastructureFault ||
-    normalizedMessage.includes("insufficient") ||
-    normalizedMessage.includes("generic_decline") ||
-    normalizedMessage.includes("do_not_honor") ||
-    normalizedMessage.includes("timeout") ||
-    normalizedMessage.includes("temporar") ||
-    normalizedMessage.includes("network") ||
-    normalizedMessage.includes("unavailable")
-  ) {
-    return {
-      kind: "temporary_failure",
-      payment_reference: null,
-      error_code:
-        normalizedErrorCode || normalizedStatus || "payment_retryable_error",
-      error_message: message,
-      provider_reached: true,
-    }
-  }
-
-  if (
-    normalizedMessage.includes("expired") ||
-    normalizedMessage.includes("declined") ||
-    normalizedMessage.includes("requires payment method")
-  ) {
-    return {
-      kind: "permanent_failure",
-      payment_reference: null,
-      error_code: normalizedErrorCode || normalizedStatus || "payment_declined",
-      error_message: message,
-      provider_reached: true,
-    }
-  }
-
-  return {
-    kind: "temporary_failure",
+  const failure = {
     payment_reference: null,
     error_code:
       normalizedErrorCode || normalizedStatus || "payment_retry_failed",
     error_message: message,
     provider_reached: true,
+  } as const
+
+  // A routine 3DS/SCA challenge, not a dead card: the cardholder has to authenticate.
+  if (
+    normalizedStatus === "requires_more" ||
+    normalizedErrorCode === "authentication_required"
+  ) {
+    return { kind: "requires_action", ...failure }
   }
+
+  // The provider raises this for its own transport and API faults, which say nothing about the
+  // card whatever code they carry.
+  if (isMedusaErrorOfType(error, MedusaError.Types.UNEXPECTED_STATE)) {
+    return { kind: "temporary_failure", ...failure }
+  }
+
+  // Only a code naming a dead card - or a session the provider cancelled itself - settles the case.
+  // Wording never does: "Your card was declined" is what Stripe writes for declines a later attempt
+  // would have been taken.
+  if (
+    PERMANENT_DECLINE_CODES.includes(normalizedErrorCode ?? "") ||
+    normalizedStatus === "canceled" ||
+    normalizedStatus === "cancelled"
+  ) {
+    return { kind: "permanent_failure", ...failure }
+  }
+
+  return { kind: "temporary_failure", ...failure }
+}
+
+function readSetupFailureStreak(
+  metadata: Record<string, unknown> | null | undefined
+) {
+  const streak = Number(metadata?.setup_failure_streak ?? 0)
+
+  return Number.isFinite(streak) && streak > 0 ? Math.floor(streak) : 0
+}
+
+function clearSetupFailureStreak(metadata: Record<string, unknown>) {
+  const next = { ...metadata }
+  delete next.setup_failure_streak
+
+  return next
 }
 
 function readPaymentErrorCode(error: unknown) {
@@ -787,8 +778,8 @@ type ParkForManualResolutionInput = {
   correlationId: string
   durationMs: number
   subscriptionStatus: SubscriptionStatus
-  /** Tells the step the case is already safe, so its catch must not roll the park back. */
-  markCaseParked: () => void
+  /** Tells the step the case is already safe, so its catch returns the park instead of undoing it. */
+  markCaseParked: (output: RunDunningRetryStepOutput) => void
 }
 
 /**
@@ -818,7 +809,22 @@ async function parkForManualResolution(
     },
   } as any)
 
-  input.markCaseParked()
+  const output: RunDunningRetryStepOutput = {
+    dunning_case_id: updatedCase.id,
+    dunning_attempt_id: input.attempt.id,
+    outcome: "awaiting_manual_resolution",
+    subscription_id: updatedCase.subscription_id,
+    subscription_status: input.subscriptionStatus,
+    settled_now: false,
+    correlation_id: input.correlationId,
+    attempt_no: input.attemptNo,
+    error_code: input.outcome.error_code,
+    next_retry_at: null,
+    recovery_reason: null,
+    park_reason: input.parkReason,
+  }
+
+  input.markCaseParked(output)
 
   await dunningModule.updateDunningAttempts({
     id: input.attempt.id,
@@ -854,20 +860,7 @@ async function parkForManualResolution(
     },
   })
 
-  return new StepResponse<RunDunningRetryStepOutput>({
-    dunning_case_id: updatedCase.id,
-    dunning_attempt_id: input.attempt.id,
-    outcome: "awaiting_manual_resolution",
-    subscription_id: updatedCase.subscription_id,
-    subscription_status: input.subscriptionStatus,
-    settled_now: false,
-    correlation_id: input.correlationId,
-    attempt_no: input.attemptNo,
-    error_code: input.outcome.error_code,
-    next_retry_at: null,
-    recovery_reason: null,
-    park_reason: input.parkReason,
-  })
+  return new StepResponse<RunDunningRetryStepOutput>(output)
 }
 
 /** Exported for unit tests: `createStep` doesn't expose its handler. */
@@ -898,9 +891,10 @@ export async function runDunningRetry(
   // neither index the retry schedule nor drive the attempt limit.
   const consumedAttempts = transitionSnapshot.attempt_count + 1
   let transitionedToRetrying = false
-  let parkedCase = false
-  const markCaseParked = () => {
-    parkedCase = true
+  // A holder rather than a plain `let`: the catch has to read what the park wrote from inside it.
+  const parked: { output: RunDunningRetryStepOutput | null } = { output: null }
+  const markCaseParked = (output: RunDunningRetryStepOutput) => {
+    parked.output = output
   }
 
   logDunningEvent(logger, "info", {
@@ -1008,6 +1002,10 @@ export async function runDunningRetry(
       attempt.id
     )
     const finishedAt = new Date()
+    // Any answer from the provider ends whatever setup-failure streak the case was carrying.
+    const caseMetadata = outcome.provider_reached
+      ? clearSetupFailureStreak(retryMetadata)
+      : retryMetadata
 
     if (outcome.kind === "recovery") {
       await dunningModule.updateDunningAttempts({
@@ -1033,6 +1031,7 @@ export async function runDunningRetry(
         recovered_at: finishedAt,
         closed_at: finishedAt,
         recovery_reason: "payment_recovered",
+        metadata: caseMetadata,
       } as any)
 
       if (subscription.status === SubscriptionStatus.PAST_DUE) {
@@ -1087,23 +1086,102 @@ export async function runDunningRetry(
       })
     }
 
-    // No payment session was ever created, so nothing was charged. Keep the audit row but give the
-    // budget its attempt back.
+    // No payment session was ever created, so nothing was charged. Keep the audit row, give the
+    // budget its attempt back and let the scheduler try again once the fault has had time to clear:
+    // a provider outage of a few minutes must not park every case that retried during it. Only a
+    // fault that keeps coming back is something an operator has to look at.
     if (outcome.kind === "setup_failure") {
-      return await parkForManualResolution(container, {
-        dunningCase,
-        caseMetadata: retryMetadata,
-        attempt,
-        attemptStatus: DunningAttemptStatus.ABORTED,
-        attemptNo,
-        attemptCount: transitionSnapshot.attempt_count,
-        parkReason: "setup_failure",
-        outcome,
-        finishedAt,
-        correlationId,
-        durationMs: Date.now() - startedAtMs,
-        subscriptionStatus: subscription.status,
-        markCaseParked,
+      const setupFailureStreak = readSetupFailureStreak(dunningCase.metadata) + 1
+      const setupFailureMetadata = {
+        ...retryMetadata,
+        setup_failure_streak: setupFailureStreak,
+      }
+
+      if (setupFailureStreak >= SETUP_FAILURE_STREAK_LIMIT) {
+        return await parkForManualResolution(container, {
+          dunningCase,
+          caseMetadata: setupFailureMetadata,
+          attempt,
+          attemptStatus: DunningAttemptStatus.ABORTED,
+          attemptNo,
+          attemptCount: transitionSnapshot.attempt_count,
+          parkReason: "setup_failure",
+          outcome,
+          finishedAt,
+          correlationId,
+          durationMs: Date.now() - startedAtMs,
+          subscriptionStatus: subscription.status,
+          markCaseParked,
+        })
+      }
+
+      const setupRetryAt = new Date(
+        finishedAt.getTime() + SETUP_FAILURE_RETRY_MINUTES * 60 * 1000
+      )
+
+      await dunningModule.updateDunningAttempts({
+        id: attempt.id,
+        finished_at: finishedAt,
+        status: DunningAttemptStatus.ABORTED,
+        error_code: outcome.error_code,
+        error_message: outcome.error_message,
+        payment_reference: null,
+        metadata: {
+          ...(attempt.metadata ?? {}),
+          provider_reached: outcome.provider_reached,
+        },
+      } as any)
+
+      const rescheduledCase = await dunningModule.updateDunningCases({
+        id: dunningCase.id,
+        status: DunningCaseStatus.RETRY_SCHEDULED,
+        attempt_count: transitionSnapshot.attempt_count,
+        next_retry_at: setupRetryAt,
+        last_attempt_at: finishedAt,
+        last_payment_error_code: outcome.error_code,
+        last_payment_error_message: outcome.error_message,
+        recovered_at: null,
+        closed_at: null,
+        recovery_reason: null,
+        metadata: setupFailureMetadata,
+      } as any)
+
+      logDunningEvent(logger, "warn", {
+        event: "dunning.retry",
+        outcome: "failed",
+        correlation_id: correlationId,
+        dunning_case_id: rescheduledCase.id,
+        subscription_id: rescheduledCase.subscription_id,
+        renewal_cycle_id: rescheduledCase.renewal_cycle_id,
+        attempt_no: attemptNo,
+        duration_ms: Date.now() - startedAtMs,
+        failure_count: 1,
+        rescheduled_count: 1,
+        avg_attempts: attemptNo,
+        failure_kind: "unexpected_error",
+        alertable: false,
+        message: outcome.error_message,
+        metadata: {
+          retry_outcome: "retry_scheduled",
+          error_code: outcome.error_code,
+          setup_failure_streak: setupFailureStreak,
+          next_retry_at: setupRetryAt.toISOString(),
+        },
+      })
+
+      return new StepResponse<RunDunningRetryStepOutput>({
+        dunning_case_id: rescheduledCase.id,
+        dunning_attempt_id: attempt.id,
+        outcome: "retry_scheduled",
+        subscription_id: rescheduledCase.subscription_id,
+        subscription_status: subscription.status,
+        settled_now: false,
+        correlation_id: correlationId,
+        attempt_no: attemptNo,
+        error_code: outcome.error_code,
+        next_retry_at: setupRetryAt.toISOString(),
+        recovery_reason: null,
+        park_reason: null,
       })
     }
 
@@ -1112,7 +1190,7 @@ export async function runDunningRetry(
     if (outcome.kind === "requires_action") {
       return await parkForManualResolution(container, {
         dunningCase,
-        caseMetadata: retryMetadata,
+        caseMetadata,
         attempt,
         attemptStatus: DunningAttemptStatus.FAILED,
         attemptNo,
@@ -1132,7 +1210,7 @@ export async function runDunningRetry(
     if (outcome.kind === "indeterminate") {
       return await parkForManualResolution(container, {
         dunningCase,
-        caseMetadata: retryMetadata,
+        caseMetadata,
         attempt,
         attemptStatus: DunningAttemptStatus.FAILED,
         attemptNo,
@@ -1168,7 +1246,7 @@ export async function runDunningRetry(
       if (!(await hasReachedProvider(container, dunningCase.id))) {
         return await parkForManualResolution(container, {
           dunningCase,
-          caseMetadata: retryMetadata,
+          caseMetadata,
           attempt,
           attemptStatus: DunningAttemptStatus.FAILED,
           attemptNo,
@@ -1204,6 +1282,7 @@ export async function runDunningRetry(
         last_payment_error_message: outcome.error_message,
         closed_at: finishedAt,
         recovery_reason: recoveryReason,
+        metadata: caseMetadata,
       } as any)
 
       logDunningEvent(logger, "warn", {
@@ -1254,7 +1333,7 @@ export async function runDunningRetry(
       if (!(await hasReachedProvider(container, dunningCase.id))) {
         return await parkForManualResolution(container, {
           dunningCase,
-          caseMetadata: retryMetadata,
+          caseMetadata,
           attempt,
           attemptStatus: DunningAttemptStatus.FAILED,
           attemptNo,
@@ -1285,6 +1364,7 @@ export async function runDunningRetry(
         last_payment_error_message: outcome.error_message,
         closed_at: finishedAt,
         recovery_reason: "retry_schedule_exhausted",
+        metadata: caseMetadata,
       } as any)
 
       logDunningEvent(logger, "warn", {
@@ -1335,6 +1415,7 @@ export async function runDunningRetry(
       recovered_at: null,
       closed_at: null,
       recovery_reason: null,
+      metadata: caseMetadata,
     } as any)
 
     logDunningEvent(logger, "warn", {
@@ -1397,8 +1478,10 @@ export async function runDunningRetry(
     })
 
     // A parked case is already in a safe state, and rolling it back would hand it straight back to
-    // the scheduler. Its attempt row may be left processing, which the admin can see.
-    if (parkedCase) {
+    // the scheduler. The park is the step's answer, so it is returned rather than thrown: failing
+    // the workflow here would also swallow the `dunning_parked` event the park has to raise. Its
+    // attempt row may be left processing, which the admin can see.
+    if (parked.output) {
       logDunningEvent(logger, "error", {
         event: "dunning.retry",
         outcome: "failed",
@@ -1416,7 +1499,11 @@ export async function runDunningRetry(
           partial_park: true,
         },
       })
-    } else if (transitionedToRetrying) {
+
+      return new StepResponse<RunDunningRetryStepOutput>(parked.output)
+    }
+
+    if (transitionedToRetrying) {
       await dunningModule.updateDunningCases({
         id: dunningCase.id,
         status: transitionSnapshot.status,

@@ -275,6 +275,32 @@ describe("executePaymentRetry - outstanding amount guard", () => {
     })
   })
 
+  it("keeps an infrastructure fault on a live session retryable", async () => {
+    // The provider raises UNEXPECTED_STATE for its own transport faults, which say nothing about
+    // the card: the session is still pending, so nothing was refused.
+    const { container, authorizePaymentSession } = buildContainer({
+      id: "order_1",
+      total: 100,
+      summary: { pending_difference: 100 },
+    })
+    authorizePaymentSession.mockRejectedValue(
+      new MedusaError(
+        MedusaError.Types.UNEXPECTED_STATE,
+        "An error occurred while processing payment",
+        "api_connection_error"
+      )
+    )
+
+    const outcome = await executePaymentRetry(container, subscription, "order_1")
+
+    expect(outcome).toMatchObject({
+      kind: "temporary_failure",
+      error_code: "api_connection_error",
+      payment_reference: "payses_1",
+      provider_reached: true,
+    })
+  })
+
   it("gives the budget back when the provider was never reached", async () => {
     const { container } = buildContainer({
       id: "order_1",

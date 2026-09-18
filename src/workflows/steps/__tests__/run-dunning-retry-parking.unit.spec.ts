@@ -205,7 +205,9 @@ describe("runDunningRetry - parking instead of churning", () => {
     })
   })
 
-  it("parks the case and gives the attempt back when the session is never created", async () => {
+  it("reschedules and gives the attempt back when the session is never created", async () => {
+    // A provider outage lasts minutes, not forever: parking every case that retried during one
+    // would strand them all.
     const { container, updateDunningCases, updateDunningAttempts } =
       buildContainer()
     mockPaymentSessionError(new Error("provider is not registered"))
@@ -214,7 +216,11 @@ describe("runDunningRetry - parking instead of churning", () => {
       dunning_case_id: "dun_1",
     })
 
-    expect(response.output.outcome).toBe("awaiting_manual_resolution")
+    expect(response.output).toMatchObject({
+      outcome: "retry_scheduled",
+      next_retry_at: expect.any(String),
+      park_reason: null,
+    })
     expect(updateDunningAttempts).toHaveBeenCalledWith(
       expect.objectContaining({
         status: DunningAttemptStatus.ABORTED,
@@ -222,14 +228,70 @@ describe("runDunningRetry - parking instead of churning", () => {
         payment_reference: null,
       })
     )
+
+    const scheduled = caseUpdate(
+      updateDunningCases,
+      DunningCaseStatus.RETRY_SCHEDULED
+    )
+
+    expect(scheduled).toMatchObject({
+      attempt_count: 0,
+      metadata: expect.objectContaining({ setup_failure_streak: 1 }),
+    })
+    expect(
+      scheduled.next_retry_at.getTime() - scheduled.last_attempt_at.getTime()
+    ).toBe(60 * 60 * 1000)
+    expect(settleSubscriptionPaymentFailure).not.toHaveBeenCalled()
+  })
+
+  it("parks a setup failure that keeps coming back", async () => {
+    const { container, updateDunningCases, updateDunningAttempts } =
+      buildContainer({ caseMetadata: { setup_failure_streak: 2 } })
+    mockPaymentSessionError(new Error("provider is not registered"))
+
+    const response = await runDunningRetry(container, {
+      dunning_case_id: "dun_1",
+    })
+
+    expect(response.output).toMatchObject({
+      outcome: "awaiting_manual_resolution",
+      park_reason: "setup_failure",
+      next_retry_at: null,
+    })
+    expect(updateDunningAttempts).toHaveBeenCalledWith(
+      expect.objectContaining({ status: DunningAttemptStatus.ABORTED })
+    )
     expect(
       caseUpdate(updateDunningCases, DunningCaseStatus.AWAITING_MANUAL_RESOLUTION)
     ).toMatchObject({
       attempt_count: 0,
       next_retry_at: null,
-      metadata: expect.objectContaining({ park_reason: "setup_failure" }),
+      metadata: expect.objectContaining({
+        park_reason: "setup_failure",
+        setup_failure_streak: 3,
+      }),
     })
-    expect(settleSubscriptionPaymentFailure).not.toHaveBeenCalled()
+    expect(
+      caseUpdate(updateDunningCases, DunningCaseStatus.RETRY_SCHEDULED)
+    ).toBeUndefined()
+  })
+
+  it("clears the setup failure streak once the provider answers", async () => {
+    const { container, updateDunningCases } = buildContainer({
+      caseMetadata: { setup_failure_streak: 2 },
+    })
+    mockPaymentSessionError(
+      thrownDecline("card_declined", "Your card was declined.")
+    )
+
+    const response = await runDunningRetry(container, {
+      dunning_case_id: "dun_1",
+    })
+
+    expect(response.output.outcome).toBe("retry_scheduled")
+    expect(
+      caseUpdate(updateDunningCases, DunningCaseStatus.RETRY_SCHEDULED).metadata
+    ).not.toHaveProperty("setup_failure_streak")
   })
 
   it("parks the case on an SCA challenge instead of settling it", async () => {
@@ -474,8 +536,8 @@ describe("runDunningRetry - parking instead of churning", () => {
     })
 
     expect(response.output).toMatchObject({
-      outcome: "awaiting_manual_resolution",
-      park_reason: "setup_failure",
+      outcome: "retry_scheduled",
+      park_reason: null,
     })
     expect(updateDunningAttempts).toHaveBeenCalledWith(
       expect.objectContaining({
@@ -484,8 +546,76 @@ describe("runDunningRetry - parking instead of churning", () => {
       })
     )
     expect(
-      caseUpdate(updateDunningCases, DunningCaseStatus.AWAITING_MANUAL_RESOLUTION)
+      caseUpdate(updateDunningCases, DunningCaseStatus.RETRY_SCHEDULED)
     ).toMatchObject({ attempt_count: 0 })
+    expect(settleSubscriptionPaymentFailure).not.toHaveBeenCalled()
+  })
+
+  it("parks a thrown authentication challenge instead of settling it", async () => {
+    // Stripe words this decline like any other ("Your card was declined."), so only its code tells
+    // the step that a human, not another retry, is what the charge is waiting on.
+    const { container, updateDunningCases } = buildContainer()
+    mockPaymentSessionError(
+      thrownDecline(
+        "authentication_required",
+        "Your card was declined. This transaction requires authentication."
+      )
+    )
+
+    const response = await runDunningRetry(container, {
+      dunning_case_id: "dun_1",
+    })
+
+    expect(response.output).toMatchObject({
+      outcome: "awaiting_manual_resolution",
+      park_reason: "requires_action",
+      error_code: "authentication_required",
+    })
+    expect(
+      caseUpdate(updateDunningCases, DunningCaseStatus.AWAITING_MANUAL_RESOLUTION)
+    ).toMatchObject({ attempt_count: 1 })
+    expect(settleSubscriptionPaymentFailure).not.toHaveBeenCalled()
+  })
+
+  it("settles a dead card the provider named by code", async () => {
+    const { container } = buildContainer({
+      attempts: [
+        {
+          attempt_no: 1,
+          status: "failed",
+          payment_reference: null,
+          metadata: { provider_reached: true },
+        },
+      ],
+    })
+    mockPaymentSessionError(thrownDecline("expired_card", "Your card has expired."))
+
+    const response = await runDunningRetry(container, {
+      dunning_case_id: "dun_1",
+    })
+
+    expect(response.output).toMatchObject({
+      outcome: "unrecovered",
+      settled_now: true,
+      error_code: "expired_card",
+      recovery_reason: "permanent_payment_failure",
+    })
+  })
+
+  it("keeps retrying a decline whose code it doesn't know", async () => {
+    const { container } = buildContainer()
+    mockPaymentSessionError(
+      thrownDecline("card_velocity_exceeded", "Your card was declined.")
+    )
+
+    const response = await runDunningRetry(container, {
+      dunning_case_id: "dun_1",
+    })
+
+    expect(response.output).toMatchObject({
+      outcome: "retry_scheduled",
+      error_code: "card_velocity_exceeded",
+    })
     expect(settleSubscriptionPaymentFailure).not.toHaveBeenCalled()
   })
 
@@ -553,8 +683,12 @@ describe("runDunningRetry - parking instead of churning", () => {
     })
   })
 
-  it("leaves a half-written park alone instead of rolling the case back", async () => {
-    const { container, updateDunningCases, updateDunningAttempts } = buildContainer()
+  it("returns a half-written park instead of rolling the case back", async () => {
+    // The case is already parked, so the step reports it: throwing would roll it back to the
+    // scheduler and skip the parked event the workflow raises off this output.
+    const { container, updateDunningCases, updateDunningAttempts } = buildContainer({
+      caseMetadata: { setup_failure_streak: 2 },
+    })
     mockPaymentSessionError(new Error("provider is not registered"))
     updateDunningAttempts.mockImplementation(async (payload) => {
       if (payload.status === DunningAttemptStatus.ABORTED) {
@@ -564,9 +698,17 @@ describe("runDunningRetry - parking instead of churning", () => {
       return payload
     })
 
-    await expect(
-      runDunningRetry(container, { dunning_case_id: "dun_1" })
-    ).rejects.toThrow("attempt row write failed")
+    const response = await runDunningRetry(container, {
+      dunning_case_id: "dun_1",
+    })
+
+    expect(response.output).toMatchObject({
+      outcome: "awaiting_manual_resolution",
+      park_reason: "setup_failure",
+      settled_now: false,
+      next_retry_at: null,
+      recovery_reason: null,
+    })
 
     const lastCaseUpdate =
       updateDunningCases.mock.calls[updateDunningCases.mock.calls.length - 1][0]
@@ -577,6 +719,28 @@ describe("runDunningRetry - parking instead of churning", () => {
     })
     expect(
       caseUpdate(updateDunningCases, DunningCaseStatus.RETRY_SCHEDULED)
+    ).toBeUndefined()
+  })
+
+  it("refuses an admin retry on a park the provider may already have charged", async () => {
+    // A fresh session deletes the one the charge was taken against, so the money would move twice.
+    const { container, updateDunningCases } = buildContainer({
+      attemptCount: 1,
+      caseStatus: DunningCaseStatus.AWAITING_MANUAL_RESOLUTION,
+      caseMetadata: { park_reason: "indeterminate_provider_response" },
+    })
+
+    await expect(
+      runDunningRetry(container, {
+        dunning_case_id: "dun_1",
+        ignore_schedule: true,
+        triggered_by: "admin_1",
+      })
+    ).rejects.toThrow(/reconcile it manually/)
+
+    expect(createPaymentSessionsWorkflow).not.toHaveBeenCalled()
+    expect(
+      caseUpdate(updateDunningCases, DunningCaseStatus.RETRYING)
     ).toBeUndefined()
   })
 

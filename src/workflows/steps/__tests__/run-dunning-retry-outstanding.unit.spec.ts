@@ -131,6 +131,28 @@ describe("executePaymentRetry - outstanding amount guard", () => {
     })
   })
 
+  it("charges against the collection a failed attempt left behind", async () => {
+    const { container } = buildContainer({
+      id: "order_1",
+      total: 100,
+      summary: { pending_difference: 100 },
+    })
+
+    // Core answers with the bare record, not an array, when it updates an existing collection.
+    ;(createOrUpdateOrderPaymentCollectionWorkflow as unknown as jest.Mock).mockReturnValue({
+      run: jest.fn().mockResolvedValue({ result: { id: "paycol_existing" } }),
+    })
+
+    const outcome = await executePaymentRetry(container, subscription, "order_1")
+
+    const run = (createPaymentSessionsWorkflow as unknown as jest.Mock).mock.results[0].value.run
+
+    expect(run).toHaveBeenCalledWith({
+      input: expect.objectContaining({ payment_collection_id: "paycol_existing" }),
+    })
+    expect(outcome.kind).toBe("recovery")
+  })
+
   it("records the capture so the next retry sees the order as settled", async () => {
     const { container, capturePayment, addOrderTransactions } = buildContainer({
       id: "order_1",

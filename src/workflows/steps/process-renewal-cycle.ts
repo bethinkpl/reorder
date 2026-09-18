@@ -48,6 +48,7 @@ import {
 } from "../utils/customer-payment-in-progress"
 import { toISOStringOrNull } from "../utils/date-output"
 import { recordOrderCaptureTransactions } from "../utils/record-order-capture-transactions"
+import { resolvePaymentCollection } from "../utils/resolve-payment-collection"
 import { settleRenewalCycleSucceeded } from "../utils/settle-renewal-cycle-succeeded"
 import {
   computeSubscriptionDiscountAmount,
@@ -952,7 +953,9 @@ export async function createRenewalOrder(
         },
       })
 
-    const paymentCollection = paymentCollectionsResult.result[0]
+    const paymentCollection = resolvePaymentCollection<{ id: string }>(
+      paymentCollectionsResult.result as any
+    )
 
     if (!paymentCollection) {
       throw renewalErrors.renewalOrderCreationFailed(
@@ -978,6 +981,12 @@ export async function createRenewalOrder(
   }
 }
 
+function readProviderErrorCode(error: unknown) {
+  const code = (error as { code?: unknown } | null)?.code
+
+  return typeof code === "string" && code ? code : null
+}
+
 function createPaymentQualifiedRenewalError(
   error: unknown,
   source: PaymentQualifiedFailureSource,
@@ -989,7 +998,7 @@ function createPaymentQualifiedRenewalError(
 
   const typedError = nextError as PaymentQualifiedRenewalError
   typedError.dunning_payment_failure_source = source
-  typedError.dunning_payment_error_code = null
+  typedError.dunning_payment_error_code = readProviderErrorCode(error)
   typedError.dunning_renewal_order_id = renewalOrderId
 
   return typedError

@@ -39,6 +39,7 @@ import {
   type PaymentSessionRecord,
 } from "../utils/customer-payment-in-progress"
 import { recordOrderCaptureTransactions } from "../utils/record-order-capture-transactions"
+import { resolvePaymentCollection } from "../utils/resolve-payment-collection"
 import { settleDunningCaseRecovered } from "../utils/settle-dunning-recovery"
 import {
   type RenewalSettlementSource,
@@ -696,7 +697,9 @@ export async function executePaymentRetry(
         },
       })
 
-    const paymentCollection = paymentCollections.result[0]
+    const paymentCollection = resolvePaymentCollection<{ id: string }>(
+      paymentCollections.result as any
+    )
 
     if (!paymentCollection) {
       throw dunningErrors.invalidData(

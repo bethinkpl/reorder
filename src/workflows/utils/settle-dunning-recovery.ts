@@ -57,6 +57,7 @@ export async function settleDunningCaseRecovered(
     park_reason: null,
   }
   delete metadata.setup_failure_streak
+  delete metadata.session_conflict_count
 
   if (input.payment_reference) {
     metadata.recovery_payment_reference = input.payment_reference

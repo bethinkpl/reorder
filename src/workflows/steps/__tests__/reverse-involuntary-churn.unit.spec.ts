@@ -20,6 +20,7 @@ type BuildContainerOptions = {
   caseStatus?: DunningCaseStatus
   subscriptionStatus?: SubscriptionStatus
   cancellationCases?: Record<string, unknown>[]
+  subscription?: Record<string, unknown>
 }
 
 function buildContainer(options: BuildContainerOptions = {}) {
@@ -40,6 +41,7 @@ function buildContainer(options: BuildContainerOptions = {}) {
     frequency_interval: FrequencyInterval.MONTH,
     frequency_value: 1,
     started_at: new Date("2026-01-18T10:00:00.000Z"),
+    trial_ends_at: null,
     // Three cadence periods back: settlement happened on the 2026-07-18 renewal.
     last_renewal_at: new Date("2026-06-18T10:00:00.000Z"),
     next_renewal_at: null,
@@ -50,6 +52,7 @@ function buildContainer(options: BuildContainerOptions = {}) {
         settled_at: "2026-07-20T10:00:00.000Z",
       },
     },
+    ...(options.subscription ?? {}),
   }
 
   const involuntaryCancellationCase = {
@@ -238,19 +241,88 @@ describe("reverseInvoluntaryChurn", () => {
     })
   })
 
-  it("leaves a cancellation case that isn't the involuntary churn row", async () => {
+  it("refuses to resurrect a customer-initiated cancellation settlement converted", async () => {
+    const {
+      container,
+      updateSubscriptions,
+      updateDunningCases,
+      updateCancellationCases,
+    } = buildContainer({
+      cancellationCases: [
+        {
+          id: "cancase_2",
+          subscription_id: "sub_1",
+          // The customer's own reason survived settlement's in-place conversion.
+          reason: "Too expensive",
+          final_outcome: CancellationFinalOutcome.CANCELED,
+          metadata: { involuntary: true, dunning_case_id: "dun_1" },
+        },
+      ],
+    })
+
+    let message = ""
+
+    try {
+      await reverseInvoluntaryChurn(container, {
+        dunning_case_id: "dun_1",
+        triggered_by: "user_admin",
+        reason: "chargeback reversed",
+      }, now)
+    } catch (error) {
+      message = (error as Error).message
+    }
+
+    expect(message).toBe(
+      "DunningCase 'dun_1' can't be reversed: cancellation case 'cancase_2' records a customer-initiated cancellation that still stands"
+    )
+    // The admin route maps anything but these phrasings to 409.
+    expect(message).not.toMatch(/was not found|invalid|missing/i)
+
+    expect(updateSubscriptions).not.toHaveBeenCalled()
+    expect(updateDunningCases).not.toHaveBeenCalled()
+    expect(updateCancellationCases).not.toHaveBeenCalled()
+    expect(ensureRun).not.toHaveBeenCalled()
+  })
+
+  it("flags the involuntary row matched by dunning_case_id alone", async () => {
     const { container, updateSubscriptions, updateCancellationCases } =
       buildContainer({
         cancellationCases: [
           {
-            id: "cancase_2",
+            id: "cancase_3",
             subscription_id: "sub_1",
-            reason: "Too expensive",
+            reason: INVOLUNTARY_CHURN_REASON,
             final_outcome: CancellationFinalOutcome.CANCELED,
             metadata: { dunning_case_id: "dun_1" },
           },
         ],
       })
+
+    await reverseInvoluntaryChurn(container, {
+      dunning_case_id: "dun_1",
+      triggered_by: "user_admin",
+      reason: "chargeback reversed",
+    }, now)
+
+    expect(updateCancellationCases).toHaveBeenCalledWith({
+      id: "cancase_3",
+      metadata: expect.objectContaining({
+        dunning_case_id: "dun_1",
+        reversed: true,
+        reversed_at: now.toISOString(),
+        reversed_by: "user_admin",
+      }),
+    })
+
+    const subscriptionPayload = updateSubscriptions.mock.calls[0][0] as any
+    expect(
+      subscriptionPayload.metadata.reversal_context.cancellation_case_reversed
+    ).toBe(true)
+  })
+
+  it("reverses without a cancellation row when settlement left none", async () => {
+    const { container, updateSubscriptions, updateCancellationCases } =
+      buildContainer({ cancellationCases: [] })
 
     const response = await reverseInvoluntaryChurn(container, {
       dunning_case_id: "dun_1",
@@ -265,6 +337,27 @@ describe("reverseInvoluntaryChurn", () => {
       subscriptionPayload.metadata.reversal_context.cancellation_case_reversed
     ).toBe(false)
     expect(response.compensateInput.previous_cancellation_case).toBeNull()
+  })
+
+  it("anchors the cadence on the trial end when the subscription never renewed", async () => {
+    const { container, updateSubscriptions } = buildContainer({
+      subscription: {
+        last_renewal_at: null,
+        trial_ends_at: new Date("2026-09-05T10:00:00.000Z"),
+      },
+    })
+
+    await reverseInvoluntaryChurn(container, {
+      dunning_case_id: "dun_1",
+      reason: "trial billing incident",
+    }, now)
+
+    expect(updateSubscriptions).toHaveBeenCalledWith(
+      expect.objectContaining({
+        // Anchored on trial_ends_at; started_at would have landed on 10-18.
+        next_renewal_at: new Date("2026-10-05T10:00:00.000Z"),
+      })
+    )
   })
 
   it("restores the subscription, the case and the cancellation metadata on compensation", async () => {

@@ -81,6 +81,15 @@ export const dunningErrors = {
       `DunningCase '${dunningCaseId}' in status '${caseStatus}' targets a subscription in status '${subscriptionStatus}' and can't be reversed`
     )
   },
+  customerCancellationStands(
+    dunningCaseId: string,
+    cancellationCaseId: string
+  ) {
+    return new MedusaError(
+      MedusaError.Types.CONFLICT,
+      `DunningCase '${dunningCaseId}' can't be reversed: cancellation case '${cancellationCaseId}' records a customer-initiated cancellation that still stands`
+    )
+  },
   invalidRetryScheduleOverride(dunningCaseId: string) {
     return new MedusaError(
       MedusaError.Types.CONFLICT,

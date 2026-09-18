@@ -27,6 +27,7 @@ type SubscriptionRecord = {
   frequency_interval: FrequencyInterval
   frequency_value: number
   started_at: Date
+  trial_ends_at: Date | null
   last_renewal_at: Date | null
   next_renewal_at: Date | null
   metadata: Record<string, unknown> | null
@@ -99,7 +100,12 @@ function appendAuditMetadata(
 }
 
 function resolveNextRenewalAt(subscription: SubscriptionRecord, now: Date) {
-  let cursor = subscription.last_renewal_at ?? subscription.started_at
+  // Settlement nulled `next_renewal_at`, and a trial subscription that never
+  // renewed is anchored on the end of its trial rather than on `started_at`.
+  let cursor =
+    subscription.last_renewal_at ??
+    subscription.trial_ends_at ??
+    subscription.started_at
 
   for (let index = 0; index < MAX_CADENCE_ADVANCES; index++) {
     const advanced = advanceCadence(
@@ -126,7 +132,10 @@ function resolveNextRenewalAt(subscription: SubscriptionRecord, now: Date) {
   )
 }
 
-async function findInvoluntaryCancellationCase(
+// Settlement either creates the churn row or converts an open customer-initiated
+// case in place, keeping the customer's own `reason`. Both carry the case id, so
+// that is what identifies the row this reversal has to answer for.
+async function findSettlementCancellationCase(
   cancellationModule: CancellationModuleService,
   subscriptionId: string,
   dunningCaseId: string
@@ -139,7 +148,6 @@ async function findInvoluntaryCancellationCase(
   return (
     cancellationCases.find(
       (cancellationCase) =>
-        cancellationCase.reason === INVOLUNTARY_CHURN_REASON &&
         cancellationCase.metadata?.dunning_case_id === dunningCaseId
     ) ?? null
   )
@@ -175,14 +183,23 @@ export async function reverseInvoluntaryChurn(
     )
   }
 
-  const nextRenewalAt = resolveNextRenewalAt(subscription, now)
-  const reversedAt = now.toISOString()
-
-  const cancellationCase = await findInvoluntaryCancellationCase(
+  const cancellationCase = await findSettlementCancellationCase(
     cancellationModule,
     subscription.id,
     dunningCase.id
   )
+
+  // The customer asked to leave and settlement only converted their case: the
+  // cancellation stands on its own, so reactivating and re-billing is refused.
+  if (cancellationCase && cancellationCase.reason !== INVOLUNTARY_CHURN_REASON) {
+    throw dunningErrors.customerCancellationStands(
+      dunningCase.id,
+      cancellationCase.id
+    )
+  }
+
+  const nextRenewalAt = resolveNextRenewalAt(subscription, now)
+  const reversedAt = now.toISOString()
 
   await subscriptionModule.updateSubscriptions({
     id: subscription.id,

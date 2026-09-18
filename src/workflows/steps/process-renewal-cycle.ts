@@ -1541,11 +1541,7 @@ export const finalizeRenewalCycleStep = createStep(
     },
     { container }
   ) {
-    const logger = container.resolve("logger")
-
     const { context, order_result } = input
-    const subscription = context.subscription
-    const appliedPendingChanges = context.applied_pending_changes
     const generatedOrderId = order_result.generated_order_id
 
     try {
@@ -1558,71 +1554,18 @@ export const finalizeRenewalCycleStep = createStep(
           finished_at: new Date(),
           attempt_id: context.attempt_id,
           source_snapshot: order_result.resolved_source_snapshot,
+          source: "renewal",
+          audit: {
+            correlation_id: context.correlation_id,
+            trigger_type: context.trigger_type,
+            triggered_by: context.triggered_by ?? null,
+            attempt_no: context.attempt_no,
+            operation_started_at: context.operation_started_at,
+            scheduled_for: context.scheduled_for,
+            previous_state: context.cycle_previous_state,
+          },
         }
       )
-
-      logRenewalEvent(logger, "info", {
-        event: "renewal.execution",
-        outcome: "succeeded",
-        correlation_id: context.correlation_id,
-        renewal_cycle_id: context.renewal_cycle_id,
-        subscription_id: subscription.id,
-        trigger_type: context.trigger_type,
-        triggered_by: context.triggered_by ?? null,
-        attempt_no: context.attempt_no,
-        duration_ms: Date.now() - context.operation_started_at,
-        success_count: 1,
-        failure_count: 0,
-        metadata: {
-          generated_order_id: generatedOrderId,
-          applied_pending_changes: Boolean(appliedPendingChanges),
-        },
-      })
-
-      await persistSubscriptionLogEvent(container, normalizeActivityLogEvent({
-        subscription_id: subscription.id,
-        customer_id: subscription.customer_id,
-        event_type: ActivityLogEventType.RENEWAL_SUCCEEDED,
-        actor_type: getRenewalActivityLogActorType(context.trigger_type),
-        actor_id: context.triggered_by ?? null,
-        display: {
-          subscription_reference: subscription.reference,
-          customer_name: subscription.customer_snapshot?.full_name ?? null,
-          product_title: subscription.product_snapshot.product_title ?? null,
-          variant_title:
-            appliedPendingChanges?.variant_title ??
-            subscription.product_snapshot.variant_title ??
-            null,
-        },
-        previous_state: {
-          status: context.cycle_previous_state.status,
-          attempt_count: context.cycle_previous_state.attempt_count,
-          processed_at: context.cycle_previous_state.processed_at,
-          generated_order_id: context.cycle_previous_state.generated_order_id,
-          last_error: context.cycle_previous_state.last_error,
-        },
-        new_state: {
-          status: updatedCycle.status,
-          attempt_count: updatedCycle.attempt_count,
-          processed_at: toISOStringOrNull(updatedCycle.processed_at),
-          generated_order_id: updatedCycle.generated_order_id,
-          last_error: updatedCycle.last_error,
-          applied_pending_update_data: appliedPendingChanges,
-        },
-        metadata: {
-          source: context.trigger_type === "manual" ? "admin" : "scheduler",
-          renewal_cycle_id: context.renewal_cycle_id,
-          order_id: generatedOrderId,
-          trigger_type: context.trigger_type,
-          scheduled_for: context.scheduled_for,
-        },
-        correlation_id: context.correlation_id,
-        dedupe: {
-          scope: "renewal",
-          target_id: context.renewal_cycle_id,
-          qualifier: toISOStringOrNull(updatedCycle.processed_at),
-        },
-      }))
 
       return new StepResponse({
         renewal_cycle: updatedCycle,

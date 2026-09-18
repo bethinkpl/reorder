@@ -371,6 +371,92 @@ describe("activateSubscriptionOnPaymentCaptured", () => {
     expect(recoverDunningRun).not.toHaveBeenCalled()
   })
 
+  it("logs one alertable line and keeps going when the recovery workflow throws", async () => {
+    // A throwing subscriber is logged and dropped by both event buses, so this must not raise.
+    const errorLogs: string[] = []
+    const container = buildContainer({
+      staged: pastDueStaged(),
+      paymentMethods: [],
+      captured: [],
+      errorLogs,
+      dunningCases: [{ id: "dun_1", status: DunningCaseStatus.OPEN }],
+    })
+    recoverDunningRun.mockRejectedValueOnce(new Error("lock timeout"))
+
+    await activateSubscriptionOnPaymentCaptured(container, "pay_1")
+
+    expect(errorLogs).toHaveLength(1)
+    expect(JSON.parse(errorLogs[0])).toEqual({
+      domain: "subscriptions",
+      event: "dunning_recovery_from_capture_failed",
+      subscription_id: "sub_1",
+      dunning_case_id: "dun_1",
+      payment_id: "pay_1",
+      alertable: true,
+      message: "lock timeout",
+    })
+  })
+
+  it("routes a payment on a churned subscription to the case that names the remedy", async () => {
+    const errorLogs: string[] = []
+    const staged = pastDueStaged()
+    stagedSubscription(staged).status = SubscriptionStatus.PAYMENT_FAILED
+    const container = buildContainer({
+      staged,
+      paymentMethods: [{ id: "pm_new", data: { created: 200 } }],
+      captured: [],
+      errorLogs,
+      dunningCases: [{ id: "dun_1", status: DunningCaseStatus.UNRECOVERED }],
+    })
+
+    await activateSubscriptionOnPaymentCaptured(container, "pay_1")
+
+    expect(recoverDunningRun).toHaveBeenCalledWith({
+      input: { dunning_case_id: "dun_1", payment_id: "pay_1" },
+    })
+    // The step's own alert names `reverseInvoluntaryChurnWorkflow`; the generic one does not.
+    expect(errorLogs).toEqual([])
+  })
+
+  it("keeps the generic alert for a churned subscription with no case on the order", async () => {
+    const errorLogs: string[] = []
+    const staged = pastDueStaged()
+    stagedSubscription(staged).status = SubscriptionStatus.PAYMENT_FAILED
+    const container = buildContainer({
+      staged,
+      paymentMethods: [],
+      captured: [],
+      errorLogs,
+      dunningCases: [],
+    })
+
+    await activateSubscriptionOnPaymentCaptured(container, "pay_1")
+
+    expect(recoverDunningRun).not.toHaveBeenCalled()
+    expect(errorLogs).toHaveLength(1)
+    expect(JSON.parse(errorLogs[0]).event).toBe(
+      "payment_captured_on_terminal_subscription"
+    )
+  })
+
+  it("never runs a recovery for a cancelled subscription", async () => {
+    const errorLogs: string[] = []
+    const staged = pastDueStaged()
+    stagedSubscription(staged).status = SubscriptionStatus.CANCELLED
+    const container = buildContainer({
+      staged,
+      paymentMethods: [],
+      captured: [],
+      errorLogs,
+      dunningCases: [{ id: "dun_1", status: DunningCaseStatus.OPEN }],
+    })
+
+    await activateSubscriptionOnPaymentCaptured(container, "pay_1")
+
+    expect(recoverDunningRun).not.toHaveBeenCalled()
+    expect(errorLogs).toHaveLength(1)
+  })
+
   it("is idempotent when the resolved method already matches the stored context", async () => {
     const captured: UpdateCall[] = []
     const staged = defaultStaged()

@@ -55,7 +55,8 @@ export const config: SubscriberConfig = {
  */
 async function findDunningCaseForOrder(
   container: MedusaContainer,
-  orderId: string
+  orderId: string,
+  includeUnrecovered: boolean
 ) {
   const dunningModule = container.resolve<DunningModuleService>(DUNNING_MODULE)
 
@@ -67,8 +68,56 @@ async function findDunningCaseForOrder(
   return (
     cases.find((entry) => !CLOSED_DUNNING_STATUSES.includes(entry.status)) ??
     cases.find((entry) => entry.status === DunningCaseStatus.RECOVERED) ??
-    null
+    (includeUnrecovered ? cases[0] ?? null : null)
   )
+}
+
+/**
+ * Runs the recovery for whatever case the captured order carries. Answers whether one was found.
+ *
+ * Swallows its failures on purpose: a throwing subscriber is logged and dropped (the local bus
+ * catches, the Redis bus defaults to a single attempt), so raising here would lose the recovery
+ * rather than retry it. `reconcile-paid-dunning-cases` is what picks the case up afterwards.
+ */
+async function runDunningRecovery(
+  container: MedusaContainer,
+  input: {
+    order_id: string
+    subscription_id: string
+    payment_id: string
+    /** Only a churned subscription wants the settled case: the step's log names its remedy. */
+    include_unrecovered?: boolean
+  }
+) {
+  const dunningCase = await findDunningCaseForOrder(
+    container,
+    input.order_id,
+    Boolean(input.include_unrecovered)
+  )
+
+  if (!dunningCase) {
+    return false
+  }
+
+  try {
+    await recoverDunningFromCapturedPaymentWorkflow(container).run({
+      input: { dunning_case_id: dunningCase.id, payment_id: input.payment_id },
+    })
+  } catch (error) {
+    container.resolve("logger").error(
+      JSON.stringify({
+        domain: "subscriptions",
+        event: "dunning_recovery_from_capture_failed",
+        subscription_id: input.subscription_id,
+        dunning_case_id: dunningCase.id,
+        payment_id: input.payment_id,
+        alertable: true,
+        message: error instanceof Error ? error.message : String(error),
+      })
+    )
+  }
+
+  return true
 }
 
 export async function activateSubscriptionOnPaymentCaptured(
@@ -120,6 +169,21 @@ export async function activateSubscriptionOnPaymentCaptured(
   }
 
   if (TERMINAL_SUBSCRIPTION_STATUSES.includes(subscription.status)) {
+    // An involuntary churn the customer has just paid off: the case on that order names the
+    // remedy (`reverseInvoluntaryChurnWorkflow`), which the generic line below cannot.
+    if (
+      subscription.status === SubscriptionStatus.PAYMENT_FAILED &&
+      orderId &&
+      (await runDunningRecovery(container, {
+        order_id: orderId,
+        subscription_id: subscription.id,
+        payment_id: paymentId,
+        include_unrecovered: true,
+      }))
+    ) {
+      return
+    }
+
     container.resolve("logger").error(
       JSON.stringify({
         domain: "subscriptions",
@@ -142,14 +206,9 @@ export async function activateSubscriptionOnPaymentCaptured(
     return
   }
 
-  const dunningCase = await findDunningCaseForOrder(container, orderId)
-
-  if (!dunningCase) {
-    return
-  }
-
-  // Deliberately unguarded: a failure here has to reach the event bus, which redelivers.
-  await recoverDunningFromCapturedPaymentWorkflow(container).run({
-    input: { dunning_case_id: dunningCase.id, payment_id: paymentId },
+  await runDunningRecovery(container, {
+    order_id: orderId,
+    subscription_id: subscription.id,
+    payment_id: paymentId,
   })
 }

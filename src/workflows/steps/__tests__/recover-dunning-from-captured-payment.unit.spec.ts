@@ -10,7 +10,10 @@ jest.mock("../../ensure-next-renewal-cycle", () => ({
 }))
 
 jest.mock("../../utils/settle-renewal-cycle-succeeded", () => ({
-  settleRenewalCycleSucceeded: jest.fn(async () => ({ settled: true })),
+  settleRenewalCycleSucceeded: jest.fn(async () => ({
+    settled: true,
+    reason: null,
+  })),
 }))
 
 import type { MedusaContainer } from "@medusajs/framework/types"
@@ -157,6 +160,7 @@ describe("recoverDunningFromCapturedPayment", () => {
       subscription_id: "sub_1",
       order_id: "order_1",
       finished_at: now,
+      source: "customer_payment",
     })
     expect(ensureNextRenewalCycleRun).toHaveBeenCalledWith({
       input: { subscription_id: "sub_1" },
@@ -222,6 +226,65 @@ describe("recoverDunningFromCapturedPayment", () => {
     expect(errorLogs).toHaveLength(1)
     expect(errorLogs[0]).toMatch(/reverseInvoluntaryChurnWorkflow/)
     expect(JSON.parse(errorLogs[0]).alertable).toBe(true)
+  })
+
+  it("still reports the recovery when settling the renewal cycle throws", async () => {
+    // The case and the subscription are already committed, and nothing revisits a closed case,
+    // so the caller must still be told to emit its event.
+    const { container, updateDunningCases, errorLogs } = buildContainer()
+    ;(settleRenewalCycleSucceeded as jest.Mock).mockRejectedValueOnce(
+      new Error("renewal module is down")
+    )
+
+    const response = await run(container)
+
+    expect(response.output).toMatchObject({ recovered: true, reason: null })
+    expect(updateDunningCases).toHaveBeenCalled()
+    expect(ensureNextRenewalCycleRun).not.toHaveBeenCalled()
+    expect(errorLogs).toHaveLength(1)
+    expect(JSON.parse(errorLogs[0])).toMatchObject({
+      alertable: true,
+      dunning_case_id: "dun_1",
+    })
+  })
+
+  it("leaves the upcoming cycle alone when billing has moved past this one", async () => {
+    const { container } = buildContainer()
+    ;(settleRenewalCycleSucceeded as jest.Mock).mockResolvedValueOnce({
+      settled: false,
+      reason: "cycle_superseded",
+    })
+
+    const response = await run(container)
+
+    expect(response.output).toMatchObject({ recovered: true })
+    expect(ensureNextRenewalCycleRun).not.toHaveBeenCalled()
+  })
+
+  it("names the customer as the settlement source", async () => {
+    const { container } = buildContainer()
+
+    await run(container)
+
+    expect(settleRenewalCycleSucceeded).toHaveBeenCalledWith(
+      container,
+      expect.objectContaining({ source: "customer_payment" })
+    )
+  })
+
+  it("recovers a case the reconciler found paid without a payment of its own", async () => {
+    const { container, updateDunningCases } = buildContainer()
+
+    const response = await recoverDunningFromCapturedPayment(
+      container,
+      { dunning_case_id: "dun_1", payment_id: null },
+      now
+    )
+
+    expect(response.output).toMatchObject({ recovered: true })
+    expect(updateDunningCases).toHaveBeenCalledWith(
+      expect.objectContaining({ status: DunningCaseStatus.RECOVERED })
+    )
   })
 
   it("does nothing for a case that never got a renewal order", async () => {

@@ -6,6 +6,7 @@ import { DunningCaseStatus } from "../../modules/dunning/types"
 import { dunningErrors } from "../../modules/dunning/utils/errors"
 import {
   createDunningCorrelationId,
+  getDunningErrorMessage,
   logDunningEvent,
 } from "../../modules/dunning/utils/observability"
 import { SUBSCRIPTION_MODULE } from "../../modules/subscription"
@@ -36,7 +37,8 @@ type SubscriptionRecord = {
 
 export type RecoverDunningFromCapturedPaymentStepInput = {
   dunning_case_id: string
-  payment_id: string
+  /** Null when the reconciler found the order paid without an event naming the payment. */
+  payment_id: string | null
 }
 
 export type RecoverDunningFromCapturedPaymentStepOutput = {
@@ -87,6 +89,7 @@ export async function recoverDunningFromCapturedPayment(
   now = new Date()
 ): Promise<StepResponse<RecoverDunningFromCapturedPaymentStepOutput>> {
   const logger = container.resolve("logger")
+  const correlationId = createDunningCorrelationId("dunning-customer-recovery")
   const dunningCase = await loadDunningCase(container, input.dunning_case_id)
   const subscription = await loadSubscription(
     container,
@@ -120,29 +123,56 @@ export async function recoverDunningFromCapturedPayment(
     return answer(false, "order_not_fully_paid")
   }
 
+  // Deliberately non-fatal: by the time this runs the case is closed and the money is in, and a
+  // throw would abandon a recovery nothing revisits - the case would no longer look open to
+  // either the scheduler or the reconciler.
   const healCycle = async () => {
-    await settleRenewalCycleSucceeded(container, {
-      renewal_cycle_id: dunningCase.renewal_cycle_id,
-      subscription_id: subscription.id,
-      order_id: dunningCase.renewal_order_id,
-      finished_at: now,
-    })
+    try {
+      const settlement = await settleRenewalCycleSucceeded(container, {
+        renewal_cycle_id: dunningCase.renewal_cycle_id,
+        subscription_id: subscription.id,
+        order_id: dunningCase.renewal_order_id,
+        finished_at: now,
+        source: RECOVERY_REASON,
+      })
 
-    await ensureNextRenewalCycleWorkflow(container).run({
-      input: { subscription_id: subscription.id },
-    })
+      // Billing already moved past this cycle, so the upcoming cycle is somebody else's and
+      // re-deriving it here would delete the one that is actually due.
+      if (settlement.reason === "cycle_superseded") {
+        return
+      }
+
+      await ensureNextRenewalCycleWorkflow(container).run({
+        input: { subscription_id: subscription.id },
+      })
+    } catch (error) {
+      logDunningEvent(logger, "error", {
+        event: "dunning.customer_recovery",
+        outcome: "failed",
+        correlation_id: correlationId,
+        dunning_case_id: dunningCase.id,
+        subscription_id: subscription.id,
+        renewal_cycle_id: dunningCase.renewal_cycle_id,
+        alertable: true,
+        message: `DunningCase '${dunningCase.id}' was recovered but settling its renewal cycle failed: ${getDunningErrorMessage(error)}`,
+        metadata: {
+          payment_id: input.payment_id,
+          renewal_order_id: dunningCase.renewal_order_id,
+        },
+      })
+    }
   }
 
   if (dunningCase.status === DunningCaseStatus.UNRECOVERED) {
     logDunningEvent(logger, "error", {
       event: "dunning.customer_recovery",
       outcome: "blocked",
-      correlation_id: createDunningCorrelationId("dunning-customer-recovery"),
+      correlation_id: correlationId,
       dunning_case_id: dunningCase.id,
       subscription_id: subscription.id,
       renewal_cycle_id: dunningCase.renewal_cycle_id,
       alertable: true,
-      message: `Payment '${input.payment_id}' landed on DunningCase '${dunningCase.id}', which was already settled as unrecovered: reverse the churn with 'reverseInvoluntaryChurnWorkflow' before the subscription can bill again`,
+      message: `A captured payment landed on DunningCase '${dunningCase.id}', which was already settled as unrecovered: reverse the churn with 'reverseInvoluntaryChurnWorkflow' before the subscription can bill again`,
       metadata: {
         payment_id: input.payment_id,
         renewal_order_id: dunningCase.renewal_order_id,
@@ -174,7 +204,7 @@ export async function recoverDunningFromCapturedPayment(
   logDunningEvent(logger, "info", {
     event: "dunning.customer_recovery",
     outcome: "succeeded",
-    correlation_id: createDunningCorrelationId("dunning-customer-recovery"),
+    correlation_id: correlationId,
     dunning_case_id: dunningCase.id,
     subscription_id: subscription.id,
     renewal_cycle_id: dunningCase.renewal_cycle_id,

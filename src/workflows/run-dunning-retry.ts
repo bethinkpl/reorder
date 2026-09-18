@@ -121,11 +121,14 @@ export const runDunningRetryWorkflow = createWorkflow(
       })
     })
 
+    // Only the run that actually closed the case may notify: a scheduled run that finds the case
+    // already recovered (the customer paid the order themselves) reports the same outcome, and its
+    // event went out when it was closed.
     when(
       "emit-dunning-recovered",
       { result },
       function ({ result }) {
-        return result.outcome === "recovered"
+        return result.outcome === "recovered" && result.recovered_now === true
       }
     ).then(function () {
       emitDunningEventStep({

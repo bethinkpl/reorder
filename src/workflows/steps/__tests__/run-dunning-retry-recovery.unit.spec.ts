@@ -177,6 +177,7 @@ describe("runDunningRetry - recovery branch", () => {
       outcome: "recovered",
       recovery_reason: "payment_recovered",
       renewal_order_id: "order_1",
+      recovered_now: true,
     })
     expect(updateDunningCases).toHaveBeenCalledWith(
       expect.objectContaining({
@@ -262,6 +263,8 @@ describe("runDunningRetry - recovery branch", () => {
       outcome: "recovered",
       dunning_attempt_id: "dunatt_prev",
       renewal_order_id: "order_1",
+      // The case was closed by someone else, so this run must not re-notify the customer.
+      recovered_now: false,
     })
     expect(updateDunningCases).not.toHaveBeenCalled()
     expect(updateSubscriptions).not.toHaveBeenCalled()

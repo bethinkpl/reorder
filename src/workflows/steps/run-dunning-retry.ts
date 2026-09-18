@@ -187,6 +187,8 @@ export type RunDunningRetryStepOutput = {
   renewal_order_id: string | null
   /** True only when this run moved the subscription to `payment_failed`. */
   settled_now: boolean
+  /** True only when this run closed the case. A run that found it closed must not notify again. */
+  recovered_now: boolean
   correlation_id: string
   attempt_no: number
   error_code: string | null
@@ -842,6 +844,7 @@ async function parkForManualResolution(
     subscription_status: input.subscriptionStatus,
     renewal_order_id: input.dunningCase.renewal_order_id,
     settled_now: false,
+    recovered_now: false,
     correlation_id: input.correlationId,
     attempt_no: input.attemptNo,
     error_code: input.outcome.error_code,
@@ -1013,6 +1016,7 @@ export async function runDunningRetry(
         subscription_status: subscription.status,
         renewal_order_id: dunningCase.renewal_order_id,
         settled_now: false,
+        recovered_now: false,
         correlation_id: correlationId,
         attempt_no: dunningCase.attempt_count,
         error_code: null,
@@ -1183,6 +1187,7 @@ export async function runDunningRetry(
         subscription_status: SubscriptionStatus.ACTIVE,
         renewal_order_id: dunningCase.renewal_order_id,
         settled_now: false,
+        recovered_now: true,
         correlation_id: correlationId,
         attempt_no: attemptNo,
         error_code: null,
@@ -1284,6 +1289,7 @@ export async function runDunningRetry(
         subscription_status: subscription.status,
         renewal_order_id: dunningCase.renewal_order_id,
         settled_now: false,
+        recovered_now: false,
         correlation_id: correlationId,
         attempt_no: attemptNo,
         error_code: outcome.error_code,
@@ -1423,6 +1429,7 @@ export async function runDunningRetry(
         subscription_status: settlement.status,
         renewal_order_id: dunningCase.renewal_order_id,
         settled_now: settlement.settled,
+        recovered_now: false,
         correlation_id: correlationId,
         attempt_no: attemptNo,
         error_code: outcome.error_code,
@@ -1506,6 +1513,7 @@ export async function runDunningRetry(
         subscription_status: settlement.status,
         renewal_order_id: dunningCase.renewal_order_id,
         settled_now: settlement.settled,
+        recovered_now: false,
         correlation_id: correlationId,
         attempt_no: attemptNo,
         error_code: outcome.error_code,
@@ -1559,6 +1567,7 @@ export async function runDunningRetry(
       subscription_status: subscription.status,
       renewal_order_id: dunningCase.renewal_order_id,
       settled_now: false,
+      recovered_now: false,
       correlation_id: correlationId,
       attempt_no: attemptNo,
       error_code: outcome.error_code,

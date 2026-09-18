@@ -63,8 +63,9 @@ export function mapDunningAdminRouteError(error: unknown) {
   const message =
     error instanceof Error ? error.message : "Unexpected dunning admin error"
   const normalized = message.toLowerCase()
+  const errorType = MedusaError.isMedusaError(error) ? error.type : null
 
-  if (normalized.includes("was not found")) {
+  if (errorType === MedusaError.Types.NOT_FOUND || normalized.includes("was not found")) {
     return {
       status: 404,
       type: MedusaError.Types.NOT_FOUND,

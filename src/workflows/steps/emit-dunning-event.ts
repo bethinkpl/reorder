@@ -1,5 +1,4 @@
 import type {
-  EventMetadata,
   IEventBusModuleService,
   MedusaContainer,
 } from "@medusajs/framework/types"
@@ -24,30 +23,26 @@ function pickString(data: Record<string, unknown>, key: string) {
 
 /**
  * Notifying the customer is not worth losing the case over: an event bus that is down would
- * otherwise fail the workflow and compensate the settlement that already committed. Mirrors
- * core's `emitEventStep` (grouping included) but swallows the emit failure into an alertable log.
+ * otherwise fail the workflow and compensate the settlement that already committed.
+ *
+ * Deliberately emits ungrouped, unlike core's `emitEventStep`: a grouped event is merely buffered
+ * here and published by the workflow's onFinish release, whose `.catch` cancels the transaction —
+ * compensating the dunning steps long after the settlement they follow committed. Dispatching from
+ * inside the step keeps a bus failure in reach of the try/catch below.
  *
  * Exported for unit tests: `createStep` doesn't expose its handler.
  */
 export async function emitDunningEvent(
   container: MedusaContainer,
-  input: EmitDunningEventStepInput,
-  eventGroupId?: string
+  input: EmitDunningEventStepInput
 ) {
   try {
     const eventBus =
       container.resolve<IEventBusModuleService>(Modules.EVENT_BUS)
 
-    const metadata: EventMetadata = {}
-
-    if (eventGroupId) {
-      metadata.eventGroupId = eventGroupId
-    }
-
     await eventBus.emit({
       name: input.eventName,
       data: input.data,
-      metadata,
     })
 
     return new StepResponse({ eventName: input.eventName, emitted: true })
@@ -75,10 +70,7 @@ export async function emitDunningEvent(
 
 export const emitDunningEventStep = createStep(
   "emit-dunning-event",
-  async function (
-    input: EmitDunningEventStepInput,
-    { container, eventGroupId }
-  ) {
-    return await emitDunningEvent(container, input, eventGroupId)
+  async function (input: EmitDunningEventStepInput, { container }) {
+    return await emitDunningEvent(container, input)
   }
 )

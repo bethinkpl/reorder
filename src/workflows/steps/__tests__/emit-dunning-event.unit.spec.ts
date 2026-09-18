@@ -47,37 +47,25 @@ function loggedError(logger: { error: jest.Mock }) {
 }
 
 describe("emitDunningEvent", () => {
-  it("emits the grouped event and reports it as emitted", async () => {
+  it("dispatches the event ungrouped and reports it as emitted", async () => {
     const { container, emit, logger } = buildContainer()
 
-    const response = await emitDunningEvent(
-      container,
-      { eventName: DunningEvents.PAYMENT_FAILED, data: payload },
-      "grp_1"
-    )
+    const response = await emitDunningEvent(container, {
+      eventName: DunningEvents.PAYMENT_FAILED,
+      data: payload,
+    })
 
     expect(emit).toHaveBeenCalledTimes(1)
+    // No `metadata.eventGroupId`: grouping would defer the publish past this try/catch.
     expect(emit).toHaveBeenCalledWith({
       name: DunningEvents.PAYMENT_FAILED,
       data: payload,
-      metadata: { eventGroupId: "grp_1" },
     })
     expect(response.output).toEqual({
       eventName: DunningEvents.PAYMENT_FAILED,
       emitted: true,
     })
     expect(logger.error).not.toHaveBeenCalled()
-  })
-
-  it("leaves the eventGroupId out when the step runs outside a group", async () => {
-    const { container, emit } = buildContainer()
-
-    await emitDunningEvent(container, {
-      eventName: DunningEvents.PARKED,
-      data: payload,
-    })
-
-    expect(emit.mock.calls[0][0].metadata).toEqual({})
   })
 
   it("swallows a rejecting event bus into an alertable log", async () => {
@@ -87,11 +75,10 @@ describe("emitDunningEvent", () => {
       }),
     })
 
-    const response = await emitDunningEvent(
-      container,
-      { eventName: DunningEvents.PAYMENT_FAILED, data: payload },
-      "grp_1"
-    )
+    const response = await emitDunningEvent(container, {
+      eventName: DunningEvents.PAYMENT_FAILED,
+      data: payload,
+    })
 
     expect(response.output).toEqual({
       eventName: DunningEvents.PAYMENT_FAILED,
@@ -114,11 +101,10 @@ describe("emitDunningEvent", () => {
       resolveError: new Error("Could not resolve 'event_bus'"),
     })
 
-    const response = await emitDunningEvent(
-      container,
-      { eventName: DunningEvents.STARTED, data: payload },
-      "grp_1"
-    )
+    const response = await emitDunningEvent(container, {
+      eventName: DunningEvents.STARTED,
+      data: payload,
+    })
 
     expect(response.output).toEqual({
       eventName: DunningEvents.STARTED,

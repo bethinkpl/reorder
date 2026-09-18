@@ -27,6 +27,9 @@ import {
   type ValidateSubscriptionCartStepInput,
 } from "../workflows/steps/validate-subscription-cart"
 import { addCompleteAllowedMetadataEntryStep } from "./steps/add-complete-allowed-metadata-entry"
+// `advanceCadence` lives in `common/utils` so that workflow steps can reuse it
+// without importing this module (importing it composes this workflow).
+import { advanceCadence } from "../common/utils/advance-cadence"
 
 export type CreateSubscriptionFromCartWorkflowInput =
   ValidateSubscriptionCartStepInput
@@ -297,25 +300,4 @@ export function buildSubscriptionInput(
   }
 }
 
-export function advanceCadence(
-  date: Date,
-  interval: CreateSubscriptionRecordStepInput["frequency_interval"],
-  value: number
-) {
-  const next = new Date(date)
-
-  switch (interval) {
-    case "day":
-      next.setUTCDate(next.getUTCDate() + value)
-      return next
-    case "week":
-      next.setUTCDate(next.getUTCDate() + value * 7)
-      return next
-    case "month":
-      next.setUTCMonth(next.getUTCMonth() + value)
-      return next
-    case "year":
-      next.setUTCFullYear(next.getUTCFullYear() + value)
-      return next
-  }
-}
+export { advanceCadence }

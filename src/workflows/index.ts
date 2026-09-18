@@ -91,6 +91,10 @@ export {
   default as markDunningUnrecoveredWorkflowDefault,
 } from "./mark-dunning-unrecovered"
 export {
+  reverseInvoluntaryChurnWorkflow,
+  default as reverseInvoluntaryChurnWorkflowDefault,
+} from "./reverse-involuntary-churn"
+export {
   updateDunningRetryScheduleWorkflow,
   default as updateDunningRetryScheduleWorkflowDefault,
 } from "./update-dunning-retry-schedule"

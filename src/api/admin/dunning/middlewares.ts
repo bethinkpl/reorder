@@ -10,6 +10,7 @@ import {
   PostAdminMarkRecoveredDunningSchema,
   PostAdminMarkUnrecoveredDunningSchema,
   PostAdminRetryNowDunningSchema,
+  PostAdminReverseChurnDunningSchema,
 } from "./validators"
 
 export const adminDunningMiddlewares: MiddlewareRoute[] = [
@@ -59,6 +60,11 @@ export const adminDunningMiddlewares: MiddlewareRoute[] = [
     matcher: "/admin/dunning/:id/mark-unrecovered",
     method: "POST",
     middlewares: [validateAndTransformBody(PostAdminMarkUnrecoveredDunningSchema)],
+  },
+  {
+    matcher: "/admin/dunning/:id/reverse-churn",
+    method: "POST",
+    middlewares: [validateAndTransformBody(PostAdminReverseChurnDunningSchema)],
   },
   {
     matcher: "/admin/dunning/:id/retry-schedule",

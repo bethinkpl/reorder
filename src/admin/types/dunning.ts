@@ -136,6 +136,10 @@ export type MarkUnrecoveredDunningAdminRequest = {
   reason: string
 }
 
+export type ReverseChurnDunningAdminRequest = {
+  reason: string
+}
+
 export type UpdateDunningRetryScheduleAdminRequest = {
   reason?: string | null
   intervals: number[]

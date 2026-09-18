@@ -64,6 +64,7 @@ type CancellationAnalyticsRecord = {
   reason_category: CancellationReasonCategory | null
   final_outcome: CancellationFinalOutcome | null
   finalized_at: string | null
+  metadata: Record<string, unknown> | null
 }
 
 type RenewalCycleAnalyticsRecord = {
@@ -369,7 +370,13 @@ async function listChurnEvents(
   const query = getQuery(container)
   const result = await query.graph({
     entity: "cancellation_case",
-    fields: ["subscription_id", "reason_category", "final_outcome", "finalized_at"],
+    fields: [
+      "subscription_id",
+      "reason_category",
+      "final_outcome",
+      "finalized_at",
+      "metadata",
+    ],
     filters: {
       subscription_id: subscriptionIds,
       final_outcome: [CancellationFinalOutcome.CANCELED],
@@ -484,6 +491,12 @@ async function rebuildSingleDay(
     }
 
     for (const churnEvent of churnEvents) {
+      // An admin reversal (`reverseInvoluntaryChurnStep`) keeps the row for the
+      // audit trail but flags it, so it must stop counting as churn.
+      if (churnEvent.metadata?.reversed === true) {
+        continue
+      }
+
       churnBySubscription.set(churnEvent.subscription_id, churnEvent)
     }
 

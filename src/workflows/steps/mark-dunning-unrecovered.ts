@@ -86,7 +86,7 @@ export const markDunningUnrecoveredStep = createStep(
       ),
     } as any)) as DunningCaseRecord
 
-    const subscriptionStatus = await settleSubscriptionPaymentFailure(container, {
+    const settlement = await settleSubscriptionPaymentFailure(container, {
       subscription_id: dunningCase.subscription_id,
       dunning_case_id: dunningCase.id,
       recovery_reason: "marked_unrecovered_by_admin",
@@ -96,7 +96,8 @@ export const markDunningUnrecoveredStep = createStep(
     return new StepResponse(
       {
         ...updated,
-        subscription_status: subscriptionStatus,
+        subscription_status: settlement.status,
+        settled_now: settlement.settled,
       },
       dunningCase
     )

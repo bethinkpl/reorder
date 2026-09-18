@@ -3,9 +3,8 @@ import {
   when,
   WorkflowResponse,
 } from "@medusajs/framework/workflows-sdk"
-import { emitEventStep } from "@medusajs/medusa/core-flows"
 import { DunningEvents } from "../modules/dunning/events"
-import { SubscriptionStatus } from "../modules/subscription/types"
+import { emitDunningEventStep } from "./steps/emit-dunning-event"
 import {
   markDunningUnrecoveredStep,
   type MarkDunningUnrecoveredStepInput,
@@ -16,16 +15,16 @@ export const markDunningUnrecoveredWorkflow = createWorkflow(
   function (input: MarkDunningUnrecoveredStepInput) {
     const result = markDunningUnrecoveredStep(input)
 
-    // A subscription that was already terminal keeps its previous status, and its customer has
-    // been told once already.
+    // Only the run that actually moved the subscription may notify: a subscription that was
+    // already terminal has had its customer told once already.
     when(
       "emit-dunning-payment-failed",
       { result },
       function ({ result }) {
-        return result.subscription_status === SubscriptionStatus.PAYMENT_FAILED
+        return result.settled_now === true
       }
     ).then(function () {
-      emitEventStep({
+      emitDunningEventStep({
         eventName: DunningEvents.PAYMENT_FAILED,
         data: {
           subscription_id: result.subscription_id,

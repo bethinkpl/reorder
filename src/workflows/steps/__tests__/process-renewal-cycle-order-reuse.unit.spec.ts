@@ -4,9 +4,6 @@ jest.mock("@medusajs/medusa/core-flows", () => ({
   createPaymentSessionsWorkflow: jest.fn(),
   acquireLockStep: jest.fn(),
   releaseLockStep: jest.fn(),
-  // The `start-dunning` composer this file pulls in transitively builds itself at import time, so
-  // the emit has to be the real step rather than a `jest.fn()`.
-  emitEventStep: jest.requireActual("@medusajs/core-flows").emitEventStep,
 }))
 
 import {

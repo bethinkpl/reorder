@@ -157,6 +157,8 @@ export type RunDunningRetryStepOutput = {
     | "awaiting_manual_resolution"
   subscription_id: string
   subscription_status: SubscriptionStatus
+  /** True only when this run moved the subscription to `payment_failed`. */
+  settled_now: boolean
   correlation_id: string
   attempt_no: number
   error_code: string | null
@@ -858,6 +860,7 @@ async function parkForManualResolution(
     outcome: "awaiting_manual_resolution",
     subscription_id: updatedCase.subscription_id,
     subscription_status: input.subscriptionStatus,
+    settled_now: false,
     correlation_id: input.correlationId,
     attempt_no: input.attemptNo,
     error_code: input.outcome.error_code,
@@ -1073,6 +1076,7 @@ export async function runDunningRetry(
         outcome: "recovered",
         subscription_id: updatedCase.subscription_id,
         subscription_status: SubscriptionStatus.ACTIVE,
+        settled_now: false,
         correlation_id: correlationId,
         attempt_no: attemptNo,
         error_code: null,
@@ -1184,7 +1188,7 @@ export async function runDunningRetry(
           ? "permanent_payment_failure"
           : "retry_limit_exhausted"
 
-      const settledStatus = await settleSubscriptionPaymentFailure(container, {
+      const settlement = await settleSubscriptionPaymentFailure(container, {
         subscription_id: subscription.id,
         dunning_case_id: dunningCase.id,
         recovery_reason: recoveryReason,
@@ -1229,7 +1233,8 @@ export async function runDunningRetry(
         dunning_attempt_id: attempt.id,
         outcome: "unrecovered",
         subscription_id: updatedCase.subscription_id,
-        subscription_status: settledStatus,
+        subscription_status: settlement.status,
+        settled_now: settlement.settled,
         correlation_id: correlationId,
         attempt_no: attemptNo,
         error_code: outcome.error_code,
@@ -1264,7 +1269,7 @@ export async function runDunningRetry(
         })
       }
 
-      const settledStatus = await settleSubscriptionPaymentFailure(container, {
+      const settlement = await settleSubscriptionPaymentFailure(container, {
         subscription_id: subscription.id,
         dunning_case_id: dunningCase.id,
         recovery_reason: "retry_schedule_exhausted",
@@ -1309,7 +1314,8 @@ export async function runDunningRetry(
         dunning_attempt_id: attempt.id,
         outcome: "unrecovered",
         subscription_id: updatedCase.subscription_id,
-        subscription_status: settledStatus,
+        subscription_status: settlement.status,
+        settled_now: settlement.settled,
         correlation_id: correlationId,
         attempt_no: attemptNo,
         error_code: outcome.error_code,
@@ -1360,6 +1366,7 @@ export async function runDunningRetry(
       outcome: "retry_scheduled",
       subscription_id: updatedCase.subscription_id,
       subscription_status: subscription.status,
+      settled_now: false,
       correlation_id: correlationId,
       attempt_no: attemptNo,
       error_code: outcome.error_code,

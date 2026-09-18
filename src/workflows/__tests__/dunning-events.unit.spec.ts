@@ -18,6 +18,7 @@ describe("dunning lifecycle events", () => {
       STARTED: "subscription.dunning_started",
       ATTEMPT_FAILED: "subscription.dunning_attempt_failed",
       PAYMENT_FAILED: "subscription.payment_failed",
+      PARKED: "subscription.dunning_parked",
     })
   })
 
@@ -27,14 +28,18 @@ describe("dunning lifecycle events", () => {
     expect(typeof markDunningUnrecoveredWorkflow).toBe("function")
   })
 
-  it("registers both retry emits under distinct step names", () => {
+  it("registers all three retry emits under distinct step names", () => {
     const handlers = stepHandlers("run-dunning-retry")
     const attemptFailed = handlers.get("emit-dunning-attempt-failed-event")
     const paymentFailed = handlers.get("emit-dunning-payment-failed-event")
+    const parked = handlers.get("emit-dunning-parked-event")
 
     expect(attemptFailed).toBeDefined()
     expect(paymentFailed).toBeDefined()
+    expect(parked).toBeDefined()
     expect(attemptFailed).not.toBe(paymentFailed)
+    expect(paymentFailed).not.toBe(parked)
+    expect(attemptFailed).not.toBe(parked)
   })
 
   it("registers the started and admin emits", () => {

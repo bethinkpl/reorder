@@ -188,9 +188,10 @@ function declineError() {
 describe("runDunningRetry - parking instead of churning", () => {
   beforeEach(() => {
     jest.clearAllMocks()
-    ;(settleSubscriptionPaymentFailure as jest.Mock).mockResolvedValue(
-      SubscriptionStatus.PAYMENT_FAILED
-    )
+    ;(settleSubscriptionPaymentFailure as jest.Mock).mockResolvedValue({
+      status: SubscriptionStatus.PAYMENT_FAILED,
+      settled: true,
+    })
     ;(
       createOrUpdateOrderPaymentCollectionWorkflow as unknown as jest.Mock
     ).mockReturnValue({
@@ -280,6 +281,7 @@ describe("runDunningRetry - parking instead of churning", () => {
     expect(response.output).toMatchObject({
       subscription_id: "sub_1",
       subscription_status: SubscriptionStatus.PAYMENT_FAILED,
+      settled_now: true,
       error_code: "insufficient_funds",
       next_retry_at: null,
       recovery_reason: "retry_limit_exhausted",
@@ -417,6 +419,7 @@ describe("runDunningRetry - parking instead of churning", () => {
 
     expect(response.output).toMatchObject({
       outcome: "unrecovered",
+      settled_now: true,
       error_code: "insufficient_funds",
       recovery_reason: "retry_limit_exhausted",
       park_reason: null,
@@ -642,6 +645,7 @@ describe("runDunningRetry - parking instead of churning", () => {
       outcome: "recovered",
       subscription_id: "sub_1",
       subscription_status: SubscriptionStatus.ACTIVE,
+      settled_now: false,
       error_code: null,
       next_retry_at: null,
       recovery_reason: "payment_recovered",

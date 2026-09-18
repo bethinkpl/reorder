@@ -3,8 +3,8 @@ import {
   when,
   WorkflowResponse,
 } from "@medusajs/framework/workflows-sdk"
-import { emitEventStep } from "@medusajs/medusa/core-flows"
 import { DunningEvents } from "../modules/dunning/events"
+import { emitDunningEventStep } from "./steps/emit-dunning-event"
 import {
   startDunningStep,
   type StartDunningStepInput,
@@ -24,7 +24,7 @@ export const startDunningWorkflow = createWorkflow(
         return result.action === "created"
       }
     ).then(function () {
-      emitEventStep({
+      emitDunningEventStep({
         eventName: DunningEvents.STARTED,
         data: {
           subscription_id: result.subscription_id,

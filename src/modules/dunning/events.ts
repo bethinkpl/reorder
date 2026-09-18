@@ -3,6 +3,7 @@ export const DunningEvents = {
   STARTED: "subscription.dunning_started",
   ATTEMPT_FAILED: "subscription.dunning_attempt_failed",
   PAYMENT_FAILED: "subscription.payment_failed",
+  PARKED: "subscription.dunning_parked",
 } as const
 
 export type DunningEventName = (typeof DunningEvents)[keyof typeof DunningEvents]

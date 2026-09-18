@@ -41,10 +41,16 @@ const OPEN_CANCELLATION_STATUSES = [
   CancellationCaseStatus.RETENTION_OFFERED,
 ]
 
+export type SettleSubscriptionPaymentFailureResult = {
+  status: SubscriptionStatus
+  /** Only this call's transition may notify the customer; a later settlement is a no-op. */
+  settled: boolean
+}
+
 export async function settleSubscriptionPaymentFailure(
   container: MedusaContainer,
   input: SettleSubscriptionPaymentFailureInput
-): Promise<SubscriptionStatus> {
+): Promise<SettleSubscriptionPaymentFailureResult> {
   const subscriptionModule =
     container.resolve<SubscriptionModuleService>(SUBSCRIPTION_MODULE)
 
@@ -53,7 +59,7 @@ export async function settleSubscriptionPaymentFailure(
   )) as SubscriptionRecord
 
   if (TERMINAL_SUBSCRIPTION_STATUSES.includes(subscription.status)) {
-    return subscription.status
+    return { status: subscription.status, settled: false }
   }
 
   const settledAt = input.at ?? new Date()
@@ -81,7 +87,7 @@ export async function settleSubscriptionPaymentFailure(
     settled_at: settledAt,
   })
 
-  return SubscriptionStatus.PAYMENT_FAILED
+  return { status: SubscriptionStatus.PAYMENT_FAILED, settled: true }
 }
 
 async function deleteScheduledRenewalCycles(

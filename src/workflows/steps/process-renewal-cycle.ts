@@ -906,6 +906,20 @@ export async function createRenewalOrder(
     })
   }
 
+  // Linked here rather than at finalize only: a declined charge never reaches
+  // `finalizeRenewalCycleStep`, and without the link nothing can resolve the
+  // renewal order back to its subscription when the customer pays it later.
+  const link = container.resolve(ContainerRegistrationKeys.LINK)
+
+  await link.create({
+    [SUBSCRIPTION_MODULE]: {
+      subscription_id: subscription.id,
+    },
+    [Modules.ORDER]: {
+      order_id: order.id,
+    },
+  })
+
   const { total, pending } = await loadOrderAmounts(container, order.id)
 
   let paymentCollections: PaymentCollectionDTO[] | null = null

@@ -207,6 +207,35 @@ describe("runDunningRetry - parking instead of churning", () => {
     expect(settleSubscriptionPaymentFailure).not.toHaveBeenCalled()
   })
 
+  it("parks the case on an SCA challenge instead of settling it", async () => {
+    const { container, updateDunningCases, updateDunningAttempts, authorizePaymentSession } =
+      buildContainer({ paymentSessionStatus: "requires_more" })
+    authorizePaymentSession.mockRejectedValue(
+      new Error("Payment session requires more action")
+    )
+
+    const response = await runDunningRetry(container, {
+      dunning_case_id: "dun_1",
+    })
+
+    expect(response.output.outcome).toBe("awaiting_manual_resolution")
+    expect(updateDunningAttempts).toHaveBeenCalledWith(
+      expect.objectContaining({
+        status: DunningAttemptStatus.FAILED,
+        error_code: "requires_more",
+        payment_reference: "payses_1",
+      })
+    )
+    expect(
+      caseUpdate(updateDunningCases, DunningCaseStatus.AWAITING_MANUAL_RESOLUTION)
+    ).toMatchObject({
+      attempt_count: 1,
+      next_retry_at: null,
+      metadata: expect.objectContaining({ park_reason: "requires_action" }),
+    })
+    expect(settleSubscriptionPaymentFailure).not.toHaveBeenCalled()
+  })
+
   it("still settles a real decline once the attempt budget is spent", async () => {
     const { container, updateDunningCases, authorizePaymentSession } =
       buildContainer({

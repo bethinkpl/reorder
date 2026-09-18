@@ -337,15 +337,21 @@ function classifyPaymentRetryFailure(
   const normalizedStatus = String(paymentSessionStatus ?? "").toLowerCase()
   const normalizedErrorCode = readPaymentErrorCode(error)
 
-  if (
-    normalizedStatus === "requires_more" ||
-    normalizedStatus === "canceled" ||
-    normalizedStatus === "cancelled"
-  ) {
+  // A routine 3DS/SCA challenge, not a dead card: the cardholder has to authenticate.
+  if (normalizedStatus === "requires_more") {
+    return {
+      kind: "requires_action",
+      payment_reference: null,
+      error_code: "requires_more",
+      error_message: message,
+    }
+  }
+
+  if (normalizedStatus === "canceled" || normalizedStatus === "cancelled") {
     return {
       kind: "permanent_failure",
       payment_reference: null,
-      error_code: normalizedStatus || "payment_requires_manual_action",
+      error_code: normalizedStatus,
       error_message: message,
     }
   }
@@ -366,8 +372,7 @@ function classifyPaymentRetryFailure(
   if (
     normalizedMessage.includes("expired") ||
     normalizedMessage.includes("declined") ||
-    normalizedMessage.includes("requires payment method") ||
-    normalizedMessage.includes("requires more")
+    normalizedMessage.includes("requires payment method")
   ) {
     return {
       kind: "permanent_failure",
@@ -904,6 +909,25 @@ export async function runDunningRetry(
         attemptNo,
         attemptCount: transitionSnapshot.attempt_count,
         parkReason: "setup_failure",
+        outcome,
+        finishedAt,
+        correlationId,
+        durationMs: Date.now() - startedAtMs,
+        subscriptionStatus: subscription.status,
+      })
+    }
+
+    // The provider was reached and asked for cardholder authentication, so the attempt counts -
+    // but nobody can answer that challenge from a background retry.
+    if (outcome.kind === "requires_action") {
+      return await parkForManualResolution(container, {
+        dunningCase,
+        caseMetadata: retryMetadata,
+        attempt,
+        attemptStatus: DunningAttemptStatus.FAILED,
+        attemptNo,
+        attemptCount: consumedAttempts,
+        parkReason: "requires_action",
         outcome,
         finishedAt,
         correlationId,

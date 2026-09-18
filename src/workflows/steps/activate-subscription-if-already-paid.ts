@@ -35,13 +35,10 @@ type Compensation = {
 }
 
 /**
- * `payment.captured` is emitted by the Stripe webhook, not by `completeCartWorkflow`, so it can
- * land before this workflow has created the subscription row - the storefront confirms the
- * PaymentIntent before it calls `/store/carts/:id/subscribe`, and both paths serialise on the
- * cart lock. When the webhook wins, `activate-subscription-on-payment-captured` finds no
- * subscription and the capture is spent; without this the row would stay `pending_payment`
- * forever. Reading the capture straight off the cart makes activation independent of who won,
- * and leaves the subscription `ACTIVE` before `createInitialRenewalCycleStep` runs.
+ * The storefront creates the subscription (POST `/store/carts/:id/subscribe`) before redirecting
+ * to the hosted Checkout Session, so this step normally no-ops. It stays as a defensive reconcile
+ * for callers that complete payment before the subscription exists, and its exported function is
+ * shared with the `pending_payment` sweeper job.
  */
 export async function activateSubscriptionIfAlreadyPaid(
   container: MedusaContainer,

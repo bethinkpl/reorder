@@ -41,14 +41,6 @@ export const resolveRenewalAdjustmentsResult = z
   )
   .optional()
 
-/**
- * The address the renewal order is billed to, when the host app wants one other
- * than the frozen source cart's. `country_code` is the one required field: an
- * order created without it is charged and only then fails to be invoiced, so a
- * partial address is refused here and the cart's address is used instead.
- * `metadata` is declared because zod strips unknown keys — without it a tax id
- * would be dropped on the way through.
- */
 export const resolveRenewalBillingAddressResult = z
   .object({
     first_name: z.string().nullish(),

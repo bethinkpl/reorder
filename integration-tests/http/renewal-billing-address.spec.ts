@@ -31,13 +31,10 @@ jest.mock("@medusajs/medusa/core-flows", () => {
   }
 })
 
-// Registered by the test app's own loader, driven from here through the shared
-// process global — see integration-tests/src/workflows/resolve-renewal-billing-address-test-hook.ts.
 const resolveBillingAddressDelegate = jest.fn()
 ;(globalThis as Record<string, unknown>).__resolveRenewalBillingAddressTestDelegate =
   resolveBillingAddressDelegate
 
-// What the first checkout froze onto the source cart.
 const cartBillingAddress = {
   first_name: "Jan",
   last_name: "Kowalski",
@@ -176,8 +173,6 @@ medusaIntegrationTestRunner({
 
         const orderInput = mockCreateOrderRun.mock.calls[0][0].input
         expect(orderInput.billing_address).toMatchObject(resolved)
-        // The tax id has to survive the zod validator, or B2B pricing and the
-        // invoice both lose it.
         expect(orderInput.billing_address.metadata).toEqual({ tax_id: "1234567890" })
         expect(orderInput.additional_data).toEqual({ billing_address: orderInput.billing_address })
       })
@@ -243,10 +238,6 @@ medusaIntegrationTestRunner({
 
         resolveBillingAddressDelegate.mockReturnValue({ city: "Poznan", country_code: "" })
 
-        // The result validator runs `parse`, so a half-resolved address is a
-        // loud, retryable failure — not a silent fall back to stale details.
-        // `run()` resolves with the reverted transaction rather than rejecting;
-        // the failure lives in `errors` and the flow state.
         const res: any = await processRenewalCycleWorkflow(container).run({
           input: { renewal_cycle_id: cycle.id, trigger_type: "scheduler" },
           throwOnError: false,
@@ -265,3 +256,5 @@ medusaIntegrationTestRunner({
     })
   },
 })
+
+jest.setTimeout(60 * 1000)

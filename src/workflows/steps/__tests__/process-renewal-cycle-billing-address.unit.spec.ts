@@ -12,7 +12,6 @@ import {
 } from "@medusajs/medusa/core-flows"
 import { createRenewalOrder } from "../process-renewal-cycle"
 
-// What the first checkout froze onto the source cart.
 const cartBillingAddress = {
   first_name: "Jan",
   last_name: "Kowalski",
@@ -47,7 +46,6 @@ const subscription = {
 
 const items = [{ title: "Plan", quantity: 1 }] as any
 
-// What the host app resolved from the customer's current billing details.
 const resolvedBillingAddress = {
   first_name: null,
   last_name: null,
@@ -153,8 +151,6 @@ describe("createRenewalOrder - billing address resolution", () => {
     })
   })
 
-  // `StepResponse(undefined)` reaches the step as a framework wrapper object, so
-  // "did the handler answer" cannot be a truthiness check.
   it("falls back when the handler's result is a wrapper rather than an address", async () => {
     const { container } = buildContainer()
 
@@ -170,8 +166,6 @@ describe("createRenewalOrder - billing address resolution", () => {
     expect(createdOrderInput().billing_address).toBe(cartBillingAddress)
   })
 
-  // Defence in depth: the hook's zod validator already rejects this before the
-  // step runs, but the step must not bill to it if it ever arrives another way.
   it("falls back rather than billing to an address with no country", async () => {
     const { container } = buildContainer()
 
@@ -202,7 +196,6 @@ describe("createRenewalOrder - billing address resolution", () => {
     expect(createdOrderInput().billing_address).toBeUndefined()
   })
 
-  // The order already exists, so its address is whatever the aborted attempt set.
   it("does not re-create the order on a retry, whatever the hook resolved", async () => {
     const { container } = buildContainer()
 

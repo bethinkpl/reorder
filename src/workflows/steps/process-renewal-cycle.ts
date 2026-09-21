@@ -190,11 +190,6 @@ export type RenewalAdjustmentSpec = {
   promotion_id?: string | null
 }
 
-/**
- * The address a renewal order is billed to, as the
- * `resolveRenewalBillingAddress` hook returns it. Mirrors the order module's
- * address shape minus `id`, so it is created fresh rather than reusing a row.
- */
 export type RenewalBillingAddress = {
   first_name?: string | null
   last_name?: string | null
@@ -862,14 +857,6 @@ function mergeRenewalAdjustments(
   return merged
 }
 
-/**
- * The `resolveRenewalBillingAddress` hook's result, once it is known to be
- * usable. Same guard rationale as {@link mergeRenewalAdjustments}: a handler
- * that returns `StepResponse(undefined)` surfaces here as a framework wrapper
- * object rather than `undefined`, so the shape is checked rather than trusted.
- * `country_code` is what the check turns on — an order billed to an address
- * without one is charged and then cannot be invoiced.
- */
 function readResolvedBillingAddress(
   resolved: RenewalBillingAddress | undefined
 ): RenewalBillingAddress | null {
@@ -907,8 +894,6 @@ export async function createRenewalOrder(
     )
   }
 
-  // The host app's answer wins; the source cart's address — frozen at the
-  // first checkout — is the fallback for a renewal it cannot speak for.
   const billingAddress =
     readResolvedBillingAddress(resolvedBillingAddress) ??
     cart.billing_address ??
@@ -945,10 +930,6 @@ export async function createRenewalOrder(
           subscription_id: subscription.id,
           renewal_trigger: "automatic",
         },
-        // An order cannot be refreshed after creation and `setPricingContext`
-        // never sees the order's own address, so a host app that prices on the
-        // buyer's identity only gets it here. Matters on cycles that apply a
-        // pending plan change, the only ones whose line is priced live.
         additional_data: { billing_address: billingAddress },
       } as unknown as CreateOrderWorkflowInput,
     })

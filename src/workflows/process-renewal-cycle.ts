@@ -41,6 +41,30 @@ export const resolveRenewalAdjustmentsResult = z
   )
   .optional()
 
+/**
+ * The address the renewal order is billed to, when the host app wants one other
+ * than the frozen source cart's. `country_code` is the one required field: an
+ * order created without it is charged and only then fails to be invoiced, so a
+ * partial address is refused here and the cart's address is used instead.
+ * `metadata` is declared because zod strips unknown keys — without it a tax id
+ * would be dropped on the way through.
+ */
+export const resolveRenewalBillingAddressResult = z
+  .object({
+    first_name: z.string().nullish(),
+    last_name: z.string().nullish(),
+    company: z.string().nullish(),
+    address_1: z.string().nullish(),
+    address_2: z.string().nullish(),
+    city: z.string().nullish(),
+    province: z.string().nullish(),
+    postal_code: z.string().nullish(),
+    country_code: z.string().min(1),
+    phone: z.string().nullish(),
+    metadata: z.record(z.string(), z.unknown()).nullish(),
+  })
+  .optional()
+
 export const processRenewalCycleWorkflow = createWorkflow(
   "process-renewal-cycle",
   function (input: ProcessRenewalCycleStepInput) {
@@ -74,10 +98,23 @@ export const processRenewalCycleWorkflow = createWorkflow(
     )
     const extraAdjustments = resolveRenewalAdjustments.getResult()
 
+    const resolveRenewalBillingAddress = createHook(
+      "resolveRenewalBillingAddress",
+      {
+        subscription: context.subscription,
+        renewal_cycle_id: context.renewal_cycle_id,
+      },
+      {
+        resultValidator: resolveRenewalBillingAddressResult,
+      }
+    )
+    const billingAddress = resolveRenewalBillingAddress.getResult()
+
     const orderResult = createRenewalOrderStep({
       context,
       build_result: buildResult,
       extra_adjustments: extraAdjustments,
+      billing_address: billingAddress,
     })
 
     labelSubscriptionOrderAdjustmentsStep({
@@ -133,7 +170,11 @@ export const processRenewalCycleWorkflow = createWorkflow(
     })
 
     return new WorkflowResponse(result, {
-      hooks: [setPaymentSessionData, resolveRenewalAdjustments],
+      hooks: [
+        setPaymentSessionData,
+        resolveRenewalAdjustments,
+        resolveRenewalBillingAddress,
+      ],
     })
   }
 )

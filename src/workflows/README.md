@@ -152,6 +152,54 @@ processRenewalCycleWorkflow.hooks.resolveRenewalAdjustments(
   renewal — the workflow reverts, and the cycle plus its attempt are marked FAILED (retryable)
   instead of the customer being charged an undiscounted amount.
 
+### `processRenewalCycleWorkflow` — `resolveRenewalBillingAddress`
+
+Lets the host app say which address a renewal order is billed to, instead of the one frozen on the
+subscription's source cart at the first checkout. Use it where the buyer's billing identity lives in
+the app rather than on the cart — a customer record they can edit — so every cycle bills to the
+current details:
+
+```ts
+import { processRenewalCycleWorkflow } from "@bethinkpl/reorder/workflows"
+import { StepResponse } from "@medusajs/framework/workflows-sdk"
+
+processRenewalCycleWorkflow.hooks.resolveRenewalBillingAddress(
+  async ({ subscription, renewal_cycle_id }, { container }) => {
+    // look up the customer's current billing address for subscription.customer_id ...
+    return new StepResponse({
+      company: "ACME sp. z o.o.",
+      address_1: "Nowa 2",
+      city: "Poznan",
+      postal_code: "60-688",
+      country_code: "pl",
+      metadata: { tax_id: "1234567890" },
+    })
+  }
+)
+```
+
+- The handler receives the `subscription` and the `renewal_cycle_id`, and runs once per cycle —
+  including a cycle that is skipped or that creates no order, where the result is simply ignored.
+- The result is validated with zod: an optional object of `{ first_name?, last_name?, company?,
+  address_1?, address_2?, city?, province?, postal_code?, country_code, phone?, metadata? }`.
+  **`country_code` is required** — an order billed to an address without one is charged before
+  anything discovers it cannot be invoiced. `metadata` is part of the contract because that is where
+  a tax id travels; unknown keys are stripped.
+- Return `undefined` for "I have no opinion": the order then bills to `cart.billing_address`, exactly
+  as it did before this hook existed.
+- Answering with a **partial** address is not the same thing. The validator runs `parse`, so an
+  object missing `country_code` throws and the cycle fails (retryable) rather than quietly billing to
+  the frozen address. A handler that cannot resolve a complete address should return `undefined`.
+- The resolved address is also passed as `additional_data.billing_address` on `createOrderWorkflow`,
+  so a host app pricing on the buyer's identity (`setPricingContext`) sees it. That only affects a
+  cycle whose line is priced live — one applying a pending plan change; every other cycle prices from
+  the frozen `source_snapshot`.
+- **A retried cycle keeps the address it was created with.** Once the order exists it is reused
+  rather than re-created (see the renewal-order reuse note), and nothing rewrites its address.
+- A thrown error fails the renewal — the workflow reverts, and the cycle plus its attempt are marked
+  FAILED (retryable). Prefer that to returning a half-known address: a wrong one is charged and
+  invoiced before anyone notices.
+
 ### `createSubscriptionFromCartWorkflow` — `subscriptionCreated`
 
 Fires after a subscription record, its commerce links, and its initial renewal cycle are

@@ -194,6 +194,20 @@ export type RenewalAdjustmentSpec = {
   promotion_id?: string | null
 }
 
+export type RenewalBillingAddress = {
+  first_name?: string | null
+  last_name?: string | null
+  company?: string | null
+  address_1?: string | null
+  address_2?: string | null
+  city?: string | null
+  province?: string | null
+  postal_code?: string | null
+  country_code: string
+  phone?: string | null
+  metadata?: Record<string, unknown> | null
+}
+
 export type RenewalOrderBuildResult = {
   cart: CartRecord | null
   items: Record<string, unknown>[] | null
@@ -847,13 +861,30 @@ function mergeRenewalAdjustments(
   return merged
 }
 
+function readResolvedBillingAddress(
+  resolved: RenewalBillingAddress | undefined
+): RenewalBillingAddress | null {
+  if (
+    typeof resolved !== "object" ||
+    resolved === null ||
+    Array.isArray(resolved)
+  ) {
+    return null
+  }
+
+  return typeof resolved.country_code === "string" && resolved.country_code
+    ? resolved
+    : null
+}
+
 /** Exported for unit tests: covers the reused-order double-charge guard. */
 export async function createRenewalOrder(
   container: MedusaContainer,
   cycle: { id: string, generated_order_id?: string | null },
   subscription: SubscriptionType,
   cart: CartRecord,
-  items: Record<string, unknown>[]
+  items: Record<string, unknown>[],
+  resolvedBillingAddress?: RenewalBillingAddress
 ) {
   if (!cart.region_id) {
     throw renewalErrors.invalidData(
@@ -866,6 +897,11 @@ export async function createRenewalOrder(
       `Source cart '${cart.id}' is missing 'sales_channel_id'`
     )
   }
+
+  const billingAddress =
+    readResolvedBillingAddress(resolvedBillingAddress) ??
+    cart.billing_address ??
+    undefined
 
   let order: OrderDTO
 
@@ -890,7 +926,7 @@ export async function createRenewalOrder(
         email: cart.email ?? subscription.customer_snapshot?.email ?? undefined,
         currency_code: cart.currency_code,
         shipping_address: cart.shipping_address ?? subscription.shipping_address,
-        billing_address: cart.billing_address ?? undefined,
+        billing_address: billingAddress,
         items,
         shipping_methods: buildShippingMethods(cart),
         metadata: {
@@ -898,6 +934,7 @@ export async function createRenewalOrder(
           subscription_id: subscription.id,
           renewal_trigger: "automatic",
         },
+        additional_data: { billing_address: billingAddress },
       } as unknown as CreateOrderWorkflowInput,
     })
 
@@ -1380,6 +1417,7 @@ export type CreateRenewalOrderStepInput = {
   context: RenewalExecutionContext
   build_result: RenewalOrderBuildResult
   extra_adjustments: RenewalAdjustmentSpec[] | undefined
+  billing_address: RenewalBillingAddress | undefined
 }
 
 export const createRenewalOrderStep = createStep(
@@ -1388,7 +1426,12 @@ export const createRenewalOrderStep = createStep(
     input: CreateRenewalOrderStepInput,
     { container }
   ) {
-    const { context, build_result: buildResult, extra_adjustments: extraAdjustments } = input
+    const {
+      context,
+      build_result: buildResult,
+      extra_adjustments: extraAdjustments,
+      billing_address: billingAddress,
+    } = input
     const subscription = context.subscription
     const appliedPendingChanges = context.applied_pending_changes
 
@@ -1435,7 +1478,8 @@ export const createRenewalOrderStep = createStep(
         },
         subscription,
         cart,
-        builtItems
+        builtItems,
+        billingAddress
       )
 
       let resolvedSourceSnapshot: SubscriptionSourceSnapshot | null = null

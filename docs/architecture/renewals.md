@@ -275,6 +275,11 @@ promotions or plan pricing for them by default. The renewal item build works as 
   workflow hook (see `src/workflows/README.md`); all renewal adjustments are written
   **code-less** so they survive the promotion refresh, and the combined discount is clamped
   to the line gross (plan discount first, hook adjustments consume the remainder)
+- the renewal order's **billing address** is whatever the `resolveRenewalBillingAddress` hook
+  returns, falling back to the source cart's — frozen at the first checkout — when the host app
+  has no answer or returns one without a `country_code`. The same address is passed as
+  `additional_data.billing_address` so `setPricingContext` can see it. A **retried** cycle reuses
+  its already-created order and therefore keeps the address that order was created with
 - renewals register **no promotion usage** — a promotion redeemed at signup is counted once,
   by the checkout; recurring application is an app-level replay of frozen terms
 - a failure between `prepare-renewal-cycle` and the failure-recording steps (e.g. a hook

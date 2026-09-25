@@ -39,6 +39,7 @@ const items = [{ title: "Plan", quantity: 1 }] as any
 function buildContainer(order: Record<string, unknown>) {
   const graph = jest.fn().mockResolvedValue({ data: [order] })
   const updateRenewalCycles = jest.fn().mockResolvedValue(undefined)
+  const linkCreate = jest.fn().mockResolvedValue(undefined)
 
   const container = {
     resolve: (key: string) => {
@@ -50,6 +51,10 @@ function buildContainer(order: Record<string, unknown>) {
         return { updateRenewalCycles }
       }
 
+      if (key === "link") {
+        return { create: linkCreate }
+      }
+
       if (key === "logger") {
         return { info: jest.fn(), warn: jest.fn(), error: jest.fn() }
       }
@@ -58,7 +63,7 @@ function buildContainer(order: Record<string, unknown>) {
     },
   } as any
 
-  return { container, updateRenewalCycles }
+  return { container, updateRenewalCycles, linkCreate }
 }
 
 describe("createRenewalOrder - reused order double-charge guard", () => {
@@ -183,6 +188,50 @@ describe("createRenewalOrder - reused order double-charge guard", () => {
     expect(updateRenewalCycles).toHaveBeenCalledWith({
       id: "cyc_1",
       generated_order_id: "order_new",
+    })
+  })
+
+  it("links the new order to its subscription right away", async () => {
+    // A declined charge never reaches finalize, so this is the only link the
+    // renewal order gets before the customer pays it themselves.
+    const { container, linkCreate } = buildContainer({
+      id: "order_new",
+      total: 100,
+      summary: { pending_difference: 100 },
+    })
+
+    await createRenewalOrder(
+      container,
+      { id: "cyc_1", generated_order_id: null },
+      subscription,
+      cart,
+      items
+    )
+
+    expect(linkCreate).toHaveBeenCalledWith({
+      subscription: { subscription_id: "sub_1" },
+      order: { order_id: "order_new" },
+    })
+  })
+
+  it("links a reused order too", async () => {
+    const { container, linkCreate } = buildContainer({
+      id: "order_1",
+      total: 100,
+      summary: { pending_difference: 0 },
+    })
+
+    await createRenewalOrder(
+      container,
+      { id: "cyc_1", generated_order_id: "order_1" },
+      subscription,
+      cart,
+      items
+    )
+
+    expect(linkCreate).toHaveBeenCalledWith({
+      subscription: { subscription_id: "sub_1" },
+      order: { order_id: "order_1" },
     })
   })
 })

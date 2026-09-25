@@ -25,6 +25,10 @@ const getSubscriptionStatusColor = (status: SubscriptionAdminStatus) => {
       return "grey"
     case SubscriptionAdminStatus.PAST_DUE:
       return "red"
+    case SubscriptionAdminStatus.PENDING_PAYMENT:
+      return "orange"
+    case SubscriptionAdminStatus.PAYMENT_FAILED:
+      return "red"
   }
 }
 

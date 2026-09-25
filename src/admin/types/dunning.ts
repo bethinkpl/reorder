@@ -11,12 +11,19 @@ export enum DunningAttemptAdminStatus {
   PROCESSING = "processing",
   SUCCEEDED = "succeeded",
   FAILED = "failed",
+  ABORTED = "aborted",
 }
 
 export type DunningAdminSubscriptionSummary = {
   subscription_id: string
   reference: string
-  status: "active" | "paused" | "cancelled" | "past_due"
+  status:
+    | "pending_payment"
+    | "active"
+    | "paused"
+    | "cancelled"
+    | "past_due"
+    | "payment_failed"
   customer_name: string
   product_title: string
   variant_title: string
@@ -56,12 +63,26 @@ export type DunningAttemptAdminRecord = {
   metadata: Record<string, unknown> | null
 }
 
+export type DunningRetryBlockedReason =
+  | "no_active_case"
+  | "retry_in_progress"
+  | "case_closed"
+  | "subscription_not_retryable"
+  | "no_payment_method"
+  | "max_attempts_reached"
+  | "missing_renewal_order"
+  | "missing_retry_schedule"
+  | "retry_not_due"
+  | "manual_resolution_required"
+
 export type DunningCaseAdminDetail = {
   id: string
   status: DunningCaseAdminStatus
   subscription: DunningAdminSubscriptionSummary
   renewal: DunningAdminRenewalSummary | null
   order: DunningAdminOrderSummary | null
+  retry_eligible: boolean
+  retry_blocked_reason: DunningRetryBlockedReason | null
   attempt_count: number
   max_attempts: number
   retry_schedule: DunningRetryScheduleSummary | null
@@ -112,6 +133,10 @@ export type MarkRecoveredDunningAdminRequest = {
 }
 
 export type MarkUnrecoveredDunningAdminRequest = {
+  reason: string
+}
+
+export type ReverseChurnDunningAdminRequest = {
   reason: string
 }
 

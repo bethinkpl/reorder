@@ -16,6 +16,7 @@ import {
   usePrompt,
 } from "@medusajs/ui"
 import {
+  ArrowPath,
   CheckCircle,
   EllipsisHorizontal,
   ShoppingBag,
@@ -37,13 +38,23 @@ import {
   DunningCaseAdminDetail,
   DunningCaseAdminDetailResponse,
   DunningCaseAdminStatus,
+  DunningRetryBlockedReason,
   MarkRecoveredDunningAdminRequest,
   MarkUnrecoveredDunningAdminRequest,
   RetryNowDunningAdminRequest,
+  ReverseChurnDunningAdminRequest,
   UpdateDunningRetryScheduleAdminRequest,
 } from "../../../../types/dunning"
 
-type ActionDrawerMode = "mark_recovered" | "mark_unrecovered" | "retry_schedule"
+type ActionDrawerMode =
+  | "mark_recovered"
+  | "mark_unrecovered"
+  | "reverse_churn"
+  | "retry_schedule"
+
+function isReasonRequired(mode: ActionDrawerMode) {
+  return mode === "mark_unrecovered" || mode === "reverse_churn"
+}
 
 const terminalStatuses = new Set<DunningCaseAdminStatus>([
   DunningCaseAdminStatus.RECOVERED,
@@ -148,6 +159,34 @@ const DunningDetailPage = () => {
     },
   })
 
+  const reverseChurnMutation = useMutation({
+    mutationFn: async (body: ReverseChurnDunningAdminRequest) =>
+      sdk.client.fetch<DunningCaseAdminDetailResponse>(
+        `/admin/dunning/${id}/reverse-churn`,
+        {
+          method: "POST",
+          body,
+        }
+      ),
+    onSuccess: async () => {
+      await invalidateAdminDunningQueries(
+        queryClient,
+        id,
+        dunningCase?.subscription.subscription_id
+      )
+      toast.success("Involuntary churn reversed")
+      closeDrawer()
+    },
+    onError: (mutationError) => {
+      const message = getAdminErrorMessage(
+        mutationError,
+        "Failed to reverse involuntary churn"
+      )
+      setFormError(message)
+      toast.error(message)
+    },
+  })
+
   const retryScheduleMutation = useMutation({
     mutationFn: async (body: UpdateDunningRetryScheduleAdminRequest) =>
       sdk.client.fetch<DunningCaseAdminDetailResponse>(
@@ -188,17 +227,23 @@ const DunningDetailPage = () => {
     }))
   }, [dunningCase])
 
-  const canRetryNow = dunningCase
+  const isCaseOpen = dunningCase
     ? !terminalStatuses.has(dunningCase.status) &&
     dunningCase.status !== DunningCaseAdminStatus.RETRYING
     : false
-  const canMarkRecovered = canRetryNow
-  const canMarkUnrecovered = canRetryNow
-  const canEditRetrySchedule = canRetryNow
+  const canRetryNow = dunningCase?.retry_eligible ?? false
+  const retryBlockedReason = dunningCase?.retry_blocked_reason ?? null
+  const canMarkRecovered = isCaseOpen
+  const canMarkUnrecovered = isCaseOpen
+  const canEditRetrySchedule = isCaseOpen
+  const canReverseChurn =
+    dunningCase?.status === DunningCaseAdminStatus.UNRECOVERED &&
+    dunningCase?.subscription?.status === "payment_failed"
   const isActionPending =
     retryNowMutation.isPending ||
     markRecoveredMutation.isPending ||
     markUnrecoveredMutation.isPending ||
+    reverseChurnMutation.isPending ||
     retryScheduleMutation.isPending
 
   useEffect(() => {
@@ -253,7 +298,7 @@ const DunningDetailPage = () => {
   const handleSubmitDrawer = async () => {
     const normalizedReason = normalizeOptionalString(reason)
 
-    if (actionDrawerMode === "mark_unrecovered" && !normalizedReason) {
+    if (isReasonRequired(actionDrawerMode) && !normalizedReason) {
       setFormError("Reason is required")
       toast.error("Reason is required")
       return
@@ -297,6 +342,25 @@ const DunningDetailPage = () => {
         reason: normalizedReason,
         intervals: normalizedIntervals,
         max_attempts: normalizedMaxAttempts,
+      })
+      return
+    }
+
+    if (actionDrawerMode === "reverse_churn") {
+      const reverseConfirmed = await prompt({
+        title: "Reverse involuntary churn?",
+        description:
+          "You are about to reactivate this subscription, forgive the missed renewal period, and close this case as recovered.",
+        confirmText: "Reverse churn",
+        cancelText: "Cancel",
+      })
+
+      if (!reverseConfirmed) {
+        return
+      }
+
+      await reverseChurnMutation.mutateAsync({
+        reason: normalizedReason!,
       })
       return
     }
@@ -416,7 +480,14 @@ const DunningDetailPage = () => {
                         <span>{retryNowMutation.isPending ? "Retrying..." : "Retry now"}</span>
                       </DropdownMenu.Item>
                     )
-                  : null}
+                  : isCaseOpen && retryBlockedReason
+                    ? (
+                        <DropdownMenu.Item className="flex items-center gap-x-2" disabled>
+                          <TriangleRightMini className="text-ui-fg-subtle" />
+                          <span>{`Retry unavailable: ${formatRetryBlockedReason(retryBlockedReason)}`}</span>
+                        </DropdownMenu.Item>
+                      )
+                    : null}
                 {canMarkRecovered
                   ? (
                       <DropdownMenu.Item
@@ -438,6 +509,18 @@ const DunningDetailPage = () => {
                       >
                         <XCircle className="text-ui-fg-subtle" />
                         <span>Mark unrecovered</span>
+                      </DropdownMenu.Item>
+                    )
+                  : null}
+                {canReverseChurn
+                  ? (
+                      <DropdownMenu.Item
+                        className="flex items-center gap-x-2"
+                        disabled={isActionPending}
+                        onClick={() => openDrawer("reverse_churn")}
+                      >
+                        <ArrowPath className="text-ui-fg-subtle" />
+                        <span>Reverse churn</span>
                       </DropdownMenu.Item>
                     )
                   : null}
@@ -840,6 +923,14 @@ const DunningDetailPage = () => {
                   </Alert>
                 )
               : null}
+            {actionDrawerMode === "reverse_churn"
+              ? (
+                  <Alert variant="warning">
+                    Reactivates the subscription and schedules the next renewal in the
+                    future. The missed period is forgiven and is not charged.
+                  </Alert>
+                )
+              : null}
             {actionDrawerMode === "retry_schedule"
               ? (
                   <>
@@ -867,7 +958,7 @@ const DunningDetailPage = () => {
               : null}
             <div className="flex flex-col gap-y-2">
               <Label htmlFor="dunning-reason">
-                {actionDrawerMode === "mark_unrecovered" ? "Reason *" : "Reason"}
+                {isReasonRequired(actionDrawerMode) ? "Reason *" : "Reason"}
               </Label>
               <Textarea
                 id="dunning-reason"
@@ -967,6 +1058,8 @@ function getDrawerTitle(mode: ActionDrawerMode) {
       return "Mark recovered"
     case "mark_unrecovered":
       return "Mark unrecovered"
+    case "reverse_churn":
+      return "Reverse churn"
     case "retry_schedule":
       return "Edit retry schedule"
   }
@@ -981,6 +1074,8 @@ function getDrawerSubmitLabel(
       return pending ? "Marking recovered..." : "Mark recovered"
     case "mark_unrecovered":
       return pending ? "Marking unrecovered..." : "Mark unrecovered"
+    case "reverse_churn":
+      return pending ? "Reversing churn..." : "Reverse churn"
     case "retry_schedule":
       return pending ? "Saving schedule..." : "Save schedule"
   }
@@ -1014,6 +1109,34 @@ function formatCaseStatus(status: DunningCaseAdminStatus) {
   }
 }
 
+function formatRetryBlockedReason(reason: DunningRetryBlockedReason) {
+  switch (reason) {
+    case "no_active_case":
+      return "no active recovery case"
+    case "retry_in_progress":
+      return "a retry is already running"
+    case "case_closed":
+      return "the case is closed"
+    case "subscription_not_retryable":
+      return "the subscription is not chargeable"
+    case "no_payment_method":
+      return "no saved payment method"
+    case "max_attempts_reached":
+      return "all attempts are used up"
+    case "missing_renewal_order":
+      return "the case has no renewal order"
+    case "missing_retry_schedule":
+      return "the case has no retry schedule"
+    case "retry_not_due":
+      return "the next retry is not due yet"
+    case "manual_resolution_required":
+      return "the case needs manual resolution"
+    default:
+      reason satisfies never
+      return reason
+  }
+}
+
 function getCaseStatusColor(status: DunningCaseAdminStatus) {
   switch (status) {
     case DunningCaseAdminStatus.OPEN:
@@ -1039,6 +1162,8 @@ function formatAttemptStatus(status: DunningAttemptAdminStatus) {
       return "Succeeded"
     case DunningAttemptAdminStatus.FAILED:
       return "Failed"
+    case DunningAttemptAdminStatus.ABORTED:
+      return "Aborted"
   }
 }
 
@@ -1050,6 +1175,8 @@ function getAttemptStatusColor(status: DunningAttemptAdminStatus) {
       return "green"
     case DunningAttemptAdminStatus.FAILED:
       return "red"
+    case DunningAttemptAdminStatus.ABORTED:
+      return "grey"
   }
 }
 

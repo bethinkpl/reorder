@@ -17,6 +17,7 @@ export type DunningFailureKind =
   | "lock_timeout"
   | "not_found"
   | "subscription_not_retryable"
+  | "no_payment_method"
   | "unexpected_error"
 
 type DunningLogPayload = {
@@ -117,6 +118,10 @@ export function classifyDunningFailure(error: unknown): DunningFailureKind {
     return "subscription_not_retryable"
   }
 
+  if (message.includes("no saved payment method")) {
+    return "no_payment_method"
+  }
+
   if (message.includes("can't") || message.includes("missing")) {
     return "invalid_transition"
   }
@@ -132,6 +137,7 @@ export function isAlertableDunningFailure(kind: DunningFailureKind) {
     "retry_exhausted",
     "lock_timeout",
     "subscription_not_retryable",
+    "no_payment_method",
   ].includes(kind)
 }
 

@@ -16,6 +16,7 @@ const dunningAttemptStatusSchema = z.enum([
   "processing",
   "succeeded",
   "failed",
+  "aborted",
 ])
 
 export const GetAdminDunningCasesSchema = createFindParams({
@@ -93,6 +94,14 @@ export const PostAdminMarkUnrecoveredDunningSchema = z.object({
 
 export type PostAdminMarkUnrecoveredDunningSchemaType = z.infer<
   typeof PostAdminMarkUnrecoveredDunningSchema
+>
+
+export const PostAdminReverseChurnDunningSchema = z.object({
+  reason: z.string().trim().min(1).max(500),
+})
+
+export type PostAdminReverseChurnDunningSchemaType = z.infer<
+  typeof PostAdminReverseChurnDunningSchema
 >
 
 export const PostAdminDunningRetryScheduleSchema = z.object({

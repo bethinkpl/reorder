@@ -48,7 +48,7 @@ export const createSubscriptionRecordStep = createStep(
 
     const created = await subscriptionModule.createSubscriptions({
       reference: buildSubscriptionReference(input.order_display_id, input.order_id),
-      status: SubscriptionStatus.ACTIVE,
+      status: SubscriptionStatus.PENDING_PAYMENT,
       customer_id: input.customer_id,
       cart_id: input.cart_id,
       product_id: input.product_snapshot.product_id,

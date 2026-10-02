@@ -143,7 +143,12 @@ medusaIntegrationTestRunner({
           result: [{ id: `paycol_${reference}` }],
         })
         mockCreatePaymentSessionsRun.mockResolvedValue({
-          result: { id: `payses_${reference}`, context: {}, status: "pending" },
+          result: {
+            id: `payses_${reference}`,
+            context: {},
+            status: "pending",
+            data: { id: `pi_${reference}` },
+          },
         })
 
         jest

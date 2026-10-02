@@ -72,6 +72,10 @@ function buildContainer() {
         return { updateRenewalCycles: jest.fn().mockResolvedValue(undefined) }
       }
 
+      if (key === "link") {
+        return { create: jest.fn().mockResolvedValue(undefined) }
+      }
+
       if (key === "logger") {
         return { info: jest.fn(), warn: jest.fn(), error: jest.fn() }
       }

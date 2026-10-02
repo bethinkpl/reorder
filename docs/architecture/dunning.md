@@ -114,8 +114,8 @@ The current implementation follows these rules:
 - qualifying renewal failures are currently surfaced from payment-session, authorization, and capture failures after the renewal order exists
 - `start-dunning` marks the subscription as `past_due` when entering recovery
 - `run-dunning-retry` retries payment on the existing renewal order rather than re-running the whole renewal workflow
-- successful recovery closes the case as `recovered` and restores the subscription to `active`
-- unrecovered closure leaves the originating renewal cycle as `failed` and keeps the subscription in `past_due`
+- successful recovery closes the case as `recovered`, restores the subscription to `active`, settles the renewal cycle as `succeeded` and advances `next_renewal_at` from the payment date
+- unrecovered closure leaves the originating renewal cycle as `failed`, moves the subscription to `payment_failed`, clears `next_renewal_at` and records an involuntary-churn cancellation case
 
 Current retry classification:
 - retryable failures include `insufficient_funds`, `generic_decline`, `do_not_honor`, and temporary provider/network errors

@@ -18,6 +18,7 @@ Customized fork of [@reorder/reorderjs](https://github.com/reorder-js/reorder).
 - exposed `resolveRenewalAdjustments` hook in `processRenewalCycleWorkflow` so the host app can add its own (code-less) discounts to renewal orders, and `subscriptionCreated` hook in `createSubscriptionFromCartWorkflow` for reacting to genuine subscription creation
 - `source_snapshot` now truthfully captures the initial order's adjustments and tax lines (audit-only — renewals deliberately no longer replay them)
 - renewal cycles stranded in PROCESSING by an unhandled failure between steps are now marked FAILED via compensation, keeping them retryable
+- a renewal that succeeds after a failed attempt (dunning retry, the customer paying the renewal order, a re-run of a failed cycle) now counts the next billing period from the day it was paid instead of from the original due date, and so does a first attempt that succeeds so late that its next date has already passed; on-time renewals keep their original schedule
 ### QoL
 - addition of eslint lint rules
 - improved test setup

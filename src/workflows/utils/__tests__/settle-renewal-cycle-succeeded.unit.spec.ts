@@ -210,6 +210,23 @@ describe("settleRenewalCycleSucceeded", () => {
     )
   })
 
+  it("anchors a first attempt on the payment date once its next date has passed", async () => {
+    const { container, updateSubscriptions } = buildContainer()
+
+    await settleRenewalCycleSucceeded(container, {
+      ...baseInput,
+      attempt_id: "rat_1",
+      finished_at: new Date("2026-04-05T05:00:00.000Z"),
+      audit: { ...finalizeAudit, attempt_no: 1 },
+    })
+
+    expect(updateSubscriptions).toHaveBeenCalledWith(
+      expect.objectContaining({
+        next_renewal_at: new Date("2026-05-05T05:00:00.000Z"),
+      })
+    )
+  })
+
   it("never anchors a recovery earlier than the cycle was due", async () => {
     const { container, updateSubscriptions } = buildContainer()
 

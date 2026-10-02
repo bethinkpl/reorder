@@ -135,8 +135,8 @@ The file [dunning-smoke.spec.ts](../../integration-tests/http/dunning-smoke.spec
 
 Covered behavior:
 - a qualifying failed renewal starts dunning
-- successful payment recovery closes the case and restores the subscription to `active`
-- unrecovered closure leaves the subscription in `past_due` and preserves the failed renewal outcome
+- successful payment recovery closes the case, restores the subscription to `active` and moves the next renewal date forward from the payment date
+- unrecovered closure moves the subscription to `payment_failed` and preserves the failed renewal outcome
 - active dunning may coexist with cancellation handling on the same subscription without ownership overlap
 
 This is intentionally a smoke-level integration check, not a full browser or system test.

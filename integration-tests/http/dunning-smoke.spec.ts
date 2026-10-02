@@ -256,6 +256,9 @@ medusaIntegrationTestRunner({
           recovery_reason: "payment_recovered",
         })
         expect(updatedSubscription.status).toEqual(SubscriptionStatus.ACTIVE)
+        expect(new Date(updatedSubscription.next_renewal_at!).getTime()).toBeGreaterThan(
+          Date.now()
+        )
       })
 
       it("closes the case as unrecovered and keeps the subscription past_due after permanent retry failure", async () => {

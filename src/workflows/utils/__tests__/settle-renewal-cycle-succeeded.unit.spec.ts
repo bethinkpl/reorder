@@ -179,8 +179,8 @@ describe("settleRenewalCycleSucceeded", () => {
     expect(updateSubscriptions).toHaveBeenCalledWith(
       expect.objectContaining({
         id: "sub_1",
-        // The anchor is the cycle's scheduled date, not the day the money arrived.
-        next_renewal_at: new Date("2026-04-01T00:00:00.000Z"),
+        // A recovered cycle is anchored on the day the money arrived.
+        next_renewal_at: new Date("2026-04-02T12:00:00.000Z"),
         last_renewal_at: finishedAt,
         skip_next_cycle: false,
       })
@@ -192,6 +192,37 @@ describe("settleRenewalCycleSucceeded", () => {
       generated_order_id: "order_1",
       last_error: null,
     })
+  })
+
+  it("keeps the scheduled anchor when the first attempt succeeds", async () => {
+    const { container, updateSubscriptions } = buildContainer()
+
+    await settleRenewalCycleSucceeded(container, {
+      ...baseInput,
+      attempt_id: "rat_1",
+      audit: { ...finalizeAudit, attempt_no: 1 },
+    })
+
+    expect(updateSubscriptions).toHaveBeenCalledWith(
+      expect.objectContaining({
+        next_renewal_at: new Date("2026-04-01T00:00:00.000Z"),
+      })
+    )
+  })
+
+  it("never anchors a recovery earlier than the cycle was due", async () => {
+    const { container, updateSubscriptions } = buildContainer()
+
+    await settleRenewalCycleSucceeded(container, {
+      ...baseInput,
+      finished_at: new Date("2026-02-28T05:00:00.000Z"),
+    })
+
+    expect(updateSubscriptions).toHaveBeenCalledWith(
+      expect.objectContaining({
+        next_renewal_at: new Date("2026-04-01T00:00:00.000Z"),
+      })
+    )
   })
 
   it("links the order to both the cycle and the subscription", async () => {
@@ -221,7 +252,7 @@ describe("settleRenewalCycleSucceeded", () => {
         variant_id: "var_new",
         frequency_interval: FrequencyInterval.MONTH,
         frequency_value: 3,
-        next_renewal_at: new Date("2026-06-01T00:00:00.000Z"),
+        next_renewal_at: new Date("2026-06-02T12:00:00.000Z"),
         pending_update_data: null,
         pricing_snapshot: {
           discount_type: "percentage",

@@ -209,12 +209,14 @@ export async function settleRenewalCycleSucceeded(
     appliedPendingChanges?.frequency_interval ?? subscription.frequency_interval
   const nextValue =
     appliedPendingChanges?.frequency_value ?? subscription.frequency_value
-  const nextRenewalAt = addSubscriptionCadence(
-    scheduledAnchor,
-    nextInterval,
-    nextValue
-  )
   const finishedAt = input.finished_at
+  // A retried cycle bills its next period from the day it was paid; callers without `audit` are recoveries.
+  const recovered = !input.audit || input.audit.attempt_no > 1
+  const anchor =
+    recovered && finishedAt.getTime() > scheduledAnchor.getTime()
+      ? finishedAt
+      : scheduledAnchor
+  const nextRenewalAt = addSubscriptionCadence(anchor, nextInterval, nextValue)
 
   const nextProductSnapshot = appliedPendingChanges
     ? {

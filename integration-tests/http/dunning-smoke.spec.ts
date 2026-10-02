@@ -266,7 +266,7 @@ medusaIntegrationTestRunner({
         )
       })
 
-      it("closes the case as unrecovered and keeps the subscription past_due after permanent retry failure", async () => {
+      it("closes the case as unrecovered and marks the subscription payment_failed after permanent retry failure", async () => {
         const container = getContainer()
         const dunningModule =
           container.resolve<DunningModuleService>(DUNNING_MODULE)
@@ -282,7 +282,11 @@ medusaIntegrationTestRunner({
 
         jest
           .spyOn(paymentModule, "authorizePaymentSession")
-          .mockRejectedValue(new Error("Card declined again during dunning"))
+          .mockRejectedValue(
+            Object.assign(new Error("Card declined again during dunning"), {
+              code: "expired_card",
+            })
+          )
 
         const { result } = await runDunningRetryWorkflow(container).run({
           input: {
@@ -301,14 +305,14 @@ medusaIntegrationTestRunner({
         expect(result).toMatchObject({
           dunning_case_id: dunningCase.id,
           outcome: "unrecovered",
-          subscription_status: SubscriptionStatus.PAST_DUE,
+          subscription_status: SubscriptionStatus.PAYMENT_FAILED,
         })
         expect(updatedCase).toMatchObject({
           id: dunningCase.id,
           status: DunningCaseStatus.UNRECOVERED,
           recovery_reason: "permanent_payment_failure",
         })
-        expect(updatedSubscription.status).toEqual(SubscriptionStatus.PAST_DUE)
+        expect(updatedSubscription.status).toEqual(SubscriptionStatus.PAYMENT_FAILED)
         expect(updatedCycle.status).toEqual(RenewalCycleStatus.FAILED)
       })
     })

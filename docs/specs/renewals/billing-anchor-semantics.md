@@ -208,26 +208,48 @@ Supported intervals remain:
 
 ### Recommended next-date rule
 
-After success:
+After success on the first attempt:
 - next date = `scheduled_for` advanced by the cadence that the successful cycle used
+- exception: when that date has already passed by the time the cycle succeeds (resume after a long pause, late approval, scheduler backlog), next date = the payment date advanced by the cadence
 
-This is preferred over anchoring from the wall-clock execution timestamp because:
+After success on a cycle that needed more than one attempt (dunning retry, customer paying the renewal order, scheduler or force re-running a failed cycle):
+- next date = the payment date advanced by the cadence that the successful cycle used
+- the payment date is never taken when it is earlier than `scheduled_for`
+
+"Payment date" here is the moment the cycle is settled as succeeded, which is the capture time except when an earlier attempt captured and a later run settles the cycle.
+
+Anchoring first-attempt successes on `scheduled_for` is preferred over the wall-clock execution timestamp because:
 - it preserves cadence consistency
-- it avoids drift when processing happens later than the nominal due time
+- it avoids drift when processing happens at a different time than the nominal due time
 - it better represents recurring billing periods
+
+Anchoring recovered cycles on the payment date is preferred because:
+- the customer gets a full period from the day they actually paid
+- a recovery that takes longer than one cadence would otherwise leave the next date in the past and charge again at the next scheduler run
+
+The first-attempt exception exists for the same second reason: a next date that is already in the past is charged again immediately.
 
 ## 14. Handling late execution
 
 If the scheduler or manual force runs later than the nominal due date:
 - the cycle should still represent the original `scheduled_for` billing period
-- success should advance from that scheduled anchor, not from the delayed execution time
+- a first-attempt success should advance from that scheduled anchor, not from the delayed execution time, unless the resulting date has already passed
+- a success that follows a failed attempt should advance from the payment date
 
-Example:
+Example, first attempt:
 - due date was April 1
-- execution actually succeeded on April 3
+- the first attempt ran and succeeded on April 3
 - monthly cadence should still produce the next due date based on April 1, not April 3
 
-This avoids billing-anchor drift over time.
+Example, first attempt more than one cadence late:
+- due date was April 1
+- the first attempt ran and succeeded on May 5
+- monthly cadence should produce the next due date based on May 5, because May 1 has already passed
+
+Example, recovered:
+- due date was April 1
+- the first attempt failed, a retry succeeded on April 5
+- monthly cadence should produce the next due date based on April 5
 
 ## 15. Lifecycle examples
 
@@ -247,6 +269,7 @@ This avoids billing-anchor drift over time.
 - `next_renewal_at` stays `2026-04-01`
 - retry or force uses the same due cycle
 - only after success is the anchor advanced
+- the retry succeeds on `2026-04-05`, so the next anchor becomes `2026-05-05`
 
 ### 15.3 Skip-next-cycle
 
@@ -269,6 +292,7 @@ The recommended MVP date and anchor semantics are:
 - `Subscription.next_renewal_at` is the active billing anchor
 - `RenewalCycle.scheduled_for` is the snapshot of the current due period
 - success advances the anchor exactly once
+- a first-attempt success advances from `scheduled_for`; a success after a failed attempt, or one whose next date has already passed, advances from the payment date
 - failure does not advance the anchor
 - retries and force operate on the same due period
 - pause, cancel, and trial affect eligibility before execution

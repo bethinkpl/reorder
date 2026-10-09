@@ -157,7 +157,7 @@ medusaIntegrationTestRunner({
           result: [{ id: "paycol_admin_flow" }],
         })
         mockCreatePaymentSessionsRun.mockResolvedValue({
-          result: { id: "payses_admin_flow", context: {}, status: "pending" },
+          result: { id: "payses_admin_flow", context: {}, status: "pending", data: { id: "pi_admin_flow" } },
         })
 
         jest.spyOn(query, "graph").mockImplementation(async (input: any) => {
@@ -263,7 +263,7 @@ medusaIntegrationTestRunner({
           result: [{ id: "paycol_api" }],
         })
         mockCreatePaymentSessionsRun.mockResolvedValue({
-          result: { id: "payses_api", context: {}, status: "pending" },
+          result: { id: "payses_api", context: {}, status: "pending", data: { id: "pi_api" } },
         })
 
         jest.spyOn(query, "graph").mockImplementation(async (input: any) => {

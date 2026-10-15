@@ -106,6 +106,86 @@ medusaIntegrationTestRunner({
         expect(effective.source_scope).toEqual(PlanOfferScope.PRODUCT)
       })
 
+      it("resolves a batch of targets with variant > product priority", async () => {
+        const container = getContainer()
+        const withBothOffers = await createProductWithVariant(container)
+        const withDisabledVariantOffer = await createProductWithVariant(container)
+        const withDisabledProductOffer = await createProductWithVariant(container)
+
+        const productOffer = await createPlanOfferSeed(container, {
+          name: "PLAN-BATCH-PRODUCT",
+          scope: PlanOfferScope.PRODUCT,
+          product_id: withBothOffers.product.id,
+          variant_id: null,
+        })
+        const variantOffer = await createPlanOfferSeed(container, {
+          name: "PLAN-BATCH-VARIANT",
+          scope: PlanOfferScope.VARIANT,
+          product_id: withBothOffers.product.id,
+          variant_id: withBothOffers.variant.id,
+        })
+        const fallbackOffer = await createPlanOfferSeed(container, {
+          name: "PLAN-BATCH-FALLBACK",
+          scope: PlanOfferScope.PRODUCT,
+          product_id: withDisabledVariantOffer.product.id,
+          variant_id: null,
+        })
+        await createPlanOfferSeed(container, {
+          name: "PLAN-BATCH-DISABLED-VARIANT",
+          scope: PlanOfferScope.VARIANT,
+          product_id: withDisabledVariantOffer.product.id,
+          variant_id: withDisabledVariantOffer.variant.id,
+          is_enabled: false,
+        })
+        await createPlanOfferSeed(container, {
+          name: "PLAN-BATCH-DISABLED-PRODUCT",
+          scope: PlanOfferScope.PRODUCT,
+          product_id: withDisabledProductOffer.product.id,
+          variant_id: null,
+          is_enabled: false,
+        })
+
+        const configs = await resolveProductSubscriptionConfig(container, [
+          {
+            product_id: withBothOffers.product.id,
+            variant_id: withBothOffers.variant.id,
+          },
+          { product_id: withBothOffers.product.id },
+          {
+            product_id: withDisabledVariantOffer.product.id,
+            variant_id: withDisabledVariantOffer.variant.id,
+          },
+          {
+            product_id: withDisabledProductOffer.product.id,
+            variant_id: withDisabledProductOffer.variant.id,
+          },
+        ])
+
+        expect(
+          configs.map((config) => [
+            config.source_offer_id,
+            config.source_scope,
+            config.variant_id,
+            config.is_enabled,
+          ])
+        ).toEqual([
+          [
+            variantOffer.id,
+            PlanOfferScope.VARIANT,
+            withBothOffers.variant.id,
+            true,
+          ],
+          [productOffer.id, PlanOfferScope.PRODUCT, null, true],
+          [
+            fallbackOffer.id,
+            PlanOfferScope.PRODUCT,
+            withDisabledVariantOffer.variant.id,
+            true,
+          ],
+          [null, null, withDisabledProductOffer.variant.id, false],
+        ])
+      })
+
       it("creates, updates, and toggles a plan offer", async () => {
         const container = getContainer()
         const { product, variant } = await createProductWithVariant(container)

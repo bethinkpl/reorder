@@ -154,13 +154,13 @@ This makes downstream validation simpler in workflows that consume offer configu
 
 ### Batched Resolution
 
-`resolveProductSubscriptionConfigs(planOfferService, targets)` resolves any number of `{ product_id, variant_id }`
-targets with two `plan_offer` queries and returns one effective config per target, in input order.
-`resolveProductSubscriptionConfig(container, target)` is its single-target form, so checkout validation, cart
-pricing sync, renewals and the store subscription-offer endpoint all share one implementation of the priority rules.
+`resolveProductSubscriptionConfig(container, input)` takes either one `{ product_id, variant_id }` target or an array
+of them. An array is resolved with two `plan_offer` queries and returns one effective config per target, in input
+order. Checkout validation, cart pricing sync, renewals, the store subscription-offer endpoint and host apps all go
+through it, so they share one implementation of the priority rules.
 
-Host apps import both from `@bethinkpl/reorder/modules/plan-offer/utils`. A host app that shows subscription
-availability next to products (for example on its product list) should call the batched resolver instead of
+Host apps import it from `@bethinkpl/reorder/modules/plan-offer/utils`. A host app that shows subscription
+availability next to products (for example on its product list) should pass all of its targets in one call instead of
 re-implementing the priority rules, so the storefront and checkout cannot drift apart.
 
 ## 4. Read Path

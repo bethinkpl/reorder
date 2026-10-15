@@ -5,8 +5,6 @@ import {
   listAdminPlanOffers,
   resolveProductSubscriptionConfig,
 } from "../../src/modules/plan-offer/utils/admin-query"
-import { PLAN_OFFER_MODULE } from "../../src/modules/plan-offer"
-import { resolveProductSubscriptionConfigs } from "../../src/modules/plan-offer/utils"
 import {
   createOrUpsertPlanOfferWorkflow,
   togglePlanOfferWorkflow,
@@ -147,24 +145,21 @@ medusaIntegrationTestRunner({
           is_enabled: false,
         })
 
-        const configs = await resolveProductSubscriptionConfigs(
-          container.resolve(PLAN_OFFER_MODULE),
-          [
-            {
-              product_id: withBothOffers.product.id,
-              variant_id: withBothOffers.variant.id,
-            },
-            { product_id: withBothOffers.product.id },
-            {
-              product_id: withDisabledVariantOffer.product.id,
-              variant_id: withDisabledVariantOffer.variant.id,
-            },
-            {
-              product_id: withDisabledProductOffer.product.id,
-              variant_id: withDisabledProductOffer.variant.id,
-            },
-          ]
-        )
+        const configs = await resolveProductSubscriptionConfig(container, [
+          {
+            product_id: withBothOffers.product.id,
+            variant_id: withBothOffers.variant.id,
+          },
+          { product_id: withBothOffers.product.id },
+          {
+            product_id: withDisabledVariantOffer.product.id,
+            variant_id: withDisabledVariantOffer.variant.id,
+          },
+          {
+            product_id: withDisabledProductOffer.product.id,
+            variant_id: withDisabledProductOffer.variant.id,
+          },
+        ])
 
         expect(
           configs.map((config) => [

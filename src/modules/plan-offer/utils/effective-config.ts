@@ -27,7 +27,7 @@ const effectiveConfigFields = [
   "allowed_frequencies",
   "discount_per_frequency",
   "rules",
-] as const
+]
 
 export function mapRecordToEffectiveConfig(
   record: PlanOfferRecord
@@ -76,26 +76,43 @@ async function listEnabledPlanOffers(
 ): Promise<PlanOfferRecord[]> {
   const records = await planOfferService.listPlanOffers(
     { ...filters, is_enabled: true },
-    { select: [...effectiveConfigFields] }
+    { select: effectiveConfigFields }
   )
 
   return records as unknown as PlanOfferRecord[]
 }
 
-export async function resolveProductSubscriptionConfigs(
-  planOfferService: PlanOfferModuleService,
-  targets: SubscriptionConfigTarget[]
-): Promise<ProductSubscriptionConfig[]> {
-  if (targets.length === 0) {
+export function resolveProductSubscriptionConfig(
+  container: MedusaContainer,
+  input: SubscriptionConfigTarget[]
+): Promise<ProductSubscriptionConfig[]>
+export function resolveProductSubscriptionConfig(
+  container: MedusaContainer,
+  input: SubscriptionConfigTarget
+): Promise<ProductSubscriptionConfig>
+export async function resolveProductSubscriptionConfig(
+  container: MedusaContainer,
+  input: SubscriptionConfigTarget | SubscriptionConfigTarget[]
+): Promise<ProductSubscriptionConfig | ProductSubscriptionConfig[]> {
+  if (!Array.isArray(input)) {
+    const [config] = await resolveProductSubscriptionConfig(container, [input])
+
+    return config
+  }
+
+  if (input.length === 0) {
     return []
   }
 
+  const planOfferService =
+    container.resolve<PlanOfferModuleService>(PLAN_OFFER_MODULE)
+
   const variantIds = [
     ...new Set(
-      targets.flatMap((target) => (target.variant_id ? [target.variant_id] : []))
+      input.flatMap((target) => (target.variant_id ? [target.variant_id] : []))
     ),
   ]
-  const productIds = [...new Set(targets.map((target) => target.product_id))]
+  const productIds = [...new Set(input.map((target) => target.product_id))]
 
   const [variantRecords, productRecords] = await Promise.all([
     variantIds.length > 0
@@ -117,7 +134,7 @@ export async function resolveProductSubscriptionConfigs(
     productRecords.map((record) => [record.product_id, record])
   )
 
-  return targets.map((target) => {
+  return input.map((target) => {
     const variantRecord = target.variant_id
       ? variantRecordsById.get(target.variant_id)
       : undefined
@@ -137,16 +154,4 @@ export async function resolveProductSubscriptionConfigs(
 
     return getInactiveEffectiveConfig(target)
   })
-}
-
-export async function resolveProductSubscriptionConfig(
-  container: MedusaContainer,
-  input: SubscriptionConfigTarget
-): Promise<ProductSubscriptionConfig> {
-  const [config] = await resolveProductSubscriptionConfigs(
-    container.resolve<PlanOfferModuleService>(PLAN_OFFER_MODULE),
-    [input]
-  )
-
-  return config
 }

@@ -11,6 +11,7 @@ import {
   resolveRetryEligibility,
 } from "../../../../../modules/dunning/utils/retry-eligibility"
 import { resolveProductSubscriptionConfig } from "../../../../../modules/plan-offer/utils/effective-config"
+import { getDefaultFrequency } from "../../../../../modules/plan-offer/utils/subscription-preview"
 import {
   type SubscriptionPaymentContext,
   SubscriptionStatus,
@@ -888,6 +889,7 @@ export async function getStoreProductSubscriptionOfferResponse(
     product_id: productId,
     variant_id: variantId,
   })
+  const defaultFrequency = getDefaultFrequency(config)
 
   return {
     subscription_offer: {
@@ -918,6 +920,12 @@ export async function getStoreProductSubscriptionOfferResponse(
             : null,
         }
       }),
+      default_frequency: defaultFrequency
+        ? {
+            frequency_interval: String(defaultFrequency.interval),
+            frequency_value: defaultFrequency.value,
+          }
+        : null,
       discount_semantics: {
         has_frequency_specific_discounts: config.discount_per_frequency.length > 0,
       },

@@ -30,6 +30,7 @@ import { addCompleteAllowedMetadataEntryStep } from "./steps/add-complete-allowe
 // `advanceCadence` lives in `common/utils` so that workflow steps can reuse it
 // without importing this module (importing it composes this workflow).
 import { advanceCadence } from "../common/utils/advance-cadence"
+import { calculateFirstRenewal } from "../common/utils/first-renewal"
 
 export type CreateSubscriptionFromCartWorkflowInput =
   ValidateSubscriptionCartStepInput
@@ -240,12 +241,6 @@ function toDate(value: string | Date) {
   return value instanceof Date ? value : new Date(value)
 }
 
-function addDays(date: Date, days: number) {
-  const next = new Date(date)
-  next.setUTCDate(next.getUTCDate() + days)
-  return next
-}
-
 export function buildSubscriptionInput(
   validatedCart: {
     customer_id: string
@@ -263,18 +258,13 @@ export function buildSubscriptionInput(
   order: { id: string, display_id?: string | number | null, created_at: string | Date }
 ): CreateSubscriptionRecordStepInput {
   const startedAt = toDate(order.created_at)
-  const trialEndsAt =
-    validatedCart.trial_days > 0
-      ? addDays(startedAt, validatedCart.trial_days)
-      : null
-  const nextRenewalAt =
-    validatedCart.trial_days > 0
-      ? trialEndsAt
-      : advanceCadence(
-          startedAt,
-          validatedCart.frequency_interval,
-          validatedCart.frequency_value
-        )
+  const { trial_ends_at: trialEndsAt, next_renewal_at: nextRenewalAt } =
+    calculateFirstRenewal({
+      started_at: startedAt,
+      frequency_interval: validatedCart.frequency_interval,
+      frequency_value: validatedCart.frequency_value,
+      trial_days: validatedCart.trial_days,
+    })
 
   if (!nextRenewalAt) {
     throw new Error("Subscription create flow failed to calculate next renewal date")

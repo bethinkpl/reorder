@@ -3,6 +3,7 @@ import { ContainerRegistrationKeys } from "@medusajs/framework/utils"
 import { createStep, StepResponse } from "@medusajs/framework/workflows-sdk"
 import type { PlanOfferDiscountPerFrequency } from "../../modules/plan-offer/types"
 import { resolveProductSubscriptionConfig } from "../../modules/plan-offer/utils/effective-config"
+import { resolveTrialDays } from "../../modules/plan-offer/utils/subscription-preview"
 import {
   type SubscriptionPaymentContext,
   type SubscriptionPricingSnapshot,
@@ -221,10 +222,7 @@ export const validateSubscriptionCartStep = createStep(
       },
       shipping_address: requiresShippingAddress ? buildShippingAddress(cart.shipping_address) : undefined,
       payment_context: paymentContext,
-      trial_days:
-        effectiveConfig.rules?.trial_enabled && effectiveConfig.rules.trial_days
-          ? effectiveConfig.rules.trial_days
-          : 0,
+      trial_days: resolveTrialDays(effectiveConfig.rules),
     })
   }
 )

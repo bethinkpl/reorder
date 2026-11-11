@@ -9,6 +9,7 @@ import {
 import { SubscriptionStatus } from "../modules/subscription/types"
 import { cancelAbandonedSubscription } from "../modules/subscription/utils/cancel-abandoned-subscription"
 import { findSubscriptionIdForPaymentCollection } from "../modules/subscription/utils/find-subscription-for-payment"
+import { failAwaitingDunningAttempt } from "../workflows/utils/fail-awaiting-dunning-attempt"
 import { failAwaitingRenewalCycle } from "../workflows/utils/fail-awaiting-renewal-cycle"
 
 type WebhookEventData = {
@@ -86,16 +87,26 @@ export async function cancelPendingSubscriptionOnPaymentFailure(
 
   const session: PaymentSessionRecord | undefined = sessions[0]
   const renewalCycleId = session?.context?.renewal_cycle_id
+  const dunningCaseId = session?.context?.dunning_case_id
+  const reason =
+    typeof decoded?.reason === "string" && decoded.reason ? decoded.reason : null
 
   if (typeof renewalCycleId === "string" && renewalCycleId) {
     await failAwaitingRenewalCycle(container, {
       renewal_cycle_id: renewalCycleId,
       session_id: sessionId,
       action: processed.action,
-      reason:
-        typeof decoded?.reason === "string" && decoded.reason
-          ? decoded.reason
-          : null,
+      reason,
+    })
+
+    return
+  }
+
+  if (typeof dunningCaseId === "string" && dunningCaseId) {
+    await failAwaitingDunningAttempt(container, {
+      session_id: sessionId,
+      action: processed.action,
+      reason,
     })
 
     return

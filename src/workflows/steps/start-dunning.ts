@@ -27,6 +27,7 @@ const ACTIVE_DUNNING_CASE_STATUSES = new Set<DunningCaseStatus>([
   DunningCaseStatus.OPEN,
   DunningCaseStatus.RETRY_SCHEDULED,
   DunningCaseStatus.RETRYING,
+  DunningCaseStatus.AWAITING_PAYMENT,
   DunningCaseStatus.AWAITING_MANUAL_RESOLUTION,
 ])
 

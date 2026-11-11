@@ -1117,6 +1117,8 @@ function formatRetryBlockedReason(reason: DunningRetryBlockedReason) {
       return "no active recovery case"
     case "retry_in_progress":
       return "a retry is already running"
+    case "payment_in_progress":
+      return "a payment is awaiting its result"
     case "case_closed":
       return "the case is closed"
     case "subscription_not_retryable":

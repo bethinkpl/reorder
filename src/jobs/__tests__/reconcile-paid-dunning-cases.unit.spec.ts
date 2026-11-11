@@ -25,7 +25,9 @@ function buildContainer(options: {
   pendingByOrder?: Record<string, number>
 }) {
   const { cases, pendingByOrder = {} } = options
-  const listDunningCases = jest.fn(async () => cases)
+  const listDunningCases = jest.fn(
+    async (_filters: { status: DunningCaseStatus[] }, _options: unknown) => cases
+  )
   const errorLogs: string[] = []
 
   const graph = jest.fn(async ({ filters }: { filters: { id: string[] } }) => {
@@ -104,15 +106,19 @@ describe("reconcilePaidDunningCases", () => {
 
     await reconcilePaidDunningCases(container)
 
+    const openStatuses = [
+      DunningCaseStatus.OPEN,
+      DunningCaseStatus.RETRY_SCHEDULED,
+      DunningCaseStatus.AWAITING_PAYMENT,
+      DunningCaseStatus.AWAITING_MANUAL_RESOLUTION,
+    ]
+
     expect(listDunningCases).toHaveBeenCalledWith(
-      {
-        status: [
-          DunningCaseStatus.OPEN,
-          DunningCaseStatus.RETRY_SCHEDULED,
-          DunningCaseStatus.AWAITING_MANUAL_RESOLUTION,
-        ],
-      },
+      { status: expect.arrayContaining(openStatuses) },
       { take: 200, order: { updated_at: "ASC" } }
+    )
+    expect(listDunningCases.mock.calls[0][0].status).toHaveLength(
+      openStatuses.length
     )
   })
 

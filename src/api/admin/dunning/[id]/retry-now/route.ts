@@ -4,6 +4,7 @@ import type {
 } from "@medusajs/framework/http"
 import type { PostAdminRetryNowDunningSchemaType } from "../../validators"
 import { getAdminDunningDetailResponse, mapDunningAdminRouteError } from "../../utils"
+import { getDunningErrorMessage } from "../../../../../modules/dunning/utils/observability"
 import { runDunningRetryWorkflow } from "../../../../../workflows"
 
 export const POST = async (
@@ -24,7 +25,8 @@ export const POST = async (
 
     return res.status(mapped.status).json({
       type: mapped.type,
-      message: mapped.message,
+      // The workflow engine rethrows a step's error as a serialised plain object, not an Error.
+      message: getDunningErrorMessage(error),
     })
   }
 

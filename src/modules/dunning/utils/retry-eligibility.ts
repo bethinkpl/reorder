@@ -9,6 +9,7 @@ import {
 export enum RetryBlockedReason {
   NO_ACTIVE_CASE = "no_active_case",
   RETRY_IN_PROGRESS = "retry_in_progress",
+  PAYMENT_IN_PROGRESS = "payment_in_progress",
   CASE_CLOSED = "case_closed",
   SUBSCRIPTION_NOT_RETRYABLE = "subscription_not_retryable",
   NO_PAYMENT_METHOD = "no_payment_method",
@@ -87,6 +88,10 @@ export function resolveRetryEligibility(input: RetryEligibilityInput): RetryElig
     return blocked(RetryBlockedReason.RETRY_IN_PROGRESS)
   }
 
+  if (dunningCase.status === DunningCaseStatus.AWAITING_PAYMENT) {
+    return blocked(RetryBlockedReason.PAYMENT_IN_PROGRESS)
+  }
+
   if (!RETRYABLE_CASE_STATUSES.includes(dunningCase.status)) {
     return blocked(RetryBlockedReason.CASE_CLOSED)
   }
@@ -141,6 +146,10 @@ export function toRetryBlockedError(
         : dunningErrors.alreadyUnrecovered(dunningCase.id)
     case RetryBlockedReason.RETRY_IN_PROGRESS:
       return dunningErrors.retryAlreadyProcessing(dunningCase.id)
+    case RetryBlockedReason.PAYMENT_IN_PROGRESS:
+      return dunningErrors.conflict(
+        `DunningCase '${dunningCase.id}' retry is already processing: its charge awaits the provider's answer (${reason})`
+      )
     case RetryBlockedReason.MAX_ATTEMPTS_REACHED:
       return dunningErrors.maxAttemptsExceeded(dunningCase.id)
     case RetryBlockedReason.RETRY_NOT_DUE:

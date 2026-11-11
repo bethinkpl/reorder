@@ -1,8 +1,20 @@
+jest.mock("../../workflows/utils/fail-awaiting-dunning-attempt", () => ({
+  failAwaitingDunningAttempt: jest.fn(async () => undefined),
+}))
+
 import type { MedusaContainer } from "@medusajs/framework/types"
-import { ContainerRegistrationKeys, Modules, PaymentActions } from "@medusajs/framework/utils"
+import {
+  ContainerRegistrationKeys,
+  Modules,
+  PaymentActions,
+  PaymentWebhookEvents,
+} from "@medusajs/framework/utils"
 import { SUBSCRIPTION_MODULE } from "../../modules/subscription"
 import { SubscriptionStatus } from "../../modules/subscription/types"
-import { cancelPendingSubscriptionOnPaymentFailure } from "../cancel-pending-subscription-on-payment-failure"
+import { failAwaitingDunningAttempt } from "../../workflows/utils/fail-awaiting-dunning-attempt"
+import cancelPendingSubscriptionOnPaymentFailureHandler, {
+  cancelPendingSubscriptionOnPaymentFailure,
+} from "../cancel-pending-subscription-on-payment-failure"
 
 type Staged = Record<string, unknown[]>
 
@@ -31,9 +43,10 @@ function buildContainer(options: {
   staged: Staged
   action: string
   sessionId?: string | null
+  reason?: string
   captured: UpdateCall[]
 }) {
-  const { staged, action, sessionId = "payses_1", captured } = options
+  const { staged, action, sessionId = "payses_1", reason, captured } = options
 
   return {
     resolve(key: string) {
@@ -47,7 +60,7 @@ function buildContainer(options: {
         return {
           getWebhookActionAndData: async () => ({
             action,
-            data: sessionId ? { session_id: sessionId } : {},
+            data: sessionId ? { session_id: sessionId, reason } : {},
           }),
         }
       }
@@ -141,6 +154,36 @@ describe("cancelPendingSubscriptionOnPaymentFailure", () => {
 
     await run({ staged, action: PaymentActions.CANCELED, captured })
 
+    expect(captured).toEqual([])
+  })
+
+  it("hands a failure on a dunning retry's session to the dunning handler instead of the pending-payment path", async () => {
+    const captured: UpdateCall[] = []
+    const staged = defaultStaged()
+    staged.payment_session = [
+      {
+        id: "payses_1",
+        payment_collection_id: "paycol_1",
+        context: { dunning_case_id: "dun_1", dunning_attempt_id: "dunatt_1" },
+      },
+    ]
+
+    await cancelPendingSubscriptionOnPaymentFailureHandler({
+      event: { name: PaymentWebhookEvents.WebhookReceived, data: webhookEvent },
+      container: buildContainer({
+        staged,
+        action: PaymentActions.FAILED,
+        reason: "insufficient_funds",
+        captured,
+      }),
+      pluginOptions: {},
+    })
+
+    expect(failAwaitingDunningAttempt).toHaveBeenCalledWith(expect.anything(), {
+      session_id: "payses_1",
+      action: PaymentActions.FAILED,
+      reason: "insufficient_funds",
+    })
     expect(captured).toEqual([])
   })
 

@@ -13,6 +13,7 @@ const BATCH_SIZE = 200
 const OPEN_DUNNING_STATUSES = [
   DunningCaseStatus.OPEN,
   DunningCaseStatus.RETRY_SCHEDULED,
+  DunningCaseStatus.AWAITING_PAYMENT,
   DunningCaseStatus.AWAITING_MANUAL_RESOLUTION,
 ]
 

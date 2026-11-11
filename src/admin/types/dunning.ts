@@ -72,6 +72,7 @@ export type DunningAttemptAdminRecord = {
 export type DunningRetryBlockedReason =
   | "no_active_case"
   | "retry_in_progress"
+  | "payment_in_progress"
   | "case_closed"
   | "subscription_not_retryable"
   | "no_payment_method"

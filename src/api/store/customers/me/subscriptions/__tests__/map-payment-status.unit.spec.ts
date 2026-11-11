@@ -26,20 +26,14 @@ describe("store payment status", () => {
     expect(mapPaymentStatus(status, kase)).toBe(expected)
   })
 
-  it("keeps the mapping for a subscription whose dunning case is awaiting a payment result", () => {
-    const awaiting = dunningCase(DunningCaseStatus.AWAITING_PAYMENT)
-
-    expect(mapPaymentStatus(SubscriptionStatus.PAST_DUE, awaiting)).toBe(
-      "recovery_required"
-    )
-    expect(mapPaymentStatus(SubscriptionStatus.ACTIVE, awaiting)).toBe("ok")
-    expect(mapPaymentStatus(SubscriptionStatus.PAYMENT_FAILED, awaiting)).toBe(
-      "recovery_failed"
-    )
-    expect(mapPaymentStatus(SubscriptionStatus.PENDING_PAYMENT, awaiting)).toBe(
-      "awaiting_payment"
-    )
-  })
+  it.each(Object.values(SubscriptionStatus))(
+    "shows a case awaiting a payment result on a %s subscription as a retry in progress",
+    (status) => {
+      expect(
+        mapPaymentStatus(status, dunningCase(DunningCaseStatus.AWAITING_PAYMENT))
+      ).toBe(mapPaymentStatus(status, dunningCase(DunningCaseStatus.RETRYING)))
+    }
+  )
 
   it("never returns a status outside the existing vocabulary", () => {
     const vocabulary = [

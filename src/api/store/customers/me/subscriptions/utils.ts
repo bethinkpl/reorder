@@ -351,6 +351,7 @@ export function mapPaymentStatus(
     dunningCase?.status === DunningCaseStatus.OPEN ||
     dunningCase?.status === DunningCaseStatus.RETRY_SCHEDULED ||
     dunningCase?.status === DunningCaseStatus.RETRYING ||
+    dunningCase?.status === DunningCaseStatus.AWAITING_PAYMENT ||
     dunningCase?.status === DunningCaseStatus.AWAITING_MANUAL_RESOLUTION
   ) {
     return dunningCase ? "recovery_required" : "recovery_failed"
@@ -387,7 +388,10 @@ function mapPaymentRecovery(
 
   return {
     dunning_case_id: dunningCase.id,
-    state: dunningCase.status,
+    state:
+      dunningCase.status === DunningCaseStatus.AWAITING_PAYMENT
+        ? DunningCaseStatus.RETRYING
+        : dunningCase.status,
     retry_eligible: eligibility.eligible,
     retry_blocked_reason: eligibility.blocked_reason,
     attempt_count: dunningCase.attempt_count,
@@ -491,6 +495,7 @@ const ACTIVE_DUNNING_STATUSES = [
   DunningCaseStatus.OPEN,
   DunningCaseStatus.RETRY_SCHEDULED,
   DunningCaseStatus.RETRYING,
+  DunningCaseStatus.AWAITING_PAYMENT,
   DunningCaseStatus.AWAITING_MANUAL_RESOLUTION,
 ]
 

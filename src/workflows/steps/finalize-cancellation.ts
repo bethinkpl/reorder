@@ -16,6 +16,7 @@ import {
   CancellationSubscriptionDisplayRecord,
   type CancellationLogSource,
 } from "./shared-cancellation-log"
+import { withoutPaymentContext } from "./pause-subscription"
 
 const FINALIZABLE_CANCELLATION_CASE_STATUSES = new Set<CancellationCaseStatus>([
   CancellationCaseStatus.REQUESTED,
@@ -360,7 +361,7 @@ export const finalizeCancellationStep = createStep(
 
     await cancellationModule.updateCancellationCases(compensation.previous_case as any)
     await subscriptionModule.updateSubscriptions(
-      compensation.previous_subscription as any
+      withoutPaymentContext(compensation.previous_subscription) as any
     )
   }
 )

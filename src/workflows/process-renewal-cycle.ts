@@ -2,6 +2,7 @@ import {
   createHook,
   createWorkflow,
   transform,
+  when,
   WorkflowResponse,
 } from "@medusajs/framework/workflows-sdk"
 import { acquireLockStep, releaseLockStep } from "@medusajs/medusa/core-flows"
@@ -126,24 +127,34 @@ export const processRenewalCycleWorkflow = createWorkflow(
     )
     const paymentSessionData = setPaymentSessionData.getResult()
 
-    authorizeRenewalPaymentStep({
+    const authorization = authorizeRenewalPaymentStep({
       context,
       order_result: orderResult,
       payment_session_data: paymentSessionData,
     })
 
-    const result = finalizeRenewalCycleStep({
-      context,
-      order_result: orderResult,
-    })
-
-    const ensureInput = transform({ result }, function ({ result }) {
-      return {
-        subscription_id: result.subscription_id,
+    const finalized = when(
+      "finalize-renewal-charged-now",
+      { authorization },
+      function ({ authorization }) {
+        return !authorization.charge_submitted
       }
+    ).then(function () {
+      const result = finalizeRenewalCycleStep({
+        context,
+        order_result: orderResult,
+      })
+
+      ensureNextRenewalCycleStep({
+        subscription_id: result.subscription_id,
+      })
+
+      return result
     })
 
-    ensureNextRenewalCycleStep(ensureInput)
+    const result = transform({ finalized }, function ({ finalized }) {
+      return finalized ?? null
+    })
 
     const incrementalAnalyticsInput = transform({ input }, function ({ input }) {
       return buildAnalyticsIncrementalRebuildInput({

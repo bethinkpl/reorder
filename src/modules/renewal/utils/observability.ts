@@ -13,6 +13,7 @@ export type RenewalFailureKind =
   | "duplicate_execution"
   | "cycle_superseded"
   | "customer_payment_in_progress"
+  | "awaiting_payment"
   | "subscription_not_eligible"
   | "approval_blocked"
   | "offer_policy_blocked"
@@ -35,7 +36,13 @@ type RenewalLogPayload = {
   processed_count?: number
   batch_size?: number
   job_name?: string
-  outcome?: "started" | "succeeded" | "failed" | "blocked" | "completed"
+  outcome?:
+    | "started"
+    | "succeeded"
+    | "failed"
+    | "blocked"
+    | "completed"
+    | "awaiting_payment"
   failure_kind?: RenewalFailureKind
   alertable?: boolean
   message?: string
@@ -64,6 +71,10 @@ export function classifyRenewalFailure(error: unknown): RenewalFailureKind {
   // Ahead of the order-creation rule: the message names the order the customer is paying.
   if (message.includes("the customer is paying")) {
     return "customer_payment_in_progress"
+  }
+
+  if (message.includes("is awaiting its payment")) {
+    return "awaiting_payment"
   }
 
   if (message.includes("isn't eligible for renewal")) {
@@ -104,6 +115,7 @@ export function isAlertableRenewalFailure(kind: RenewalFailureKind) {
     "duplicate_execution",
     "cycle_superseded",
     "customer_payment_in_progress",
+    "awaiting_payment",
   ].includes(kind)
 }
 

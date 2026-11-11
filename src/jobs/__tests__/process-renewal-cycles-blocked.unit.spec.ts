@@ -3,7 +3,10 @@ jest.mock("../../workflows", () => ({
 }))
 
 import { renewalErrors } from "../../modules/renewal/utils/errors"
-import { classifyRenewalFailure } from "../../modules/renewal/utils/observability"
+import {
+  classifyRenewalFailure,
+  isAlertableRenewalFailure,
+} from "../../modules/renewal/utils/observability"
 import { isBlockedRenewalOutcome } from "../process-renewal-cycles"
 
 describe("isBlockedRenewalOutcome", () => {
@@ -11,6 +14,13 @@ describe("isBlockedRenewalOutcome", () => {
     const error = renewalErrors.customerPaymentInProgress("rc_1", "order_1")
 
     expect(isBlockedRenewalOutcome(classifyRenewalFailure(error))).toBe(true)
+  })
+
+  it("counts a run refused because the cycle awaits its payment as blocked and never alertable", () => {
+    const kind = classifyRenewalFailure(renewalErrors.awaitingPayment("rc_1"))
+
+    expect(isBlockedRenewalOutcome(kind)).toBe(true)
+    expect(isAlertableRenewalFailure(kind)).toBe(false)
   })
 
   it.each([

@@ -49,7 +49,10 @@ import {
 import { toISOStringOrNull } from "../utils/date-output"
 import { recordOrderCaptureTransactions } from "../utils/record-order-capture-transactions"
 import { resolvePaymentCollection } from "../utils/resolve-payment-collection"
-import { settleRenewalCycleSucceeded } from "../utils/settle-renewal-cycle-succeeded"
+import {
+  type RenewalSettlementAudit,
+  settleRenewalCycleSucceeded,
+} from "../utils/settle-renewal-cycle-succeeded"
 import {
   computeSubscriptionDiscountAmount,
   roundCurrency,
@@ -232,6 +235,37 @@ export type RenewalOrderStepResult = {
     payment_method_id: string
     customer_id: string
   } | null
+}
+
+export type RenewalSettlementInputs = {
+  attempt_id: string
+  audit: RenewalSettlementAudit
+  source_snapshot: SubscriptionSourceSnapshot | null
+}
+
+function buildRenewalSettlementAudit(
+  context: RenewalExecutionContext
+): RenewalSettlementAudit {
+  return {
+    correlation_id: context.correlation_id,
+    trigger_type: context.trigger_type,
+    triggered_by: context.triggered_by ?? null,
+    attempt_no: context.attempt_no,
+    operation_started_at: context.operation_started_at,
+    scheduled_for: context.scheduled_for,
+    previous_state: context.cycle_previous_state,
+  }
+}
+
+function buildRenewalSettlementInputs(
+  context: RenewalExecutionContext,
+  sourceSnapshot: SubscriptionSourceSnapshot | null
+): RenewalSettlementInputs {
+  return {
+    attempt_id: context.attempt_id,
+    audit: buildRenewalSettlementAudit(context),
+    source_snapshot: sourceSnapshot,
+  }
 }
 
 function getRenewalActivityLogActorType(triggerType: "scheduler" | "manual") {
@@ -1263,6 +1297,10 @@ export const prepareRenewalCycleStep = createStep(
       throw renewalErrors.duplicateExecutionBlocked(cycle.id)
     }
 
+    if (cycle.status === RenewalCycleStatus.AWAITING_PAYMENT) {
+      throw renewalErrors.awaitingPayment(cycle.id)
+    }
+
     const subscription = await loadSubscription(container, cycle.subscription_id)
 
     logRenewalEvent(logger, "info", {
@@ -1336,6 +1374,7 @@ export const prepareRenewalCycleStep = createStep(
       attempt_count: attemptNo,
       last_error: null,
       applied_pending_update_data: appliedPendingChanges,
+      settlement_inputs: null,
       metadata: {
         ...(cycle.metadata ?? {}),
         last_trigger_type: input.trigger_type,
@@ -1491,6 +1530,16 @@ export const createRenewalOrderStep = createStep(
           subscription.product_id,
           appliedPendingChanges.variant_id
         )
+
+        await container
+          .resolve<RenewalModuleService>(RENEWAL_MODULE)
+          .updateRenewalCycles({
+            id: context.renewal_cycle_id,
+            settlement_inputs: buildRenewalSettlementInputs(
+              context,
+              resolvedSourceSnapshot
+            ),
+          })
       }
 
       return new StepResponse<RenewalOrderStepResult>({
@@ -1507,6 +1556,60 @@ export const createRenewalOrderStep = createStep(
   }
 )
 
+async function parkRenewalCycleAwaitingPayment(
+  container: MedusaContainer,
+  context: RenewalExecutionContext,
+  orderResult: RenewalOrderStepResult,
+  paymentSessionId: string
+) {
+  const renewalModule = container.resolve<RenewalModuleService>(RENEWAL_MODULE)
+  const orderId = orderResult.generated_order_id
+  const cycle = await renewalModule.retrieveRenewalCycle(context.renewal_cycle_id)
+
+  if (cycle.status === RenewalCycleStatus.SUCCEEDED) {
+    await renewalModule.updateRenewalAttempts({
+      id: context.attempt_id,
+      status: RenewalAttemptStatus.SUCCEEDED,
+      finished_at: new Date(),
+      payment_reference: paymentSessionId,
+      order_id: orderId,
+    })
+
+    return
+  }
+
+  await renewalModule.updateRenewalAttempts({
+    id: context.attempt_id,
+    payment_reference: paymentSessionId,
+    order_id: orderId,
+  })
+
+  await renewalModule.updateRenewalCycles({
+    id: context.renewal_cycle_id,
+    status: RenewalCycleStatus.AWAITING_PAYMENT,
+    settlement_inputs: buildRenewalSettlementInputs(
+      context,
+      orderResult.resolved_source_snapshot
+    ),
+  })
+
+  logRenewalEvent(container.resolve("logger"), "info", {
+    event: "renewal.execution",
+    outcome: "awaiting_payment",
+    correlation_id: context.correlation_id,
+    renewal_cycle_id: context.renewal_cycle_id,
+    subscription_id: context.subscription_id,
+    trigger_type: context.trigger_type,
+    triggered_by: context.triggered_by ?? null,
+    attempt_no: context.attempt_no,
+    duration_ms: Date.now() - context.operation_started_at,
+    metadata: {
+      generated_order_id: orderId,
+      payment_session_id: paymentSessionId,
+    },
+  })
+}
+
 export const authorizeRenewalPaymentStep = createStep(
   "authorize-renewal-payment",
   async function (
@@ -1520,7 +1623,7 @@ export const authorizeRenewalPaymentStep = createStep(
     const { context, order_result, payment_session_data } = input
 
     if (!order_result.payment) {
-      return new StepResponse(void 0)
+      return new StepResponse({ charge_submitted: false })
     }
 
     const orderId = order_result.order?.id as string
@@ -1616,13 +1719,22 @@ export const authorizeRenewalPaymentStep = createStep(
             orderId
           )
         }
+      } else {
+        await parkRenewalCycleAwaitingPayment(
+          container,
+          context,
+          order_result,
+          paymentSessionResult.result.id
+        )
+
+        return new StepResponse({ charge_submitted: true })
       }
     } catch (error) {
       await recordRenewalFailure(container, context, error)
       throw error
     }
 
-    return new StepResponse(void 0)
+    return new StepResponse({ charge_submitted: false })
   }
 )
 
@@ -1649,15 +1761,7 @@ export const finalizeRenewalCycleStep = createStep(
           attempt_id: context.attempt_id,
           source_snapshot: order_result.resolved_source_snapshot,
           source: "renewal",
-          audit: {
-            correlation_id: context.correlation_id,
-            trigger_type: context.trigger_type,
-            triggered_by: context.triggered_by ?? null,
-            attempt_no: context.attempt_no,
-            operation_started_at: context.operation_started_at,
-            scheduled_for: context.scheduled_for,
-            previous_state: context.cycle_previous_state,
-          },
+          audit: buildRenewalSettlementAudit(context),
         }
       )
 

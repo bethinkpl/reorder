@@ -48,6 +48,10 @@ export function validateRenewalApprovalTransition(
     )
   }
 
+  if (cycle.status === RenewalCycleStatus.AWAITING_PAYMENT) {
+    throw renewalErrors.awaitingPayment(cycle.id)
+  }
+
   if (cycle.status === RenewalCycleStatus.SUCCEEDED) {
     throw renewalErrors.invalidTransition(
       cycle.id,

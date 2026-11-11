@@ -84,7 +84,8 @@ export function isBlockedRenewalOutcome(failureKind: RenewalFailureKind) {
     failureKind === "already_processing" ||
     failureKind === "duplicate_execution" ||
     failureKind === "cycle_superseded" ||
-    failureKind === "customer_payment_in_progress"
+    failureKind === "customer_payment_in_progress" ||
+    failureKind === "awaiting_payment"
   )
 }
 

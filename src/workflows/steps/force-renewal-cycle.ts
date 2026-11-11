@@ -83,6 +83,10 @@ export const forceRenewalCycleStep = createStep(
         throw renewalErrors.duplicateExecutionBlocked(cycle.id)
       }
 
+      if (cycle.status === RenewalCycleStatus.AWAITING_PAYMENT) {
+        throw renewalErrors.awaitingPayment(cycle.id)
+      }
+
       if (
         cycle.status !== RenewalCycleStatus.SCHEDULED &&
         cycle.status !== RenewalCycleStatus.FAILED
@@ -140,17 +144,14 @@ export const forceRenewalCycleStep = createStep(
       })
     } catch (error) {
       const failureKind = classifyRenewalFailure(error)
-      const level =
-        failureKind === "already_processing" || failureKind === "duplicate_execution"
-          ? "warn"
-          : "error"
+      const blocked =
+        failureKind === "already_processing" ||
+        failureKind === "duplicate_execution" ||
+        failureKind === "awaiting_payment"
 
-      logRenewalEvent(logger, level, {
+      logRenewalEvent(logger, blocked ? "warn" : "error", {
         event: "renewal.force",
-        outcome:
-          failureKind === "already_processing" || failureKind === "duplicate_execution"
-            ? "blocked"
-            : "failed",
+        outcome: blocked ? "blocked" : "failed",
         correlation_id: correlationId,
         renewal_cycle_id: cycle.id,
         subscription_id: cycle.subscription_id,

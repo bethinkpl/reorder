@@ -57,6 +57,12 @@ export const renewalErrors = {
       `Renewal order creation failed for renewal '${renewalCycleId}'`
     )
   },
+  awaitingPayment(renewalCycleId: string) {
+    return new MedusaError(
+      MedusaError.Types.CONFLICT,
+      `Renewal '${renewalCycleId}' is awaiting its payment`
+    )
+  },
   customerPaymentInProgress(renewalCycleId: string, orderId: string) {
     return new MedusaError(
       MedusaError.Types.CONFLICT,

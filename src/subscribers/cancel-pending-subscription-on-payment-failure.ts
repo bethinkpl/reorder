@@ -9,6 +9,7 @@ import {
 import { SubscriptionStatus } from "../modules/subscription/types"
 import { cancelAbandonedSubscription } from "../modules/subscription/utils/cancel-abandoned-subscription"
 import { findSubscriptionIdForPaymentCollection } from "../modules/subscription/utils/find-subscription-for-payment"
+import { failAwaitingRenewalCycle } from "../workflows/utils/fail-awaiting-renewal-cycle"
 
 type WebhookEventData = {
   provider: string
@@ -22,6 +23,12 @@ type WebhookEventData = {
 type PaymentSessionRecord = {
   id: string
   payment_collection_id: string | null
+  context: Record<string, unknown> | null
+}
+
+type DecodedWebhookData = {
+  session_id?: string
+  reason?: unknown
 }
 
 type SubscriptionRecord = {
@@ -62,7 +69,8 @@ export async function cancelPendingSubscriptionOnPaymentFailure(
   }
 
   const processed = await paymentModule.getWebhookActionAndData(input as never)
-  const sessionId = (processed?.data as { session_id?: string } | undefined)?.session_id
+  const decoded = processed?.data as DecodedWebhookData | undefined
+  const sessionId = decoded?.session_id
 
   if (!processed?.action || !FAILURE_ACTIONS.includes(processed.action) || !sessionId) {
     return
@@ -72,11 +80,28 @@ export async function cancelPendingSubscriptionOnPaymentFailure(
 
   const { data: sessions } = await query.graph({
     entity: "payment_session",
-    fields: ["id", "payment_collection_id"],
+    fields: ["id", "payment_collection_id", "context"],
     filters: { id: sessionId },
   })
 
-  const paymentCollectionId = (sessions as PaymentSessionRecord[])[0]?.payment_collection_id
+  const session: PaymentSessionRecord | undefined = sessions[0]
+  const renewalCycleId = session?.context?.renewal_cycle_id
+
+  if (typeof renewalCycleId === "string" && renewalCycleId) {
+    await failAwaitingRenewalCycle(container, {
+      renewal_cycle_id: renewalCycleId,
+      session_id: sessionId,
+      action: processed.action,
+      reason:
+        typeof decoded?.reason === "string" && decoded.reason
+          ? decoded.reason
+          : null,
+    })
+
+    return
+  }
+
+  const paymentCollectionId = session?.payment_collection_id
 
   if (!paymentCollectionId) {
     return

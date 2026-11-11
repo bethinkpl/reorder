@@ -22,6 +22,7 @@ import {
 } from "../../modules/activity-log/types"
 import { processRenewalCycleWorkflow } from "../process-renewal-cycle"
 import { persistSubscriptionLogEvent } from "./create-subscription-log-event"
+import { assertNoDunningOwnsFailedCycle } from "./process-renewal-cycle"
 
 export type ForceRenewalCycleStepInput = {
   renewal_cycle_id: string
@@ -87,6 +88,8 @@ export const forceRenewalCycleStep = createStep(
         throw renewalErrors.awaitingPayment(cycle.id)
       }
 
+      await assertNoDunningOwnsFailedCycle(container, cycle)
+
       if (
         cycle.status !== RenewalCycleStatus.SCHEDULED &&
         cycle.status !== RenewalCycleStatus.FAILED
@@ -147,7 +150,8 @@ export const forceRenewalCycleStep = createStep(
       const blocked =
         failureKind === "already_processing" ||
         failureKind === "duplicate_execution" ||
-        failureKind === "awaiting_payment"
+        failureKind === "awaiting_payment" ||
+        failureKind === "dunning_owns_cycle"
 
       logRenewalEvent(logger, blocked ? "warn" : "error", {
         event: "renewal.force",

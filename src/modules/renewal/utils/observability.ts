@@ -14,6 +14,7 @@ export type RenewalFailureKind =
   | "cycle_superseded"
   | "customer_payment_in_progress"
   | "awaiting_payment"
+  | "dunning_owns_cycle"
   | "subscription_not_eligible"
   | "approval_blocked"
   | "offer_policy_blocked"
@@ -32,6 +33,7 @@ type RenewalLogPayload = {
   success_count?: number
   failure_count?: number
   blocked_count?: number
+  awaiting_count?: number
   scanned_count?: number
   processed_count?: number
   batch_size?: number
@@ -77,6 +79,10 @@ export function classifyRenewalFailure(error: unknown): RenewalFailureKind {
     return "awaiting_payment"
   }
 
+  if (message.includes("is handled by an active dunning case")) {
+    return "dunning_owns_cycle"
+  }
+
   if (message.includes("isn't eligible for renewal")) {
     return "subscription_not_eligible"
   }
@@ -116,6 +122,7 @@ export function isAlertableRenewalFailure(kind: RenewalFailureKind) {
     "cycle_superseded",
     "customer_payment_in_progress",
     "awaiting_payment",
+    "dunning_owns_cycle",
   ].includes(kind)
 }
 

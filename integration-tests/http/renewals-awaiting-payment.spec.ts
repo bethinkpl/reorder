@@ -5,11 +5,7 @@ import type {
   Logger,
   MedusaContainer,
 } from "@medusajs/framework/types"
-import {
-  ContainerRegistrationKeys,
-  MedusaError,
-  Modules,
-} from "@medusajs/framework/utils"
+import { MedusaError, Modules } from "@medusajs/framework/utils"
 import { ACTIVITY_LOG_MODULE } from "../../src/modules/activity-log"
 import type ActivityLogModuleService from "../../src/modules/activity-log/service"
 import { ActivityLogEventType } from "../../src/modules/activity-log/types"
@@ -39,15 +35,16 @@ import {
   processRenewalCycleWorkflow,
 } from "../../src/workflows"
 import { FrequencyInterval } from "../../src/common/types/frequency-interval"
-import { createPaymentSessionFixture } from "../helpers/payment-fixtures"
 import { createPlanOfferSeed } from "../helpers/plan-offer-fixtures"
+import {
+  answerAuthorizationWithNull,
+  createRenewalChargeStub,
+} from "../helpers/renewal-charge-fixtures"
 import {
   createRenewalAttemptSeed,
   createRenewalCycleSeed,
   createSubscriptionSeed,
 } from "../helpers/renewal-fixtures"
-
-const RENEWAL_AMOUNT = 129
 
 const mockCreateOrderRun = jest.fn()
 const mockCreateOrUpdateOrderPaymentCollectionRun = jest.fn()
@@ -70,125 +67,12 @@ jest.mock("@medusajs/medusa/core-flows", () => {
   }
 })
 
-type GraphInput = {
-  entity: string
-  fields: string[]
-  filters?: { id?: string | string[] }
-}
-
-type GraphQuery = {
-  graph: (input: GraphInput) => Promise<{ data: unknown[] }>
-}
-
-type SubscriptionSeed = Awaited<ReturnType<typeof createSubscriptionSeed>>
-
-type RenewalChargeStub = {
-  subscription: SubscriptionSeed
-  order_id: string
-  order_item?: SubscriptionSourceSnapshot
-}
-
-function targetsOrder(input: GraphInput, orderId: string) {
-  const id = input.filters?.id
-
-  return Array.isArray(id) ? id.includes(orderId) : id === orderId
-}
-
-function stubRenewalCharge(container: MedusaContainer, stub: RenewalChargeStub) {
-  const query = container.resolve<GraphQuery>(ContainerRegistrationKeys.QUERY)
-  const originalGraph = query.graph.bind(query)
-  const sessionIds: string[] = []
-
-  jest.spyOn(query, "graph").mockImplementation(async (input) => {
-    if (input.entity === "cart") {
-      return {
-        data: [
-          {
-            id: stub.subscription.cart_id,
-            region_id: "reg_test",
-            sales_channel_id: "sc_test",
-            currency_code: "pln",
-            email: "customer@example.com",
-            customer_id: stub.subscription.customer_id,
-            shipping_address: {
-              first_name: "Jan",
-              last_name: "Kowalski",
-              country_code: "PL",
-            },
-            billing_address: null,
-            items: [
-              {
-                title: "Cart Item",
-                quantity: 1,
-                unit_price: 9999,
-                variant_id: stub.subscription.variant_id,
-                variant_title: "Cart Variant",
-                variant_sku: "CART-SKU",
-                requires_shipping: true,
-                is_discountable: true,
-              },
-            ],
-            shipping_methods: [],
-          },
-        ],
-      }
-    }
-
-    if (input.entity === "order" && targetsOrder(input, stub.order_id)) {
-      if (input.fields.includes("items.unit_price")) {
-        return {
-          data: [
-            {
-              id: stub.order_id,
-              items: stub.order_item
-                ? [{ ...stub.order_item, variant_sku: stub.order_item.sku }]
-                : [],
-            },
-          ],
-        }
-      }
-
-      return {
-        data: [
-          {
-            id: stub.order_id,
-            total: RENEWAL_AMOUNT,
-            summary: { pending_difference: RENEWAL_AMOUNT },
-          },
-        ],
-      }
-    }
-
-    return originalGraph(input)
-  })
-
-  mockCreateOrderRun.mockResolvedValue({ result: { id: stub.order_id } })
-  mockCreateOrUpdateOrderPaymentCollectionRun.mockResolvedValue({
-    result: [{ id: `paycol_${stub.order_id}` }],
-  })
-  mockCreatePaymentSessionsRun.mockImplementation(
-    async ({ input }: { input: { context?: Record<string, unknown> } }) => {
-      const { session } = await createPaymentSessionFixture(container, {
-        amount: RENEWAL_AMOUNT,
-        context: input.context,
-      })
-
-      sessionIds.push(session.id)
-
-      return { result: session }
-    }
-  )
-
-  return { sessionIds }
-}
-
-function answerAuthorizationWithNull(container: MedusaContainer) {
-  const paymentModule = container.resolve<IPaymentModuleService>(Modules.PAYMENT)
-
-  jest
-    .spyOn(paymentModule, "authorizePaymentSession")
-    .mockResolvedValue(null as never)
-}
+const stubRenewalCharge = createRenewalChargeStub({
+  createOrderRun: mockCreateOrderRun,
+  createOrUpdateOrderPaymentCollectionRun:
+    mockCreateOrUpdateOrderPaymentCollectionRun,
+  createPaymentSessionsRun: mockCreatePaymentSessionsRun,
+})
 
 function spyOnRenewalLog(container: MedusaContainer) {
   const logger = container.resolve<Logger>("logger")

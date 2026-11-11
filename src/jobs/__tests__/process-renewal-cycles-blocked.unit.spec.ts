@@ -24,6 +24,15 @@ describe("isBlockedRenewalOutcome", () => {
   })
 
   it.each([
+    ["a dunning case owns the failed cycle", renewalErrors.dunningOwnsCycle],
+  ])("counts a run refused because %s as blocked and never alertable", (_name, factory) => {
+    const kind = classifyRenewalFailure(factory("rc_1"))
+
+    expect(isBlockedRenewalOutcome(kind)).toBe(true)
+    expect(isAlertableRenewalFailure(kind)).toBe(false)
+  })
+
+  it.each([
     "already_processing",
     "duplicate_execution",
     "cycle_superseded",

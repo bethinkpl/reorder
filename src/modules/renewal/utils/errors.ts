@@ -63,6 +63,12 @@ export const renewalErrors = {
       `Renewal '${renewalCycleId}' is awaiting its payment`
     )
   },
+  dunningOwnsCycle(renewalCycleId: string) {
+    return new MedusaError(
+      MedusaError.Types.CONFLICT,
+      `Renewal '${renewalCycleId}' is handled by an active dunning case`
+    )
+  },
   customerPaymentInProgress(renewalCycleId: string, orderId: string) {
     return new MedusaError(
       MedusaError.Types.CONFLICT,

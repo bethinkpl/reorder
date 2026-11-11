@@ -56,7 +56,8 @@
             "scheduled",
             "processing",
             "succeeded",
-            "failed"
+            "failed",
+            "awaiting_payment"
           ],
           "mappedType": "enum"
         },
@@ -123,6 +124,15 @@
         },
         "applied_pending_update_data": {
           "name": "applied_pending_update_data",
+          "type": "jsonb",
+          "unsigned": false,
+          "autoincrement": false,
+          "primary": false,
+          "nullable": true,
+          "mappedType": "json"
+        },
+        "settlement_inputs": {
+          "name": "settlement_inputs",
           "type": "jsonb",
           "unsigned": false,
           "autoincrement": false,

@@ -5,6 +5,7 @@ export enum RenewalCycleStatus {
   PROCESSING = "processing",
   SUCCEEDED = "succeeded",
   FAILED = "failed",
+  AWAITING_PAYMENT = "awaiting_payment",
 }
 
 export enum RenewalAttemptStatus {

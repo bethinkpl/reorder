@@ -334,7 +334,7 @@ export async function retrieveOwnedSubscriptionDetail(
   })
 }
 
-function mapPaymentStatus(
+export function mapPaymentStatus(
   subscriptionStatus: string,
   dunningCase: DunningCaseRecord | null
 ) {

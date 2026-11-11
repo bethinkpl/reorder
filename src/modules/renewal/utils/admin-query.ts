@@ -44,7 +44,12 @@ type RenewalCycleRecord = {
   subscription_id: string
   scheduled_for: string
   processed_at: string | null
-  status: "scheduled" | "processing" | "succeeded" | "failed"
+  status:
+    | "scheduled"
+    | "processing"
+    | "succeeded"
+    | "failed"
+    | "awaiting_payment"
   approval_required: boolean
   approval_status: "pending" | "approved" | "rejected" | null
   approval_decided_at: string | null
@@ -210,7 +215,7 @@ function assertSortableField(order?: string) {
   }
 }
 
-function mapCycleStatus(status: RenewalCycleRecord["status"]) {
+export function mapCycleStatus(status: RenewalCycleRecord["status"]) {
   switch (status) {
     case RenewalCycleStatus.SCHEDULED:
       return RenewalCycleAdminStatus.SCHEDULED
@@ -220,6 +225,8 @@ function mapCycleStatus(status: RenewalCycleRecord["status"]) {
       return RenewalCycleAdminStatus.SUCCEEDED
     case RenewalCycleStatus.FAILED:
       return RenewalCycleAdminStatus.FAILED
+    case RenewalCycleStatus.AWAITING_PAYMENT:
+      return RenewalCycleAdminStatus.AWAITING_PAYMENT
   }
 
   throw renewalErrors.invalidData(`Unsupported renewal cycle status '${status}'`)

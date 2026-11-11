@@ -8,6 +8,7 @@ const renewalCycleStatusSchema = z.enum([
   "processing",
   "succeeded",
   "failed",
+  "awaiting_payment",
 ])
 
 const renewalApprovalStatusSchema = z.enum([

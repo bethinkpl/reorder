@@ -42,6 +42,7 @@ export type CancellationAdminDunningSummary = {
     | "open"
     | "retry_scheduled"
     | "retrying"
+    | "awaiting_payment"
     | "awaiting_manual_resolution"
     | "recovered"
     | "unrecovered"
@@ -52,7 +53,12 @@ export type CancellationAdminDunningSummary = {
 
 export type CancellationAdminRenewalSummary = {
   renewal_cycle_id: string
-  status: "scheduled" | "processing" | "succeeded" | "failed"
+  status:
+    | "scheduled"
+    | "processing"
+    | "succeeded"
+    | "failed"
+    | "awaiting_payment"
   scheduled_for: string
   approval_status: "pending" | "approved" | "rejected" | null
   generated_order_id: string | null

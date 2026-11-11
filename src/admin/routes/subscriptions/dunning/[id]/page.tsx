@@ -1100,6 +1100,8 @@ function formatCaseStatus(status: DunningCaseAdminStatus) {
       return "Retry scheduled"
     case DunningCaseAdminStatus.RETRYING:
       return "Retrying"
+    case DunningCaseAdminStatus.AWAITING_PAYMENT:
+      return "Awaiting payment"
     case DunningCaseAdminStatus.AWAITING_MANUAL_RESOLUTION:
       return "Awaiting manual resolution"
     case DunningCaseAdminStatus.RECOVERED:
@@ -1144,6 +1146,8 @@ function getCaseStatusColor(status: DunningCaseAdminStatus) {
     case DunningCaseAdminStatus.RETRY_SCHEDULED:
       return "orange"
     case DunningCaseAdminStatus.RETRYING:
+      return "blue"
+    case DunningCaseAdminStatus.AWAITING_PAYMENT:
       return "blue"
     case DunningCaseAdminStatus.AWAITING_MANUAL_RESOLUTION:
       return "grey"

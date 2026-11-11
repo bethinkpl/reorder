@@ -54,6 +54,30 @@ export const config: SubscriberConfig = {
   },
 }
 
+async function reportingFailure(
+  container: MedusaContainer,
+  context: {
+    event: string
+    payment_session_id: string
+    renewal_cycle_id?: string
+    dunning_case_id?: string
+  },
+  run: () => Promise<unknown>
+) {
+  try {
+    await run()
+  } catch (error) {
+    container.resolve("logger").error(
+      JSON.stringify({
+        domain: "subscriptions",
+        ...context,
+        alertable: true,
+        message: error instanceof Error ? error.message : String(error),
+      })
+    )
+  }
+}
+
 export async function cancelPendingSubscriptionOnPaymentFailure(
   container: MedusaContainer,
   data: WebhookEventData
@@ -92,22 +116,40 @@ export async function cancelPendingSubscriptionOnPaymentFailure(
     typeof decoded?.reason === "string" && decoded.reason ? decoded.reason : null
 
   if (typeof renewalCycleId === "string" && renewalCycleId) {
-    await failAwaitingRenewalCycle(container, {
-      renewal_cycle_id: renewalCycleId,
-      session_id: sessionId,
-      action: processed.action,
-      reason,
-    })
+    await reportingFailure(
+      container,
+      {
+        event: "renewal_payment_failure_handling_failed",
+        payment_session_id: sessionId,
+        renewal_cycle_id: renewalCycleId,
+      },
+      () =>
+        failAwaitingRenewalCycle(container, {
+          renewal_cycle_id: renewalCycleId,
+          session_id: sessionId,
+          action: processed.action,
+          reason,
+        })
+    )
 
     return
   }
 
   if (typeof dunningCaseId === "string" && dunningCaseId) {
-    await failAwaitingDunningAttempt(container, {
-      session_id: sessionId,
-      action: processed.action,
-      reason,
-    })
+    await reportingFailure(
+      container,
+      {
+        event: "dunning_payment_failure_handling_failed",
+        payment_session_id: sessionId,
+        dunning_case_id: dunningCaseId,
+      },
+      () =>
+        failAwaitingDunningAttempt(container, {
+          session_id: sessionId,
+          action: processed.action,
+          reason,
+        })
+    )
 
     return
   }

@@ -32,6 +32,11 @@ import type { RenewalSettlementAudit } from "./settle-renewal-cycle-succeeded"
 
 const LOCK_TIMEOUT_SECONDS = 30
 
+const LOCK_WORTHY_STATUSES: readonly RenewalCycleStatus[] = [
+  RenewalCycleStatus.AWAITING_PAYMENT,
+  RenewalCycleStatus.PROCESSING,
+]
+
 const DUNNING_SUBSCRIPTION_STATUSES = new Set<SubscriptionStatus>([
   SubscriptionStatus.ACTIVE,
   SubscriptionStatus.PAST_DUE,
@@ -61,9 +66,16 @@ type RenewalCycleRecord = {
 type RenewalAttemptRecord = {
   id: string
   attempt_no: number
+  status: RenewalAttemptStatus
+  payment_reference: string | null
   order_id: string | null
   metadata: Record<string, unknown> | null
 }
+
+const SUBMITTED_ATTEMPT_STATUSES: readonly RenewalAttemptStatus[] = [
+  RenewalAttemptStatus.PROCESSING,
+  RenewalAttemptStatus.FAILED,
+]
 
 function readSettlementAudit(
   settlementInputs: Record<string, unknown> | null
@@ -100,18 +112,24 @@ async function loadCycle(
   return (cycle as RenewalCycleRecord | undefined) ?? null
 }
 
-async function findAwaitingAttempt(
+/**
+ * The cycle's latest attempt, when it charged on this session. A `failed` one is a failure that was
+ * recorded before the cycle write fell over, which a redelivered event has to finish.
+ */
+async function findAttemptForSession(
   renewalModule: RenewalModuleService,
   cycleId: string,
   sessionId: string
 ): Promise<RenewalAttemptRecord | null> {
-  const [attempt] = await renewalModule.listRenewalAttempts({
-    renewal_cycle_id: cycleId,
-    status: RenewalAttemptStatus.PROCESSING,
-    payment_reference: sessionId,
-  })
+  const [latest] = await renewalModule.listRenewalAttempts(
+    { renewal_cycle_id: cycleId },
+    { order: { attempt_no: "DESC" }, take: 1 }
+  )
 
-  return attempt ?? null
+  return latest?.payment_reference === sessionId &&
+    SUBMITTED_ATTEMPT_STATUSES.includes(latest.status)
+    ? latest
+    : null
 }
 
 export async function failAwaitingRenewalCycle(
@@ -122,7 +140,7 @@ export async function failAwaitingRenewalCycle(
 
   const cycle = await loadCycle(renewalModule, input.renewal_cycle_id)
 
-  if (!cycle || cycle.status !== RenewalCycleStatus.AWAITING_PAYMENT) {
+  if (!cycle || !LOCK_WORTHY_STATUSES.includes(cycle.status)) {
     return
   }
 
@@ -153,7 +171,7 @@ export async function failAwaitingRenewalCycleUnderLock(
     return false
   }
 
-  const attempt = await findAwaitingAttempt(
+  const attempt = await findAttemptForSession(
     renewalModule,
     cycle.id,
     input.session_id
@@ -183,14 +201,16 @@ export async function failAwaitingRenewalCycleUnderLock(
     typeof attempt.metadata?.reason === "string" ? attempt.metadata.reason : null
   const appliedPendingChanges = cycle.applied_pending_update_data
 
-  await renewalModule.updateRenewalAttempts({
-    id: attempt.id,
-    status: RenewalAttemptStatus.FAILED,
-    finished_at: finishedAt,
-    error_code: errorCode,
-    error_message: message,
-    order_id: orderId,
-  })
+  if (attempt.status === RenewalAttemptStatus.PROCESSING) {
+    await renewalModule.updateRenewalAttempts({
+      id: attempt.id,
+      status: RenewalAttemptStatus.FAILED,
+      finished_at: finishedAt,
+      error_code: errorCode,
+      error_message: message,
+      order_id: orderId,
+    })
+  }
 
   await renewalModule.updateRenewalCycles({
     id: cycle.id,

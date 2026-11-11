@@ -1071,16 +1071,6 @@ async function awaitProviderAnswer(
   input: AwaitProviderAnswerInput
 ): Promise<StepResponse<RunDunningRetryStepOutput>> {
   const dunningModule = container.resolve<DunningModuleService>(DUNNING_MODULE)
-
-  // Written before the attempt row so that the step's catch returns the wait instead of rolling the
-  // case back to a retry that would replace the pending session.
-  await dunningModule.updateDunningCases({
-    id: input.dunningCase.id,
-    status: DunningCaseStatus.AWAITING_PAYMENT,
-    next_retry_at: null,
-    metadata: input.caseMetadata,
-  })
-
   const output: RunDunningRetryStepOutput = {
     dunning_case_id: input.dunningCase.id,
     dunning_attempt_id: input.attempt.id,
@@ -1097,6 +1087,37 @@ async function awaitProviderAnswer(
     recovery_reason: null,
     park_reason: null,
     attempt_counted: true,
+  }
+
+  // Written before the attempt row so that the step's catch returns the wait instead of rolling the
+  // case back to a retry that would replace the pending session.
+  try {
+    await dunningModule.updateDunningCases({
+      id: input.dunningCase.id,
+      status: DunningCaseStatus.AWAITING_PAYMENT,
+      next_retry_at: null,
+      metadata: input.caseMetadata,
+    })
+  } catch (error) {
+    logDunningEvent(container.resolve("logger"), "error", {
+      event: "dunning.retry",
+      outcome: "failed",
+      correlation_id: input.correlationId,
+      dunning_case_id: input.dunningCase.id,
+      subscription_id: input.dunningCase.subscription_id,
+      renewal_cycle_id: input.dunningCase.renewal_cycle_id,
+      attempt_no: input.attemptNo,
+      duration_ms: input.durationMs,
+      failure_count: 1,
+      alertable: true,
+      message: `DunningCase '${input.dunningCase.id}' submitted its retry charge on payment session '${input.paymentReference}' but could not be marked as awaiting it; it stays 'retrying' until the payment's capture recovers it: ${getDunningErrorMessage(error)}`,
+      metadata: {
+        retry_outcome: "awaiting_payment",
+        payment_reference: input.paymentReference,
+      },
+    })
+
+    return new StepResponse<RunDunningRetryStepOutput>(output)
   }
 
   input.markCaseParked(output)
@@ -1769,18 +1790,20 @@ export async function settleDeclinedRetryAttempt(
   const logger = container.resolve("logger")
   const dunningModule = container.resolve<DunningModuleService>(DUNNING_MODULE)
 
-  await dunningModule.updateDunningAttempts({
-    id: attempt.id,
-    finished_at: finishedAt,
-    status: DunningAttemptStatus.FAILED,
-    error_code: outcome.error_code,
-    error_message: outcome.error_message,
-    payment_reference: outcome.payment_reference,
-    metadata: {
-      ...(attempt.metadata ?? {}),
-      provider_reached: outcome.provider_reached,
-    },
-  } as any)
+  if (attempt.status !== DunningAttemptStatus.FAILED) {
+    await dunningModule.updateDunningAttempts({
+      id: attempt.id,
+      finished_at: finishedAt,
+      status: DunningAttemptStatus.FAILED,
+      error_code: outcome.error_code,
+      error_message: outcome.error_message,
+      payment_reference: outcome.payment_reference,
+      metadata: {
+        ...(attempt.metadata ?? {}),
+        provider_reached: outcome.provider_reached,
+      },
+    } as any)
+  }
 
   const shouldCloseAsUnrecovered =
     outcome.kind === "permanent_failure" ||

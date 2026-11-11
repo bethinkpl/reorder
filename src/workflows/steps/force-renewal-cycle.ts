@@ -75,6 +75,8 @@ export const forceRenewalCycleStep = createStep(
       triggered_by: input.triggered_by ?? null,
     })
 
+    let parked = false
+
     try {
       if (cycle.status === RenewalCycleStatus.PROCESSING) {
         throw renewalErrors.alreadyProcessing(cycle.id)
@@ -136,7 +138,7 @@ export const forceRenewalCycleStep = createStep(
         },
       }))
 
-      await processRenewalCycleWorkflow(container).run({
+      const { result } = await processRenewalCycleWorkflow(container).run({
         input: {
           renewal_cycle_id: cycle.id,
           trigger_type: "manual",
@@ -145,6 +147,11 @@ export const forceRenewalCycleStep = createStep(
           correlation_id: correlationId,
         },
       })
+
+      parked =
+        !result &&
+        (await renewalModule.retrieveRenewalCycle(cycle.id, { select: ["status"] }))
+          .status === RenewalCycleStatus.AWAITING_PAYMENT
     } catch (error) {
       const failureKind = classifyRenewalFailure(error)
       const blocked =
@@ -171,13 +178,13 @@ export const forceRenewalCycleStep = createStep(
 
     logRenewalEvent(logger, "info", {
       event: "renewal.force",
-      outcome: "succeeded",
+      outcome: parked ? "awaiting_payment" : "succeeded",
       correlation_id: correlationId,
       renewal_cycle_id: cycle.id,
       subscription_id: cycle.subscription_id,
       trigger_type: "manual",
       triggered_by: input.triggered_by ?? null,
-      success_count: 1,
+      success_count: parked ? 0 : 1,
       failure_count: 0,
     })
 

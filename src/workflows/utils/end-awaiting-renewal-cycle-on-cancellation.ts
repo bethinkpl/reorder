@@ -1,4 +1,5 @@
 import type { MedusaContainer } from "@medusajs/framework/types"
+import { Modules } from "@medusajs/framework/utils"
 import { ACTIVITY_LOG_MODULE } from "../../modules/activity-log"
 import type ActivityLogModuleService from "../../modules/activity-log/service"
 import {
@@ -20,6 +21,7 @@ import type {
 import { toISOStringOrNull } from "./date-output"
 
 const CANCELLATION_ERROR_CODE = "subscription_cancelled"
+const RENEWAL_LOCK_TIMEOUT_SECONDS = 30
 
 export type EndedAwaitingRenewalCycle = {
   cycle: {
@@ -44,6 +46,8 @@ export type EndAwaitingRenewalCyclesOnCancellationInput = {
   actor_id: string | null
   reason: string | null
   source: CancellationLogSource
+  /** The caller holds `renewal:subscription:<id>` already; the lock is not re-entrant. */
+  already_locked?: boolean
 }
 
 function toDateOrNull(value: string | null) {
@@ -51,6 +55,23 @@ function toDateOrNull(value: string | null) {
 }
 
 export async function endAwaitingRenewalCyclesOnCancellation(
+  container: MedusaContainer,
+  input: EndAwaitingRenewalCyclesOnCancellationInput
+): Promise<EndedAwaitingRenewalCycle[]> {
+  if (input.already_locked) {
+    return await endAwaitingRenewalCyclesUnderLock(container, input)
+  }
+
+  return await container
+    .resolve(Modules.LOCKING)
+    .execute(
+      `renewal:subscription:${input.subscription.id}`,
+      () => endAwaitingRenewalCyclesUnderLock(container, input),
+      { timeout: RENEWAL_LOCK_TIMEOUT_SECONDS }
+    )
+}
+
+async function endAwaitingRenewalCyclesUnderLock(
   container: MedusaContainer,
   input: EndAwaitingRenewalCyclesOnCancellationInput
 ): Promise<EndedAwaitingRenewalCycle[]> {

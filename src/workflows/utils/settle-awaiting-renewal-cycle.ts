@@ -15,9 +15,11 @@ import type SubscriptionModuleService from "../../modules/subscription/service"
 import { TERMINAL_SUBSCRIPTION_STATUSES } from "../../modules/subscription/types"
 import { ensureNextRenewalCycleWorkflow } from "../ensure-next-renewal-cycle"
 import { loadOrderAmounts } from "../steps/run-dunning-retry"
+import { toISOStringOrNull } from "./date-output"
 import {
   readStoredSettlementInputs,
   settleRenewalCycleSucceeded,
+  type StoredRenewalSettlementInputs,
 } from "./settle-renewal-cycle-succeeded"
 
 const RENEWAL_LOCK_TIMEOUT_SECONDS = 30
@@ -34,17 +36,104 @@ export type SettleAwaitingRenewalCycleOutcome =
   | "order_unpaid"
   | "subscription_terminal"
 
+type RenewalCycleRecord = Awaited<
+  ReturnType<RenewalModuleService["retrieveRenewalCycle"]>
+>
+
+type RenewalAttemptRecord = Awaited<
+  ReturnType<RenewalModuleService["listRenewalAttempts"]>
+>[number]
+
+async function findSubmittedAttempt(
+  renewalModule: RenewalModuleService,
+  renewalCycleId: string
+): Promise<RenewalAttemptRecord | null> {
+  const [latest] = await renewalModule.listRenewalAttempts(
+    { renewal_cycle_id: renewalCycleId },
+    { order: { attempt_no: "DESC" }, take: 1 }
+  )
+
+  return latest?.status === RenewalAttemptStatus.PROCESSING &&
+    latest.payment_reference
+    ? latest
+    : null
+}
+
+function readMetadataString(
+  metadata: Record<string, unknown> | null,
+  key: string
+): string | null {
+  const value = metadata?.[key]
+
+  return typeof value === "string" ? value : null
+}
+
+function settlementInputsOfSubmittedAttempt(
+  cycle: RenewalCycleRecord,
+  attempt: RenewalAttemptRecord
+): StoredRenewalSettlementInputs {
+  const stored = readStoredSettlementInputs(cycle.settlement_inputs)
+
+  if (stored.attempt_id === attempt.id) {
+    return stored
+  }
+
+  return {
+    attempt_id: attempt.id,
+    audit: {
+      correlation_id:
+        readMetadataString(cycle.metadata, "last_correlation_id") ??
+        createRenewalCorrelationId("renewal-awaiting-payment"),
+      trigger_type:
+        readMetadataString(cycle.metadata, "last_trigger_type") === "manual"
+          ? "manual"
+          : "scheduler",
+      triggered_by: readMetadataString(cycle.metadata, "last_triggered_by"),
+      attempt_no: attempt.attempt_no,
+      operation_started_at: new Date(attempt.started_at).getTime(),
+      scheduled_for: new Date(cycle.scheduled_for).toISOString(),
+      previous_state: {
+        status: cycle.status,
+        attempt_count: cycle.attempt_count,
+        processed_at: toISOStringOrNull(cycle.processed_at),
+        generated_order_id: cycle.generated_order_id,
+        last_error: cycle.last_error,
+      },
+    },
+    source_snapshot: null,
+  }
+}
+
+/**
+ * `include_processing` also settles a `processing` cycle whose latest attempt carries a submitted
+ * charge: a run that could not park it. Only safe under the renewal lock, which a live run holds.
+ */
 export async function settleAwaitingRenewalCycleUnderLock(
   container: MedusaContainer,
-  renewalCycleId: string
+  renewalCycleId: string,
+  options: { include_processing?: boolean } = {}
 ): Promise<SettleAwaitingRenewalCycleOutcome> {
   const renewalModule = container.resolve<RenewalModuleService>(RENEWAL_MODULE)
   const subscriptionModule =
     container.resolve<SubscriptionModuleService>(SUBSCRIPTION_MODULE)
 
   const cycle = await renewalModule.retrieveRenewalCycle(renewalCycleId)
+  let stored: StoredRenewalSettlementInputs
 
-  if (cycle.status !== RenewalCycleStatus.AWAITING_PAYMENT) {
+  if (cycle.status === RenewalCycleStatus.AWAITING_PAYMENT) {
+    stored = readStoredSettlementInputs(cycle.settlement_inputs)
+  } else if (
+    options.include_processing &&
+    cycle.status === RenewalCycleStatus.PROCESSING
+  ) {
+    const attempt = await findSubmittedAttempt(renewalModule, cycle.id)
+
+    if (!attempt) {
+      return "not_awaiting"
+    }
+
+    stored = settlementInputsOfSubmittedAttempt(cycle, attempt)
+  } else {
     return "not_awaiting"
   }
 
@@ -62,7 +151,6 @@ export async function settleAwaitingRenewalCycleUnderLock(
     return "subscription_terminal"
   }
 
-  const stored = readStoredSettlementInputs(cycle.settlement_inputs)
   const finishedAt = new Date()
 
   const settlement = await settleRenewalCycleSucceeded(container, {
@@ -140,7 +228,10 @@ export async function settleAwaitingRenewalCycle(
     .resolve(Modules.LOCKING)
     .execute(
       `renewal:subscription:${cycle.subscription_id}`,
-      () => settleAwaitingRenewalCycleUnderLock(container, renewalCycleId),
+      () =>
+        settleAwaitingRenewalCycleUnderLock(container, renewalCycleId, {
+          include_processing: true,
+        }),
       { timeout: RENEWAL_LOCK_TIMEOUT_SECONDS }
     )
 }

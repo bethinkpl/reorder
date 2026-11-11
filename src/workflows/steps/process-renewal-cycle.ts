@@ -1462,6 +1462,12 @@ export const prepareRenewalCycleStep = createStep(
         return
       }
 
+      const attempt = await renewalModule.retrieveRenewalAttempt(context.attempt_id)
+
+      if (attempt.payment_reference) {
+        return
+      }
+
       const finishedAt = new Date()
       const message = "Renewal workflow aborted before completing"
 
@@ -1645,6 +1651,40 @@ async function parkRenewalCycleAwaitingPayment(
   })
 }
 
+async function parkOrReportRenewalCycle(
+  container: MedusaContainer,
+  context: RenewalExecutionContext,
+  orderResult: RenewalOrderStepResult,
+  paymentSessionId: string
+) {
+  try {
+    await parkRenewalCycleAwaitingPayment(
+      container,
+      context,
+      orderResult,
+      paymentSessionId
+    )
+  } catch (error) {
+    logRenewalEvent(container.resolve("logger"), "error", {
+      event: "renewal.awaiting_payment_park",
+      outcome: "failed",
+      correlation_id: context.correlation_id,
+      renewal_cycle_id: context.renewal_cycle_id,
+      subscription_id: context.subscription_id,
+      trigger_type: context.trigger_type,
+      triggered_by: context.triggered_by ?? null,
+      attempt_no: context.attempt_no,
+      duration_ms: Date.now() - context.operation_started_at,
+      alertable: true,
+      message: `RenewalCycle '${context.renewal_cycle_id}' submitted its charge on payment session '${paymentSessionId}' but could not be parked to await it; it stays 'processing' until the payment's capture settles it: ${getRenewalErrorMessage(error)}`,
+      metadata: {
+        payment_session_id: paymentSessionId,
+        generated_order_id: orderResult.generated_order_id,
+      },
+    })
+  }
+}
+
 export const authorizeRenewalPaymentStep = createStep(
   "authorize-renewal-payment",
   async function (
@@ -1755,7 +1795,7 @@ export const authorizeRenewalPaymentStep = createStep(
           )
         }
       } else {
-        await parkRenewalCycleAwaitingPayment(
+        await parkOrReportRenewalCycle(
           container,
           context,
           order_result,

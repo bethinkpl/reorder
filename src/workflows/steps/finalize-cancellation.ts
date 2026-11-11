@@ -74,6 +74,8 @@ export type FinalizeCancellationStepInput = {
   effective_at?: "immediately" | "end_of_cycle"
   source?: CancellationLogSource
   metadata?: Record<string, unknown> | null
+  /** The caller holds `renewal:subscription:<id>` already. */
+  already_locked?: boolean
 }
 
 type FinalizeCancellationStepOutput = {
@@ -339,6 +341,7 @@ export const finalizeCancellationStep = createStep(
         actor_id: input.finalized_by ?? null,
         reason,
         source: input.source ?? "admin",
+        already_locked: input.already_locked,
       }
     )
 

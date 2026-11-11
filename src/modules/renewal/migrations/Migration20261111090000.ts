@@ -12,7 +12,8 @@ export class Migration20261111090000 extends Migration {
   override async down(): Promise<void> {
     this.addSql(`alter table if exists "renewal_cycle" drop constraint if exists "renewal_cycle_status_check";`);
 
-    this.addSql(`update "renewal_cycle" set "status" = 'failed' where "status" = 'awaiting_payment';`);
+    // 'processing' is the one old status no run charges again ('failed' is re-run); such a cycle is settled or failed by hand.
+    this.addSql(`update "renewal_cycle" set "status" = 'processing' where "status" = 'awaiting_payment';`);
 
     this.addSql(`alter table if exists "renewal_cycle" drop column if exists "settlement_inputs";`);
 

@@ -20,6 +20,11 @@ import {
 
 const LOCK_TIMEOUT_SECONDS = 30
 
+const LOCK_WORTHY_STATUSES: readonly DunningCaseStatus[] = [
+  DunningCaseStatus.AWAITING_PAYMENT,
+  DunningCaseStatus.RETRYING,
+]
+
 export type FailAwaitingDunningAttemptInput = {
   session_id: string
   action: string
@@ -64,13 +69,13 @@ async function readRetryMarkers(
   return { dunning_case_id: caseId, dunning_attempt_id: attemptId }
 }
 
-async function isAwaitingPayment(
+async function isWorthWaitingFor(
   dunningModule: DunningModuleService,
   caseId: string
 ) {
   const [dunningCase] = await dunningModule.listDunningCases({ id: caseId })
 
-  return dunningCase?.status === DunningCaseStatus.AWAITING_PAYMENT
+  return Boolean(dunningCase && LOCK_WORTHY_STATUSES.includes(dunningCase.status))
 }
 
 export async function failAwaitingDunningAttempt(
@@ -85,7 +90,7 @@ export async function failAwaitingDunningAttempt(
 
   const dunningModule = container.resolve<DunningModuleService>(DUNNING_MODULE)
 
-  if (!(await isAwaitingPayment(dunningModule, markers.dunning_case_id))) {
+  if (!(await isWorthWaitingFor(dunningModule, markers.dunning_case_id))) {
     return
   }
 
@@ -127,11 +132,14 @@ async function failAttemptUnderLock(
     null
   )
 
-  if (
-    !latest ||
-    latest.id !== markers.dunning_attempt_id ||
-    latest.status !== DunningAttemptStatus.PROCESSING
-  ) {
+  // A `failed` attempt on this session is a failure whose case write fell over: the redelivered
+  // event finishes it.
+  const unfinished =
+    latest?.status === DunningAttemptStatus.PROCESSING ||
+    (latest?.status === DunningAttemptStatus.FAILED &&
+      latest.payment_reference === input.session_id)
+
+  if (!latest || latest.id !== markers.dunning_attempt_id || !unfinished) {
     return null
   }
 

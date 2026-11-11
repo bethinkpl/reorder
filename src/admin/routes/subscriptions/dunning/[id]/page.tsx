@@ -1213,6 +1213,8 @@ function formatRenewalStatus(
       return "Succeeded"
     case "failed":
       return "Failed"
+    case "awaiting_payment":
+      return "Awaiting payment"
   }
 }
 

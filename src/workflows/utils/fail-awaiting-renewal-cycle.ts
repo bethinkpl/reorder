@@ -42,6 +42,7 @@ export type FailAwaitingRenewalCycleInput = {
   session_id: string
   action: string
   reason: string | null
+  message?: string
 }
 
 type RenewalCycleRecord = {
@@ -130,16 +131,16 @@ export async function failAwaitingRenewalCycle(
   await locking.execute(
     `renewal:subscription:${cycle.subscription_id}`,
     async () => {
-      await failCycleUnderLock(container, input)
+      await failAwaitingRenewalCycleUnderLock(container, input)
     },
     { timeout: LOCK_TIMEOUT_SECONDS }
   )
 }
 
-async function failCycleUnderLock(
+export async function failAwaitingRenewalCycleUnderLock(
   container: MedusaContainer,
   input: FailAwaitingRenewalCycleInput
-) {
+): Promise<boolean> {
   const startedAtMs = Date.now()
   const logger = container.resolve("logger")
   const renewalModule = container.resolve<RenewalModuleService>(RENEWAL_MODULE)
@@ -149,7 +150,7 @@ async function failCycleUnderLock(
   const cycle = await loadCycle(renewalModule, input.renewal_cycle_id)
 
   if (!cycle || cycle.status !== RenewalCycleStatus.AWAITING_PAYMENT) {
-    return
+    return false
   }
 
   const attempt = await findAwaitingAttempt(
@@ -159,7 +160,7 @@ async function failCycleUnderLock(
   )
 
   if (!attempt) {
-    return
+    return false
   }
 
   const subscription = (await subscriptionModule.retrieveSubscription(
@@ -168,9 +169,11 @@ async function failCycleUnderLock(
 
   const finishedAt = new Date()
   const errorCode = input.reason ?? input.action
-  const message = input.reason
-    ? `Payment provider reported the renewal payment as '${input.action}' (${input.reason})`
-    : `Payment provider reported the renewal payment as '${input.action}'`
+  const message =
+    input.message ??
+    (input.reason
+      ? `Payment provider reported the renewal payment as '${input.action}' (${input.reason})`
+      : `Payment provider reported the renewal payment as '${input.action}'`)
   const failureKind = classifyRenewalFailure(message)
   const orderId = cycle.generated_order_id ?? attempt.order_id
   const audit = readSettlementAudit(cycle.settlement_inputs)
@@ -324,4 +327,6 @@ async function failCycleUnderLock(
     alertable: isAlertableRenewalFailure(failureKind),
     message,
   })
+
+  return true
 }

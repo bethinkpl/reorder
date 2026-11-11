@@ -5,6 +5,11 @@ import { CANCELLABLE_SUBSCRIPTION_STATUSES, SubscriptionStatus } from "../../mod
 import { resolveCancelEffectiveAt } from "./finalize-cancellation"
 import { subscriptionErrors } from "../../modules/subscription/utils/errors"
 import {
+  endAwaitingRenewalCyclesOnCancellation,
+  type EndedAwaitingRenewalCycle,
+  restoreAwaitingRenewalCycles,
+} from "../utils/end-awaiting-renewal-cycle-on-cancellation"
+import {
   asSubscriptionUpdateInput,
   asSubscriptionWorkflowRecord,
   SubscriptionWorkflowRecord,
@@ -16,6 +21,11 @@ export type CancelSubscriptionStepInput = {
   reason?: string
   effective_at?: "immediately" | "end_of_cycle"
   triggered_by?: string | null
+}
+
+type CancelSubscriptionCompensation = {
+  subscription: SubscriptionWorkflowRecord
+  ended_awaiting_renewals: EndedAwaitingRenewalCycle[]
 }
 
 export const cancelSubscriptionStep = createStep(
@@ -61,24 +71,43 @@ export const cancelSubscriptionStep = createStep(
       },
     })
 
-    return new StepResponse<SubscriptionWorkflowStepResult, SubscriptionWorkflowRecord>(
+    const previous = asSubscriptionWorkflowRecord(subscription)
+    const endedAwaitingRenewals = await endAwaitingRenewalCyclesOnCancellation(
+      container,
+      {
+        subscription: previous,
+        cancelled_at: cancelledAt,
+        actor_id: input.triggered_by ?? null,
+        reason: input.reason ?? null,
+        source: "admin",
+      }
+    )
+
+    return new StepResponse<SubscriptionWorkflowStepResult, CancelSubscriptionCompensation>(
       {
         current: asSubscriptionWorkflowRecord(updated),
-        previous: asSubscriptionWorkflowRecord(subscription),
+        previous,
       },
-      asSubscriptionWorkflowRecord(subscription)
+      {
+        subscription: previous,
+        ended_awaiting_renewals: endedAwaitingRenewals,
+      }
     )
   },
-  async function (subscription: SubscriptionWorkflowRecord | undefined, { container }) {
-    if (!subscription) {
+  async function (compensation: CancelSubscriptionCompensation | undefined, { container }) {
+    if (!compensation) {
       return
     }
 
     const subscriptionModuleService: SubscriptionModuleService =
       container.resolve(SUBSCRIPTION_MODULE)
 
+    await restoreAwaitingRenewalCycles(
+      container,
+      compensation.ended_awaiting_renewals
+    )
     await subscriptionModuleService.updateSubscriptions(
-      asSubscriptionUpdateInput(subscription)
+      asSubscriptionUpdateInput(compensation.subscription)
     )
   }
 )

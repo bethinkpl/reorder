@@ -34,7 +34,7 @@ export type SettleAwaitingRenewalCycleOutcome =
   | "order_unpaid"
   | "subscription_terminal"
 
-async function settleUnderLock(
+export async function settleAwaitingRenewalCycleUnderLock(
   container: MedusaContainer,
   renewalCycleId: string
 ): Promise<SettleAwaitingRenewalCycleOutcome> {
@@ -140,7 +140,7 @@ export async function settleAwaitingRenewalCycle(
     .resolve(Modules.LOCKING)
     .execute(
       `renewal:subscription:${cycle.subscription_id}`,
-      () => settleUnderLock(container, renewalCycleId),
+      () => settleAwaitingRenewalCycleUnderLock(container, renewalCycleId),
       { timeout: RENEWAL_LOCK_TIMEOUT_SECONDS }
     )
 }

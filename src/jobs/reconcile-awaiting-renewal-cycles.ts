@@ -4,6 +4,15 @@ import { RENEWAL_MODULE } from "../modules/renewal"
 import type RenewalModuleService from "../modules/renewal/service"
 import { RenewalCycleStatus } from "../modules/renewal/types"
 import {
+  AWAITING_PAYMENT_OVERDUE_EVENT,
+  isAwaitingPaymentOverdue,
+  resolveAwaitingPaymentAlertHours,
+} from "../modules/renewal/utils/awaiting-payment-age"
+import {
+  createRenewalCorrelationId,
+  logRenewalEvent,
+} from "../modules/renewal/utils/observability"
+import {
   settleAwaitingRenewalCycle,
   type SettleAwaitingRenewalCycleOutcome,
 } from "../workflows/utils/settle-awaiting-renewal-cycle"
@@ -13,7 +22,7 @@ const JOB_LOCK_KEY = "jobs:reconcile-awaiting-renewal-cycles"
 const BATCH_SIZE = 200
 
 export type ReconcileAwaitingRenewalCyclesResult = Record<
-  SettleAwaitingRenewalCycleOutcome | "scanned" | "failed",
+  SettleAwaitingRenewalCycleOutcome | "scanned" | "failed" | "overdue",
   number
 >
 
@@ -38,6 +47,10 @@ export async function reconcileAwaitingRenewalCycles(
   container: MedusaContainer
 ): Promise<ReconcileAwaitingRenewalCyclesResult> {
   const renewalModule = container.resolve<RenewalModuleService>(RENEWAL_MODULE)
+  const logger = container.resolve("logger")
+  const alertHours = resolveAwaitingPaymentAlertHours()
+  const now = new Date(Date.now())
+  const correlationId = createRenewalCorrelationId(JOB_NAME)
   const result: ReconcileAwaitingRenewalCyclesResult = {
     scanned: 0,
     settled: 0,
@@ -46,6 +59,7 @@ export async function reconcileAwaitingRenewalCycles(
     order_unpaid: 0,
     subscription_terminal: 0,
     failed: 0,
+    overdue: 0,
   }
   let cursor: string | null = null
 
@@ -55,7 +69,11 @@ export async function reconcileAwaitingRenewalCycles(
         status: RenewalCycleStatus.AWAITING_PAYMENT,
         ...(cursor ? { id: { $gt: cursor } } : {}),
       },
-      { select: ["id"], take: BATCH_SIZE, order: { id: "ASC" } }
+      {
+        select: ["id", "subscription_id", "updated_at"],
+        take: BATCH_SIZE,
+        order: { id: "ASC" },
+      }
     )
 
     for (const cycle of cycles) {
@@ -65,10 +83,32 @@ export async function reconcileAwaitingRenewalCycles(
         const outcome = await settleAwaitingRenewalCycle(container, cycle.id)
 
         result[outcome] += 1
+
+        if (
+          outcome === "order_unpaid" &&
+          isAwaitingPaymentOverdue(cycle.updated_at, now, alertHours)
+        ) {
+          result.overdue += 1
+
+          logRenewalEvent(logger, "warn", {
+            event: AWAITING_PAYMENT_OVERDUE_EVENT,
+            outcome: "awaiting_payment",
+            correlation_id: correlationId,
+            renewal_cycle_id: cycle.id,
+            subscription_id: cycle.subscription_id,
+            job_name: JOB_NAME,
+            alertable: true,
+            message: `RenewalCycle '${cycle.id}' has awaited its payment for more than ${alertHours} hours`,
+            metadata: {
+              awaiting_since: new Date(cycle.updated_at).toISOString(),
+              alert_hours: alertHours,
+            },
+          })
+        }
       } catch (error) {
         result.failed += 1
 
-        container.resolve("logger").error(
+        logger.error(
           JSON.stringify({
             domain: "subscriptions",
             event: `${JOB_NAME}.cycle_failed`,
@@ -103,7 +143,7 @@ export default async function reconcileAwaitingRenewalCyclesJob(
         const result = await reconcileAwaitingRenewalCycles(container)
 
         logger.info(
-          `[${JOB_NAME}] scanned ${result.scanned} awaiting renewal cycle(s), settled ${result.settled}, closed without moving dates ${result.closed_superseded}, still unpaid ${result.order_unpaid}, terminal subscription ${result.subscription_terminal}, no longer awaiting ${result.not_awaiting}, failed ${result.failed} in ${Date.now() - startedAt}ms`
+          `[${JOB_NAME}] scanned ${result.scanned} awaiting renewal cycle(s), settled ${result.settled}, closed without moving dates ${result.closed_superseded}, still unpaid ${result.order_unpaid} (overdue ${result.overdue}), terminal subscription ${result.subscription_terminal}, no longer awaiting ${result.not_awaiting}, failed ${result.failed} in ${Date.now() - startedAt}ms`
         )
       },
       {

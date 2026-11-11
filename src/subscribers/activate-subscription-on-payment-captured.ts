@@ -15,10 +15,12 @@ import { findSubscriptionAndOrderForPaymentCollection } from "../modules/subscri
 import { refreshSubscriptionPaymentContext } from "../modules/subscription/utils/resolve-captured-payment-method"
 import { ensureNextRenewalCycleWorkflow } from "../workflows/ensure-next-renewal-cycle"
 import { recoverDunningFromCapturedPaymentWorkflow } from "../workflows/recover-dunning-from-captured-payment"
+import { settleAwaitingRenewalCycle } from "../workflows/utils/settle-awaiting-renewal-cycle"
 
 type PaymentRecord = {
   id: string
   payment_collection_id: string | null
+  payment_session: { context: Record<string, unknown> | null } | null
 }
 
 type SubscriptionRecord = {
@@ -120,6 +122,31 @@ async function runDunningRecovery(
   return true
 }
 
+async function runAwaitingRenewalSettlement(
+  container: MedusaContainer,
+  input: {
+    renewal_cycle_id: string
+    subscription_id: string
+    payment_id: string
+  }
+) {
+  try {
+    await settleAwaitingRenewalCycle(container, input.renewal_cycle_id)
+  } catch (error) {
+    container.resolve("logger").error(
+      JSON.stringify({
+        domain: "subscriptions",
+        event: "renewal_settlement_from_capture_failed",
+        subscription_id: input.subscription_id,
+        renewal_cycle_id: input.renewal_cycle_id,
+        payment_id: input.payment_id,
+        alertable: true,
+        message: error instanceof Error ? error.message : String(error),
+      })
+    )
+  }
+}
+
 export async function activateSubscriptionOnPaymentCaptured(
   container: MedusaContainer,
   paymentId: string
@@ -128,10 +155,11 @@ export async function activateSubscriptionOnPaymentCaptured(
 
   const { data: payments } = await query.graph({
     entity: "payment",
-    fields: ["id", "payment_collection_id"],
+    fields: ["id", "payment_collection_id", "payment_session.context"],
     filters: { id: paymentId },
   })
-  const paymentCollectionId = (payments as PaymentRecord[])[0]?.payment_collection_id
+  const payment = (payments as PaymentRecord[])[0]
+  const paymentCollectionId = payment?.payment_collection_id
   if (!paymentCollectionId) {
     return
   }
@@ -196,6 +224,16 @@ export async function activateSubscriptionOnPaymentCaptured(
     )
 
     return
+  }
+
+  const renewalCycleId = payment.payment_session?.context?.renewal_cycle_id
+
+  if (typeof renewalCycleId === "string") {
+    await runAwaitingRenewalSettlement(container, {
+      renewal_cycle_id: renewalCycleId,
+      subscription_id: subscription.id,
+      payment_id: paymentId,
+    })
   }
 
   // Runs before the recovery below, and independently of it: the card the customer just paid with

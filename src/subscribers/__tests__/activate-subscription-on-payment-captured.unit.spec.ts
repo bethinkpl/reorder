@@ -40,7 +40,9 @@ const activationCall = { id: "sub_1", status: SubscriptionStatus.ACTIVE }
 
 function defaultStaged(): Staged {
   return {
-    payment: [{ id: "pay_1", payment_collection_id: "paycol_1" }],
+    payment: [
+      { id: "pay_1", payment_collection_id: "paycol_1", payment_session: { context: {} } },
+    ],
     cart_payment_collection: [{ cart_id: "cart_1" }],
     subscription: [
       {

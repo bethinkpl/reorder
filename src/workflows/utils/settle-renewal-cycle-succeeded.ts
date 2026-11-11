@@ -36,6 +36,7 @@ type RenewalCycleRecord = {
   status: RenewalCycleStatus
   generated_order_id: string | null
   applied_pending_update_data: RenewalAppliedPendingUpdateData | null
+  settlement_inputs: Record<string, unknown> | null
   attempt_count: number
   processed_at: Date | string | null
   last_error: string | null
@@ -72,6 +73,51 @@ export type RenewalSettlementAudit = {
   operation_started_at: number
   scheduled_for: string
   previous_state: RenewalCycleState
+}
+
+export type StoredRenewalSettlementInputs = {
+  attempt_id: string | null
+  audit: RenewalSettlementAudit | null
+  source_snapshot: SubscriptionSourceSnapshot | null
+}
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === "object" && value !== null && !Array.isArray(value)
+}
+
+function isSettlementAudit(value: unknown): value is RenewalSettlementAudit {
+  return (
+    isRecord(value) &&
+    typeof value.correlation_id === "string" &&
+    (value.trigger_type === "scheduler" || value.trigger_type === "manual") &&
+    typeof value.attempt_no === "number" &&
+    typeof value.operation_started_at === "number" &&
+    typeof value.scheduled_for === "string" &&
+    isRecord(value.previous_state)
+  )
+}
+
+function isSourceSnapshot(value: unknown): value is SubscriptionSourceSnapshot {
+  return (
+    isRecord(value) &&
+    typeof value.product_id === "string" &&
+    typeof value.title === "string" &&
+    typeof value.unit_price === "number"
+  )
+}
+
+export function readStoredSettlementInputs(
+  value: unknown
+): StoredRenewalSettlementInputs {
+  const stored = isRecord(value) ? value : {}
+
+  return {
+    attempt_id: typeof stored.attempt_id === "string" ? stored.attempt_id : null,
+    audit: isSettlementAudit(stored.audit) ? stored.audit : null,
+    source_snapshot: isSourceSnapshot(stored.source_snapshot)
+      ? stored.source_snapshot
+      : null,
+  }
 }
 
 export type SettleRenewalCycleSucceededInput = {
@@ -238,6 +284,10 @@ export async function settleRenewalCycleSucceeded(
   // be rebuilt from the live plan config for the NEW variant and frequency,
   // or the signup discount would keep applying to the new plan's price on
   // every future cycle.
+  const sourceSnapshot =
+    input.source_snapshot ??
+    readStoredSettlementInputs(cycle.settlement_inputs).source_snapshot
+
   let nextPricingSnapshot = subscription.pricing_snapshot
 
   if (appliedPendingChanges) {
@@ -268,7 +318,7 @@ export async function settleRenewalCycleSucceeded(
     pending_update_data: appliedPendingChanges
       ? null
       : subscription.pending_update_data,
-    ...(input.source_snapshot ? { source_snapshot: input.source_snapshot } : {}),
+    ...(sourceSnapshot ? { source_snapshot: sourceSnapshot } : {}),
   })
 
   const updatedCycle = (await renewalModule.updateRenewalCycles({

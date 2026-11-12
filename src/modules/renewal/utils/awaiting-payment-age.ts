@@ -30,3 +30,30 @@ export function isAwaitingPaymentOverdue(
 ): boolean {
   return now.getTime() - new Date(parkedAt).getTime() > limitHours * HOUR_MS
 }
+
+/** Metadata key naming the charge (its attempt id) the overdue alert was raised for. */
+export const OVERDUE_ALERTED_FOR_KEY = "awaiting_payment_overdue_alerted_for"
+
+/**
+ * Whether a sweep still owes the alert for the charge `alert_key` names. The age runs from when
+ * that charge was submitted, never from the row's `updated_at`, which writing the marker moves.
+ */
+export function isOverdueAlertDue(input: {
+  metadata: Record<string, unknown> | null
+  alert_key: string
+  submitted_at: Date | string
+  now: Date
+  limit_hours: number
+}): boolean {
+  return (
+    input.metadata?.[OVERDUE_ALERTED_FOR_KEY] !== input.alert_key &&
+    isAwaitingPaymentOverdue(input.submitted_at, input.now, input.limit_hours)
+  )
+}
+
+export function withOverdueAlertMarker(
+  metadata: Record<string, unknown> | null,
+  alertKey: string
+): Record<string, unknown> {
+  return { ...(metadata ?? {}), [OVERDUE_ALERTED_FOR_KEY]: alertKey }
+}

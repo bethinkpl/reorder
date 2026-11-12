@@ -3,17 +3,34 @@ import {
   transform,
   WorkflowResponse,
 } from "@medusajs/framework/workflows-sdk"
+import { acquireLockStep, releaseLockStep } from "@medusajs/medusa/core-flows"
 import { createSubscriptionLogEventStep } from "./steps/create-subscription-log-event"
 import { ensureNextRenewalCycleStep } from "./steps/ensure-next-renewal-cycle"
 import {
   finalizeCancellationStep,
   type FinalizeCancellationStepInput,
 } from "./steps/finalize-cancellation"
+import { resolveCancellationCaseSubscriptionStep } from "./steps/resolve-cancellation-case-subscription"
 import { buildCancellationFinalizedLogEvent } from "./steps/shared-cancellation-log"
 
 export const finalizeCancellationWorkflow = createWorkflow(
   "finalize-cancellation",
   function (input: FinalizeCancellationStepInput) {
+    const scope = resolveCancellationCaseSubscriptionStep({
+      cancellation_case_id: input.cancellation_case_id,
+    })
+    const renewalLockKey = transform({ scope }, function ({ scope }) {
+      return `renewal:subscription:${scope.subscription_id}`
+    })
+
+    acquireLockStep({
+      key: renewalLockKey,
+      timeout: 5,
+      ttl: 120,
+    }).config({
+      name: "acquire-finalize-cancellation-renewal-lock",
+    })
+
     const result = finalizeCancellationStep(input)
     const logInput = transform({ result, input }, function ({ result, input }) {
       return {
@@ -34,6 +51,13 @@ export const finalizeCancellationWorkflow = createWorkflow(
       }
     })
     const renewal_cycle = ensureNextRenewalCycleStep(ensureInput)
+
+    releaseLockStep({
+      key: renewalLockKey,
+    }).config({
+      name: "release-finalize-cancellation-renewal-lock",
+    })
+
     const output = transform(
       { result, renewal_cycle },
       function ({ result, renewal_cycle }) {

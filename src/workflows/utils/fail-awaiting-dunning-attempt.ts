@@ -1,5 +1,5 @@
 import type { MedusaContainer } from "@medusajs/framework/types"
-import { ContainerRegistrationKeys, Modules } from "@medusajs/framework/utils"
+import { ContainerRegistrationKeys } from "@medusajs/framework/utils"
 import { DUNNING_MODULE } from "../../modules/dunning"
 import { DunningEvents } from "../../modules/dunning/events"
 import type DunningModuleService from "../../modules/dunning/service"
@@ -17,8 +17,10 @@ import {
   type RunDunningRetryStepOutput,
   settleDeclinedRetryAttempt,
 } from "../steps/run-dunning-retry"
+import { runUnderLock } from "./run-under-lock"
 
-const LOCK_TIMEOUT_SECONDS = 30
+const RUN_LOCK_WAIT_SECONDS = 5
+const LOCK_HOLD_SECONDS = 120
 
 const LOCK_WORTHY_STATUSES: readonly DunningCaseStatus[] = [
   DunningCaseStatus.AWAITING_PAYMENT,
@@ -94,12 +96,11 @@ export async function failAwaitingDunningAttempt(
     return
   }
 
-  const locking = container.resolve(Modules.LOCKING)
-
-  const output = await locking.execute(
+  const output = await runUnderLock(
+    container,
     `dunning:${markers.dunning_case_id}`,
-    async () => await failAttemptUnderLock(container, input, markers),
-    { timeout: LOCK_TIMEOUT_SECONDS }
+    () => failAttemptUnderLock(container, input, markers),
+    { wait_seconds: RUN_LOCK_WAIT_SECONDS, hold_seconds: LOCK_HOLD_SECONDS }
   )
 
   if (output) {
@@ -119,7 +120,7 @@ async function failAttemptUnderLock(
 
   const dunningCase = await loadDunningCase(container, markers.dunning_case_id)
 
-  if (dunningCase.status !== DunningCaseStatus.AWAITING_PAYMENT) {
+  if (!LOCK_WORTHY_STATUSES.includes(dunningCase.status)) {
     return null
   }
 
@@ -132,14 +133,19 @@ async function failAttemptUnderLock(
     null
   )
 
+  if (!latest || latest.id !== markers.dunning_attempt_id) {
+    return null
+  }
+
+  const onThisSession = latest.payment_reference === input.session_id
+  const inFlight =
+    latest.status === DunningAttemptStatus.PROCESSING &&
+    (onThisSession || latest.payment_reference === null)
   // A `failed` attempt on this session is a failure whose case write fell over: the redelivered
   // event finishes it.
-  const unfinished =
-    latest?.status === DunningAttemptStatus.PROCESSING ||
-    (latest?.status === DunningAttemptStatus.FAILED &&
-      latest.payment_reference === input.session_id)
+  const halfFailed = latest.status === DunningAttemptStatus.FAILED && onThisSession
 
-  if (!latest || latest.id !== markers.dunning_attempt_id || !unfinished) {
+  if (!inFlight && !halfFailed) {
     return null
   }
 

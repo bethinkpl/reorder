@@ -54,6 +54,7 @@ export const config: SubscriberConfig = {
   },
 }
 
+/** Rethrows after logging, so that the event bus delivers the failure again. */
 async function reportingFailure(
   container: MedusaContainer,
   context: {
@@ -75,6 +76,8 @@ async function reportingFailure(
         message: error instanceof Error ? error.message : String(error),
       })
     )
+
+    throw error
   }
 }
 

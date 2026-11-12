@@ -1,7 +1,10 @@
 import {
   DEFAULT_AWAITING_PAYMENT_ALERT_HOURS,
   isAwaitingPaymentOverdue,
+  isOverdueAlertDue,
+  OVERDUE_ALERTED_FOR_KEY,
   resolveAwaitingPaymentAlertHours,
+  withOverdueAlertMarker,
 } from "../awaiting-payment-age"
 
 const HOUR_MS = 60 * 60 * 1000
@@ -25,6 +28,37 @@ describe("isAwaitingPaymentOverdue", () => {
     const now = new Date(PARKED_AT.getTime() + 96 * HOUR_MS + 1)
 
     expect(isAwaitingPaymentOverdue(PARKED_AT.toISOString(), now, 96)).toBe(true)
+  })
+})
+
+describe("isOverdueAlertDue", () => {
+  const overdueNow = new Date(PARKED_AT.getTime() + 96 * HOUR_MS + 1)
+  const youngNow = new Date(PARKED_AT.getTime() + 96 * HOUR_MS)
+
+  it.each([
+    { name: "an overdue charge never alerted", now: overdueNow, alertedFor: undefined, due: true },
+    { name: "a charge still under the limit", now: youngNow, alertedFor: undefined, due: false },
+    { name: "an overdue charge already alerted", now: overdueNow, alertedFor: "attempt_current", due: false },
+    { name: "an overdue charge after an earlier charge alerted", now: overdueNow, alertedFor: "attempt_earlier", due: true },
+  ])("is $due for $name", ({ now, alertedFor, due }) => {
+    expect(
+      isOverdueAlertDue({
+        metadata: alertedFor ? { [OVERDUE_ALERTED_FOR_KEY]: alertedFor } : null,
+        alert_key: "attempt_current",
+        submitted_at: PARKED_AT,
+        now,
+        limit_hours: 96,
+      })
+    ).toBe(due)
+  })
+
+  it("keeps the row's other metadata when it records the alert", () => {
+    expect(
+      withOverdueAlertMarker({ last_trigger_type: "scheduler" }, "attempt_current")
+    ).toEqual({
+      last_trigger_type: "scheduler",
+      [OVERDUE_ALERTED_FOR_KEY]: "attempt_current",
+    })
   })
 })
 

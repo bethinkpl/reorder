@@ -5,8 +5,9 @@ import type RenewalModuleService from "../modules/renewal/service"
 import { RenewalCycleStatus } from "../modules/renewal/types"
 import {
   AWAITING_PAYMENT_OVERDUE_EVENT,
-  isAwaitingPaymentOverdue,
+  isOverdueAlertDue,
   resolveAwaitingPaymentAlertHours,
+  withOverdueAlertMarker,
 } from "../modules/renewal/utils/awaiting-payment-age"
 import {
   createRenewalCorrelationId,
@@ -20,6 +21,15 @@ import {
 const JOB_NAME = "reconcile-awaiting-renewal-cycles"
 const JOB_LOCK_KEY = "jobs:reconcile-awaiting-renewal-cycles"
 const BATCH_SIZE = 200
+const ALERT_LOCK_TIMEOUT_SECONDS = 5
+
+type OverdueStatus = RenewalCycleStatus.AWAITING_PAYMENT | RenewalCycleStatus.PROCESSING
+
+type OverdueAlertInput = {
+  now: Date
+  alertHours: number
+  correlationId: string
+}
 
 export type ReconcileAwaitingRenewalCyclesResult = Record<
   | SettleAwaitingRenewalCycleOutcome
@@ -34,16 +44,123 @@ function getErrorMessage(error: unknown) {
   return error instanceof Error ? error.message : String(error)
 }
 
+function isLockTimeout(message: string) {
+  const lowered = message.toLowerCase()
+
+  return lowered.includes("timed-out acquiring lock") || lowered.includes("timeout")
+}
+
+async function findDueOverdueAlert(
+  renewalModule: RenewalModuleService,
+  cycleId: string,
+  status: OverdueStatus,
+  input: OverdueAlertInput
+) {
+  const cycle = await renewalModule.retrieveRenewalCycle(cycleId)
+
+  if (cycle.status !== status) {
+    return null
+  }
+
+  const [latest] = await renewalModule.listRenewalAttempts(
+    { renewal_cycle_id: cycle.id },
+    { order: { attempt_no: "DESC" }, take: 1 }
+  )
+  const alertKey = latest?.id ?? cycle.id
+  const submittedAt = latest?.started_at ?? cycle.updated_at
+
+  if (
+    !isOverdueAlertDue({
+      metadata: cycle.metadata,
+      alert_key: alertKey,
+      submitted_at: submittedAt,
+      now: input.now,
+      limit_hours: input.alertHours,
+    })
+  ) {
+    return null
+  }
+
+  return {
+    cycle,
+    alertKey,
+    submittedAt: new Date(submittedAt).toISOString(),
+    paymentSessionId: latest?.payment_reference ?? null,
+  }
+}
+
 /**
- * A run that submitted its charge but could not park the cycle leaves it `processing`, which no
- * other path looks at again. Alerts only: the capture's settlement is what closes it.
+ * Raises the alert once per submitted charge: the marker it leaves on the cycle names the charge's
+ * attempt, so a later sweep stays quiet and a new charge on the same cycle alerts again.
  */
-async function alertOverdueSubmittedCharges(
+async function raiseOverdueAlertOnce(
   container: MedusaContainer,
-  input: { now: Date, alertHours: number, correlationId: string }
+  cycle: { id: string, subscription_id: string },
+  status: OverdueStatus,
+  input: OverdueAlertInput
+): Promise<boolean> {
+  const renewalModule = container.resolve<RenewalModuleService>(RENEWAL_MODULE)
+
+  if (!(await findDueOverdueAlert(renewalModule, cycle.id, status, input))) {
+    return false
+  }
+
+  try {
+    return await container.resolve(Modules.LOCKING).execute(
+      `renewal:subscription:${cycle.subscription_id}`,
+      async () => {
+        const due = await findDueOverdueAlert(renewalModule, cycle.id, status, input)
+
+        if (!due) {
+          return false
+        }
+
+        await renewalModule.updateRenewalCycles({
+          id: cycle.id,
+          metadata: withOverdueAlertMarker(due.cycle.metadata, due.alertKey),
+        })
+
+        logRenewalEvent(container.resolve("logger"), "warn", {
+          event: AWAITING_PAYMENT_OVERDUE_EVENT,
+          outcome: "awaiting_payment",
+          correlation_id: input.correlationId,
+          renewal_cycle_id: cycle.id,
+          subscription_id: cycle.subscription_id,
+          job_name: JOB_NAME,
+          alertable: true,
+          message:
+            status === RenewalCycleStatus.AWAITING_PAYMENT
+              ? `RenewalCycle '${cycle.id}' has awaited its payment for more than ${input.alertHours} hours`
+              : `RenewalCycle '${cycle.id}' has been processing for more than ${input.alertHours} hours${due.paymentSessionId ? ` with a charge submitted on payment session '${due.paymentSessionId}'` : ""}`,
+          metadata: {
+            submitted_at: due.submittedAt,
+            alert_hours: input.alertHours,
+            payment_session_id: due.paymentSessionId,
+          },
+        })
+
+        return true
+      },
+      { timeout: ALERT_LOCK_TIMEOUT_SECONDS }
+    )
+  } catch (error) {
+    if (isLockTimeout(getErrorMessage(error))) {
+      return false
+    }
+
+    throw error
+  }
+}
+
+/**
+ * A run that stopped before it could park or close its cycle leaves it `processing`, which no other
+ * path looks at again. Alerts only: the capture's settlement or an admin's resolve closes it.
+ */
+async function alertOverdueProcessingCycles(
+  container: MedusaContainer,
+  input: OverdueAlertInput
 ): Promise<number> {
   const renewalModule = container.resolve<RenewalModuleService>(RENEWAL_MODULE)
-  const logger = container.resolve("logger")
   let overdue = 0
   let cursor: string | null = null
 
@@ -54,43 +171,23 @@ async function alertOverdueSubmittedCharges(
         ...(cursor ? { id: { $gt: cursor } } : {}),
       },
       {
-        select: ["id", "subscription_id", "updated_at"],
+        select: ["id", "subscription_id"],
         take: BATCH_SIZE,
         order: { id: "ASC" },
       }
     )
 
     for (const cycle of cycles) {
-      if (!isAwaitingPaymentOverdue(cycle.updated_at, input.now, input.alertHours)) {
-        continue
+      if (
+        await raiseOverdueAlertOnce(
+          container,
+          cycle,
+          RenewalCycleStatus.PROCESSING,
+          input
+        )
+      ) {
+        overdue += 1
       }
-
-      const [latest] = await renewalModule.listRenewalAttempts(
-        { renewal_cycle_id: cycle.id },
-        { order: { attempt_no: "DESC" }, take: 1 }
-      )
-
-      if (!latest?.payment_reference) {
-        continue
-      }
-
-      overdue += 1
-
-      logRenewalEvent(logger, "warn", {
-        event: AWAITING_PAYMENT_OVERDUE_EVENT,
-        outcome: "awaiting_payment",
-        correlation_id: input.correlationId,
-        renewal_cycle_id: cycle.id,
-        subscription_id: cycle.subscription_id,
-        job_name: JOB_NAME,
-        alertable: true,
-        message: `RenewalCycle '${cycle.id}' has been processing the charge it submitted on payment session '${latest.payment_reference}' for more than ${input.alertHours} hours`,
-        metadata: {
-          processing_since: new Date(cycle.updated_at).toISOString(),
-          alert_hours: input.alertHours,
-          payment_session_id: latest.payment_reference,
-        },
-      })
     }
 
     if (cycles.length < BATCH_SIZE) {
@@ -99,12 +196,6 @@ async function alertOverdueSubmittedCharges(
 
     cursor = cycles[cycles.length - 1].id
   }
-}
-
-function isLockTimeout(message: string) {
-  const lowered = message.toLowerCase()
-
-  return lowered.includes("timed-out acquiring lock") || lowered.includes("timeout")
 }
 
 /**
@@ -119,9 +210,11 @@ export async function reconcileAwaitingRenewalCycles(
 ): Promise<ReconcileAwaitingRenewalCyclesResult> {
   const renewalModule = container.resolve<RenewalModuleService>(RENEWAL_MODULE)
   const logger = container.resolve("logger")
-  const alertHours = resolveAwaitingPaymentAlertHours()
-  const now = new Date(Date.now())
-  const correlationId = createRenewalCorrelationId(JOB_NAME)
+  const alertInput: OverdueAlertInput = {
+    now: new Date(Date.now()),
+    alertHours: resolveAwaitingPaymentAlertHours(),
+    correlationId: createRenewalCorrelationId(JOB_NAME),
+  }
   const result: ReconcileAwaitingRenewalCyclesResult = {
     scanned: 0,
     settled: 0,
@@ -142,7 +235,7 @@ export async function reconcileAwaitingRenewalCycles(
         ...(cursor ? { id: { $gt: cursor } } : {}),
       },
       {
-        select: ["id", "subscription_id", "updated_at"],
+        select: ["id", "subscription_id"],
         take: BATCH_SIZE,
         order: { id: "ASC" },
       }
@@ -158,24 +251,14 @@ export async function reconcileAwaitingRenewalCycles(
 
         if (
           outcome === "order_unpaid" &&
-          isAwaitingPaymentOverdue(cycle.updated_at, now, alertHours)
+          (await raiseOverdueAlertOnce(
+            container,
+            cycle,
+            RenewalCycleStatus.AWAITING_PAYMENT,
+            alertInput
+          ))
         ) {
           result.overdue += 1
-
-          logRenewalEvent(logger, "warn", {
-            event: AWAITING_PAYMENT_OVERDUE_EVENT,
-            outcome: "awaiting_payment",
-            correlation_id: correlationId,
-            renewal_cycle_id: cycle.id,
-            subscription_id: cycle.subscription_id,
-            job_name: JOB_NAME,
-            alertable: true,
-            message: `RenewalCycle '${cycle.id}' has awaited its payment for more than ${alertHours} hours`,
-            metadata: {
-              awaiting_since: new Date(cycle.updated_at).toISOString(),
-              alert_hours: alertHours,
-            },
-          })
         }
       } catch (error) {
         result.failed += 1
@@ -200,11 +283,10 @@ export async function reconcileAwaitingRenewalCycles(
     cursor = cycles[cycles.length - 1].id
   }
 
-  result.processing_overdue = await alertOverdueSubmittedCharges(container, {
-    now,
-    alertHours,
-    correlationId,
-  })
+  result.processing_overdue = await alertOverdueProcessingCycles(
+    container,
+    alertInput
+  )
 
   return result
 }

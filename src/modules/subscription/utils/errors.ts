@@ -38,3 +38,19 @@ export const subscriptionErrors = {
     return new MedusaError(MedusaError.Types.CONFLICT, message)
   },
 }
+
+/** What a locking provider throws when another holder keeps the lock for the whole wait. */
+export function isLockAcquisitionFailure(error: unknown) {
+  const message =
+    typeof error === "object" &&
+    error !== null &&
+    "message" in error &&
+    typeof error.message === "string"
+      ? error.message.toLowerCase()
+      : ""
+
+  return (
+    message.includes("failed to acquire lock") ||
+    message.includes("acquiring lock")
+  )
+}

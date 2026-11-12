@@ -109,7 +109,6 @@ export const cancelSubscriptionByCustomerWorkflow = createWorkflow(
           effective_at: CUSTOMER_CANCELLATION_TIMING,
           source: CUSTOMER_LOG_SOURCE,
           metadata: input.metadata ?? null,
-          already_locked: true,
         }
       }
     )

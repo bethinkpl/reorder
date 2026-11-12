@@ -258,7 +258,6 @@ medusaIntegrationTestRunner({
         for (const cycleStatus of [
           RenewalCycleStatus.SUCCEEDED,
           RenewalCycleStatus.FAILED,
-          RenewalCycleStatus.PROCESSING,
         ]) {
           const seeded = await seedAwaitingCycle(container, {
             reference: `SUB-FAIL-OTHER-${cycleStatus}`,

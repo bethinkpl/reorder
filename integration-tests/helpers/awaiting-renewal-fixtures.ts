@@ -25,6 +25,8 @@ type AwaitingRenewalSeedInput = {
   scheduled_for?: Date
   subscription_status?: SubscriptionStatus
   cycle_status?: RenewalCycleStatus
+  /** When the attempt submitted its charge; the age the overdue checks read. */
+  submitted_at?: Date
 }
 
 /**
@@ -85,6 +87,7 @@ export async function seedAwaitingRenewal(
   const attempt = await createRenewalAttemptSeed(container, {
     renewal_cycle_id: cycle.id,
     attempt_no: 1,
+    started_at: input.submitted_at,
     status: RenewalAttemptStatus.PROCESSING,
     payment_reference: session.id,
     order_id: order.id,

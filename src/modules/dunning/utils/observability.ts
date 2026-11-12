@@ -31,6 +31,7 @@ type DunningLogPayload = {
   success_count?: number
   failure_count?: number
   blocked_count?: number
+  awaiting_count?: number
   scanned_count?: number
   processed_count?: number
   recovered_count?: number
@@ -42,7 +43,13 @@ type DunningLogPayload = {
   avg_time_to_recover_ms?: number
   batch_size?: number
   job_name?: string
-  outcome?: "started" | "succeeded" | "failed" | "blocked" | "completed"
+  outcome?:
+    | "started"
+    | "succeeded"
+    | "failed"
+    | "blocked"
+    | "completed"
+    | "awaiting_payment"
   failure_kind?: DunningFailureKind
   alertable?: boolean
   message?: string

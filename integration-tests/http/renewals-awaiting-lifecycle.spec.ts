@@ -35,6 +35,7 @@ import {
 import {
   AWAITING_PAYMENT_ALERT_HOURS_ENV,
   AWAITING_PAYMENT_OVERDUE_EVENT,
+  DEFAULT_AWAITING_PAYMENT_ALERT_HOURS,
 } from "../../src/modules/renewal/utils/awaiting-payment-age"
 import { SUBSCRIPTION_MODULE } from "../../src/modules/subscription"
 import type SubscriptionModuleService from "../../src/modules/subscription/service"
@@ -65,6 +66,10 @@ jest.setTimeout(120 * 1000)
 
 const HOUR_MS = 60 * 60 * 1000
 const LATER_STEP_FAILURE = "a later step failed after the cancellation"
+
+function overdueSubmission() {
+  return new Date(Date.now() - (DEFAULT_AWAITING_PAYMENT_ALERT_HOURS + 1) * HOUR_MS)
+}
 
 const webhookEvent = {
   provider: "pp_test_provider",
@@ -444,10 +449,77 @@ medusaIntegrationTestRunner({
           ).toEqual(expect.arrayContaining([expect.objectContaining({ id: cycle.id })]))
         }
       )
+
+      it.each([
+        { name: "cancellation", finalize: false },
+        { name: "finalised cancellation", finalize: true },
+      ])(
+        "refuses an admin $name with a conflict and writes nothing while a renewal holds the lock, then completes once it is free",
+        async ({ name, finalize }) => {
+          const container = getContainer()
+          const locking = container.resolve(Modules.LOCKING)
+          const headers = await createAdminAuthHeaders(container)
+          const seeded = await seedAwaitingRenewal(container, {
+            reference: `SUB-AWL-LOCKED-${finalize ? "FINALIZE" : "CANCEL"}`,
+          })
+          const cancellationCase = await createCancellationCaseSeed(container, {
+            subscription_id: seeded.subscription.id,
+            reason: "customer left",
+          })
+          const lockKey = `renewal:subscription:${seeded.subscription.id}`
+          const holder = `renewal-run-during-${name}`
+          const cancel = () =>
+            finalize
+              ? api.post(
+                  `/admin/cancellations/${cancellationCase.id}/finalize`,
+                  {},
+                  { headers }
+                )
+              : api.post(
+                  `/admin/subscriptions/${seeded.subscription.id}/cancel`,
+                  { reason: "customer left" },
+                  { headers }
+                )
+          const before = await readState(seeded)
+
+          await locking.acquire(lockKey, { ownerId: holder, expire: 60 })
+
+          const refusal = await cancel()
+            .catch(
+              (caught: { response?: { status?: number, data?: { type?: string } } }) =>
+                caught
+            )
+            .finally(() => locking.release(lockKey, { ownerId: holder }))
+
+          expect(refusal.response?.status).toEqual(409)
+          expect(refusal.response?.data?.type).toEqual("conflict")
+
+          const untouched = await readState(seeded)
+
+          expect(untouched.subscription).toEqual(before.subscription)
+          expect(untouched.cycle).toEqual(before.cycle)
+          expect(untouched.attempts).toEqual(before.attempts)
+          expect(untouched.failedLogs).toHaveLength(0)
+
+          const response = await cancel()
+          const cancelled = await readState(seeded)
+
+          expect(response.status).toEqual(200)
+          expect(cancelled.subscription.status).toEqual(SubscriptionStatus.CANCELLED)
+          expect(cancelled.cycle.status).toEqual(RenewalCycleStatus.FAILED)
+          expect(cancelled.attempts).toEqual([
+            expect.objectContaining({
+              id: seeded.attempt.id,
+              status: RenewalAttemptStatus.FAILED,
+            }),
+          ])
+          expect(cancelled.failedLogs).toHaveLength(1)
+        }
+      )
     })
 
     describe("awaiting cycles older than the alert limit", () => {
-      it("raises one alertable entry per run for an overdue cycle, none for a cancelled one, and charges nothing", async () => {
+      it("raises one alertable entry for an overdue cycle however many runs see it, none for a cancelled one, and charges nothing", async () => {
         const container = getContainer()
         const renewalModule = container.resolve<RenewalModuleService>(RENEWAL_MODULE)
         const overdue = await seedAwaitingRenewal(container, {
@@ -470,13 +542,12 @@ medusaIntegrationTestRunner({
         expect(alerts).toHaveLength(1)
         expect(alerts[0].renewal_cycle_id).toEqual(overdue.cycle.id)
 
-        await sweepAt(96 * HOUR_MS + HOUR_MS)
+        await sweepAt(96 * HOUR_MS + 2 * HOUR_MS)
 
         alerts = overdueAlerts(spies)
 
-        expect(alerts).toHaveLength(2)
+        expect(alerts).toHaveLength(1)
         expect(alerts.map((alert) => alert.renewal_cycle_id)).toEqual([
-          overdue.cycle.id,
           overdue.cycle.id,
         ])
 
@@ -571,11 +642,12 @@ medusaIntegrationTestRunner({
         expect(state.cases).toHaveLength(0)
       })
 
-      it("fails the cycle and opens dunning when the order is still unpaid", async () => {
+      it("fails the cycle and opens dunning when the order is still unpaid past the alert limit", async () => {
         const container = getContainer()
         const headers = await createAdminAuthHeaders(container)
         const seeded = await seedAwaitingRenewal(container, {
           reference: "SUB-AWL-RESOLVE-UNPAID",
+          submitted_at: overdueSubmission(),
         })
 
         const response = await api.post(route(seeded.cycle.id), {}, { headers })
@@ -604,6 +676,104 @@ medusaIntegrationTestRunner({
         expect(state.failedLogs).toHaveLength(1)
         expect(state.succeededLogs).toHaveLength(0)
         expect(dunningStartedEmissions()).toHaveLength(1)
+      })
+
+      it("answers a conflict that the payment may still arrive, and writes nothing, for an unpaid cycle under the alert limit", async () => {
+        const container = getContainer()
+        const headers = await createAdminAuthHeaders(container)
+        const seeded = await seedAwaitingRenewal(container, {
+          reference: "SUB-AWL-RESOLVE-YOUNG",
+        })
+        const before = await readState(seeded)
+
+        const error = await api
+          .post(route(seeded.cycle.id), {}, { headers })
+          .catch((caught: { response?: { status?: number, data?: { type?: string, message?: string } } }) => caught)
+
+        expect(error.response?.status).toEqual(409)
+        expect(error.response?.data?.type).toEqual("conflict")
+        expect(error.response?.data?.message).toMatch(/payment may still arrive/)
+
+        const after = await readState(seeded)
+
+        expect(after.cycle).toEqual(before.cycle)
+        expect(after.attempts).toEqual(before.attempts)
+        expect(after.subscription).toEqual(before.subscription)
+        expect(after.cases).toHaveLength(0)
+        expect(after.failedLogs).toHaveLength(0)
+        expect(dunningStartedEmissions()).toHaveLength(0)
+      })
+
+      it("fails an overdue cycle whose attempt was already marked failed", async () => {
+        const container = getContainer()
+        const renewalModule = container.resolve<RenewalModuleService>(RENEWAL_MODULE)
+        const headers = await createAdminAuthHeaders(container)
+        const seeded = await seedAwaitingRenewal(container, {
+          reference: "SUB-AWL-RESOLVE-HALF-FAILED",
+          submitted_at: overdueSubmission(),
+        })
+
+        await renewalModule.updateRenewalAttempts({
+          id: seeded.attempt.id,
+          status: RenewalAttemptStatus.FAILED,
+          finished_at: new Date(),
+          error_code: "declined",
+        })
+
+        const response = await api.post(route(seeded.cycle.id), {}, { headers })
+        const state = await readState(seeded)
+
+        expect(response.status).toEqual(200)
+        expect(response.data.resolution).toEqual("failed")
+        expect(state.cycle.status).toEqual(RenewalCycleStatus.FAILED)
+        expect(state.attempts).toEqual([
+          expect.objectContaining({
+            id: seeded.attempt.id,
+            status: RenewalAttemptStatus.FAILED,
+          }),
+        ])
+        expect(state.cases).toEqual([
+          expect.objectContaining({
+            renewal_cycle_id: seeded.cycle.id,
+            status: DunningCaseStatus.RETRY_SCHEDULED,
+          }),
+        ])
+        expect(state.failedLogs).toHaveLength(1)
+      })
+
+      it("fails an overdue cycle left processing by a run that never recorded its session", async () => {
+        const container = getContainer()
+        const renewalModule = container.resolve<RenewalModuleService>(RENEWAL_MODULE)
+        const headers = await createAdminAuthHeaders(container)
+        const seeded = await seedAwaitingRenewal(container, {
+          reference: "SUB-AWL-RESOLVE-PROCESSING",
+          cycle_status: RenewalCycleStatus.PROCESSING,
+          submitted_at: overdueSubmission(),
+        })
+
+        await renewalModule.updateRenewalAttempts({
+          id: seeded.attempt.id,
+          payment_reference: null,
+        })
+
+        const response = await api.post(route(seeded.cycle.id), {}, { headers })
+        const state = await readState(seeded)
+
+        expect(response.status).toEqual(200)
+        expect(response.data.resolution).toEqual("failed")
+        expect(state.cycle.status).toEqual(RenewalCycleStatus.FAILED)
+        expect(state.attempts).toEqual([
+          expect.objectContaining({
+            id: seeded.attempt.id,
+            status: RenewalAttemptStatus.FAILED,
+          }),
+        ])
+        expect(state.cases).toEqual([
+          expect.objectContaining({
+            renewal_cycle_id: seeded.cycle.id,
+            status: DunningCaseStatus.RETRY_SCHEDULED,
+          }),
+        ])
       })
 
       it("answers a conflict and writes nothing for a cycle that is not awaiting payment", async () => {
@@ -693,6 +863,7 @@ medusaIntegrationTestRunner({
         const headers = await createAdminAuthHeaders(container)
         const seeded = await seedAwaitingRenewal(container, {
           reference: "SUB-AWL-RESOLVE-UNPAID-TWICE",
+          submitted_at: overdueSubmission(),
         })
 
         const results = await Promise.allSettled([

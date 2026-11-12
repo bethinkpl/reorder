@@ -1,5 +1,4 @@
 import type { MedusaContainer } from "@medusajs/framework/types"
-import { Modules } from "@medusajs/framework/utils"
 import {
   ActivityLogActorType,
   ActivityLogEventType,
@@ -28,9 +27,11 @@ import {
 import { startDunningWorkflow } from "../start-dunning"
 import { persistSubscriptionLogEvent } from "../steps/create-subscription-log-event"
 import { toISOStringOrNull } from "./date-output"
+import { runUnderLock } from "./run-under-lock"
 import type { RenewalSettlementAudit } from "./settle-renewal-cycle-succeeded"
 
-const LOCK_TIMEOUT_SECONDS = 30
+const RUN_LOCK_WAIT_SECONDS = 5
+const LOCK_HOLD_SECONDS = 120
 
 const LOCK_WORTHY_STATUSES: readonly RenewalCycleStatus[] = [
   RenewalCycleStatus.AWAITING_PAYMENT,
@@ -44,7 +45,7 @@ const DUNNING_SUBSCRIPTION_STATUSES = new Set<SubscriptionStatus>([
 
 export type FailAwaitingRenewalCycleInput = {
   renewal_cycle_id: string
-  session_id: string
+  session_id: string | null
   action: string
   reason: string | null
   message?: string
@@ -114,20 +115,33 @@ async function loadCycle(
 
 /**
  * The cycle's latest attempt, when it charged on this session. A `failed` one is a failure that was
- * recorded before the cycle write fell over, which a redelivered event has to finish.
+ * recorded before the cycle write fell over, which a redelivered event has to finish. An attempt
+ * that never recorded its session is taken only on a cycle left `processing` by a run that could not
+ * park it.
  */
 async function findAttemptForSession(
   renewalModule: RenewalModuleService,
-  cycleId: string,
-  sessionId: string
+  cycle: RenewalCycleRecord,
+  sessionId: string | null
 ): Promise<RenewalAttemptRecord | null> {
   const [latest] = await renewalModule.listRenewalAttempts(
-    { renewal_cycle_id: cycleId },
+    { renewal_cycle_id: cycle.id },
     { order: { attempt_no: "DESC" }, take: 1 }
   )
 
-  return latest?.payment_reference === sessionId &&
-    SUBMITTED_ATTEMPT_STATUSES.includes(latest.status)
+  if (!latest) {
+    return null
+  }
+
+  if (latest.payment_reference) {
+    return latest.payment_reference === sessionId &&
+      SUBMITTED_ATTEMPT_STATUSES.includes(latest.status)
+      ? latest
+      : null
+  }
+
+  return cycle.status === RenewalCycleStatus.PROCESSING &&
+    latest.status === RenewalAttemptStatus.PROCESSING
     ? latest
     : null
 }
@@ -144,14 +158,11 @@ export async function failAwaitingRenewalCycle(
     return
   }
 
-  const locking = container.resolve(Modules.LOCKING)
-
-  await locking.execute(
+  await runUnderLock(
+    container,
     `renewal:subscription:${cycle.subscription_id}`,
-    async () => {
-      await failAwaitingRenewalCycleUnderLock(container, input)
-    },
-    { timeout: LOCK_TIMEOUT_SECONDS }
+    () => failAwaitingRenewalCycleUnderLock(container, input),
+    { wait_seconds: RUN_LOCK_WAIT_SECONDS, hold_seconds: LOCK_HOLD_SECONDS }
   )
 }
 
@@ -167,13 +178,13 @@ export async function failAwaitingRenewalCycleUnderLock(
 
   const cycle = await loadCycle(renewalModule, input.renewal_cycle_id)
 
-  if (!cycle || cycle.status !== RenewalCycleStatus.AWAITING_PAYMENT) {
+  if (!cycle || !LOCK_WORTHY_STATUSES.includes(cycle.status)) {
     return false
   }
 
   const attempt = await findAttemptForSession(
     renewalModule,
-    cycle.id,
+    cycle,
     input.session_id
   )
 
@@ -209,6 +220,7 @@ export async function failAwaitingRenewalCycleUnderLock(
       error_code: errorCode,
       error_message: message,
       order_id: orderId,
+      payment_reference: attempt.payment_reference ?? input.session_id,
     })
   }
 

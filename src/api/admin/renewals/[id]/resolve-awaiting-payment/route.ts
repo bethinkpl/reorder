@@ -6,10 +6,11 @@ import type { MedusaContainer } from "@medusajs/framework/types"
 import { Modules } from "@medusajs/framework/utils"
 import { RENEWAL_MODULE } from "../../../../../modules/renewal"
 import type RenewalModuleService from "../../../../../modules/renewal/service"
+import { RenewalCycleStatus } from "../../../../../modules/renewal/types"
 import {
-  RenewalAttemptStatus,
-  RenewalCycleStatus,
-} from "../../../../../modules/renewal/types"
+  isAwaitingPaymentOverdue,
+  resolveAwaitingPaymentAlertHours,
+} from "../../../../../modules/renewal/utils/awaiting-payment-age"
 import { renewalErrors } from "../../../../../modules/renewal/utils/errors"
 import {
   createRenewalCorrelationId,
@@ -25,6 +26,11 @@ import type { PostAdminResolveAwaitingRenewalPaymentSchemaType } from "../../val
 
 const RENEWAL_LOCK_TIMEOUT_SECONDS = 30
 const UNPAID_ERROR_CODE = "resolved_unpaid"
+
+const RESOLVABLE_STATUSES: readonly RenewalCycleStatus[] = [
+  RenewalCycleStatus.AWAITING_PAYMENT,
+  RenewalCycleStatus.PROCESSING,
+]
 
 type AwaitingPaymentResolution = "settled" | "failed"
 
@@ -46,28 +52,42 @@ function noAttemptToFail(renewalCycleId: string) {
   )
 }
 
+function paymentMayStillArrive(renewalCycleId: string, alertHours: number) {
+  return renewalErrors.conflict(
+    `Renewal '${renewalCycleId}' is unpaid, but its payment may still arrive; it can be resolved as failed once it has waited for more than ${alertHours} hours`
+  )
+}
+
+/**
+ * Takes the latest attempt whatever its status, as the failure handler does for the session the
+ * attempt recorded: a failure written to the attempt before the cycle write fell over is finished.
+ */
 async function failUnpaidUnderLock(
   container: MedusaContainer,
   input: ResolveAwaitingPaymentInput
 ): Promise<AwaitingPaymentResolution> {
   const renewalModule = container.resolve<RenewalModuleService>(RENEWAL_MODULE)
+  const cycle = await renewalModule.retrieveRenewalCycle(input.renewal_cycle_id)
   const [attempt] = await renewalModule.listRenewalAttempts(
-    {
-      renewal_cycle_id: input.renewal_cycle_id,
-      status: RenewalAttemptStatus.PROCESSING,
-    },
+    { renewal_cycle_id: cycle.id },
     { order: { attempt_no: "DESC" }, take: 1 }
   )
 
-  if (!attempt?.payment_reference) {
-    throw noAttemptToFail(input.renewal_cycle_id)
+  if (!attempt) {
+    throw noAttemptToFail(cycle.id)
+  }
+
+  const alertHours = resolveAwaitingPaymentAlertHours()
+
+  if (!isAwaitingPaymentOverdue(attempt.started_at, new Date(), alertHours)) {
+    throw paymentMayStillArrive(cycle.id, alertHours)
   }
 
   const message = input.reason
     ? `Renewal payment never arrived; resolved as failed by an admin: ${input.reason}`
     : "Renewal payment never arrived; resolved as failed by an admin"
   const failed = await failAwaitingRenewalCycleUnderLock(container, {
-    renewal_cycle_id: input.renewal_cycle_id,
+    renewal_cycle_id: cycle.id,
     session_id: attempt.payment_reference,
     action: UNPAID_ERROR_CODE,
     reason: null,
@@ -87,7 +107,8 @@ async function resolveUnderLock(
 ): Promise<AwaitingPaymentResolution> {
   const outcome = await settleAwaitingRenewalCycleUnderLock(
     container,
-    input.renewal_cycle_id
+    input.renewal_cycle_id,
+    { include_processing: true }
   )
 
   switch (outcome) {
@@ -112,7 +133,7 @@ async function resolveAwaitingPayment(
   const renewalModule = container.resolve<RenewalModuleService>(RENEWAL_MODULE)
   const cycle = await renewalModule.retrieveRenewalCycle(input.renewal_cycle_id)
 
-  if (cycle.status !== RenewalCycleStatus.AWAITING_PAYMENT) {
+  if (!RESOLVABLE_STATUSES.includes(cycle.status)) {
     throw notAwaitingPayment(cycle.id)
   }
 

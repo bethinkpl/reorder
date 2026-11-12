@@ -131,7 +131,9 @@ async function runAwaitingRenewalSettlement(
   }
 ) {
   try {
-    await settleAwaitingRenewalCycle(container, input.renewal_cycle_id)
+    await settleAwaitingRenewalCycle(container, input.renewal_cycle_id, {
+      include_processing: true,
+    })
   } catch (error) {
     container.resolve("logger").error(
       JSON.stringify({

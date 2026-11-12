@@ -94,26 +94,6 @@ moduleIntegrationTestRunner<RenewalModuleService>({
       })
     })
 
-    describe("awaiting payment state", () => {
-      it("stores a cycle that is awaiting a payment result with its settlement inputs", async () => {
-        const settlementInputs = {
-          attempt_id: "renatt_module_001",
-          audit: { provider: "p24", session_id: "payses_module_001" },
-        }
-
-        const created = await service.createRenewalCycles({
-          subscription_id: "sub_module_await_001",
-          scheduled_for: new Date("2026-03-30T12:00:00.000Z"),
-          status: RenewalCycleStatus.AWAITING_PAYMENT,
-          settlement_inputs: settlementInputs,
-        } as any)
-
-        const retrieved = await service.retrieveRenewalCycle(created.id)
-
-        expect((retrieved as any).settlement_inputs).toEqual(settlementInputs)
-      })
-    })
-
     describe("windowed keyset scheduler queries", () => {
       const JOB_NAME = "process-renewal-cycles"
       const PAST = new Date("2026-06-01T10:00:00.000Z")

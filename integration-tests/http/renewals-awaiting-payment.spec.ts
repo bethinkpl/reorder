@@ -142,9 +142,9 @@ medusaIntegrationTestRunner({
         const locking = container.resolve(Modules.LOCKING)
 
         const dueAt = new Date("2026-05-10T10:00:00.000Z")
-        const orderId = "ord_rc1_park_001"
+        const orderId = "ord_awaiting_parked"
         const subscription = await createSubscriptionSeed(container, {
-          reference: "SUB-RC1-PARK-001",
+          reference: "SUB-AWAITING-PARK-001",
           next_renewal_at: dueAt,
         })
         const cycle = await createRenewalCycleSeed(container, {
@@ -163,7 +163,7 @@ medusaIntegrationTestRunner({
           input: {
             renewal_cycle_id: cycle.id,
             trigger_type: "scheduler",
-            correlation_id: "corr-rc1-park-001",
+            correlation_id: "corr-awaiting-park-001",
           },
         })
 
@@ -202,7 +202,7 @@ medusaIntegrationTestRunner({
         expect(parked.settlement_inputs).toEqual({
           attempt_id: attempts[0].id,
           audit: {
-            correlation_id: "corr-rc1-park-001",
+            correlation_id: "corr-awaiting-park-001",
             trigger_type: "scheduler",
             triggered_by: null,
             attempt_no: 1,
@@ -233,9 +233,9 @@ medusaIntegrationTestRunner({
         const lockKey = renewalLockKey(subscription.id)
 
         await expect(
-          locking.acquire(lockKey, { ownerId: "rc1-lock-probe", expire: 5 })
+          locking.acquire(lockKey, { ownerId: "lock-probe", expire: 5 })
         ).resolves.toBeUndefined()
-        await locking.release(lockKey, { ownerId: "rc1-lock-probe" })
+        await locking.release(lockKey, { ownerId: "lock-probe" })
       })
 
       it("parks a plan-change cycle with the new variant's snapshot and leaves the plan change unapplied", async () => {
@@ -246,10 +246,10 @@ medusaIntegrationTestRunner({
           container.resolve<SubscriptionModuleService>(SUBSCRIPTION_MODULE)
 
         const dueAt = new Date("2026-05-11T10:00:00.000Z")
-        const orderId = "ord_rc1_plan_001"
-        const productId = "prod_rc1_plan"
-        const oldVariantId = "variant_rc1_old"
-        const newVariantId = "variant_rc1_new"
+        const orderId = "ord_awaiting_plan"
+        const productId = "prod_awaiting_plan"
+        const oldVariantId = "variant_awaiting_old"
+        const newVariantId = "variant_awaiting_new"
         const newVariantSnapshot: SubscriptionSourceSnapshot = {
           product_id: productId,
           variant_id: newVariantId,
@@ -266,7 +266,7 @@ medusaIntegrationTestRunner({
         }
 
         await createPlanOfferSeed(container, {
-          name: "RC1 plan change offer",
+          name: "Awaiting plan change offer",
           scope: PlanOfferScope.VARIANT,
           product_id: productId,
           variant_id: newVariantId,
@@ -275,7 +275,7 @@ medusaIntegrationTestRunner({
         })
 
         const subscription = await createSubscriptionSeed(container, {
-          reference: "SUB-RC1-PLAN-001",
+          reference: "SUB-AWAITING-PLAN-001",
           next_renewal_at: dueAt,
           product_id: productId,
           variant_id: oldVariantId,
@@ -363,7 +363,7 @@ medusaIntegrationTestRunner({
 
         const dueAt = new Date("2026-05-12T10:00:00.000Z")
         const subscription = await createSubscriptionSeed(container, {
-          reference: "SUB-RC1-REFUSE-001",
+          reference: "SUB-AWAITING-REFUSE-001",
           next_renewal_at: dueAt,
           skip_next_cycle: true,
         })
@@ -371,20 +371,20 @@ medusaIntegrationTestRunner({
           subscription_id: subscription.id,
           scheduled_for: dueAt,
           status: RenewalCycleStatus.AWAITING_PAYMENT,
-          generated_order_id: "ord_rc1_refuse_001",
+          generated_order_id: "ord_awaiting_refuse",
           attempt_count: 1,
         })
         await createRenewalAttemptSeed(container, {
           renewal_cycle_id: cycle.id,
           status: RenewalAttemptStatus.PROCESSING,
-          payment_reference: "payses_rc1_refuse_001",
+          payment_reference: "payses_awaiting_refuse",
         })
 
         const forceError = await forceRenewalCycleWorkflow(container)
           .run({
             input: {
               renewal_cycle_id: cycle.id,
-              triggered_by: "admin_rc1",
+              triggered_by: "admin_awaiting",
             },
           })
           .catch((error: unknown) => error)
@@ -393,7 +393,7 @@ medusaIntegrationTestRunner({
             input: {
               renewal_cycle_id: cycle.id,
               trigger_type: "manual",
-              triggered_by: "admin_rc1",
+              triggered_by: "admin_awaiting",
             },
           })
           .catch((error: unknown) => error)
@@ -426,12 +426,12 @@ medusaIntegrationTestRunner({
 
         const dueAt = new Date("2026-05-13T10:00:00.000Z")
         const awaiting = await createRenewalCycleSeed(container, {
-          subscription_id: "sub_rc1_due_awaiting",
+          subscription_id: "sub_due_awaiting",
           scheduled_for: dueAt,
           status: RenewalCycleStatus.AWAITING_PAYMENT,
         })
         const scheduled = await createRenewalCycleSeed(container, {
-          subscription_id: "sub_rc1_due_scheduled",
+          subscription_id: "sub_due_scheduled",
           scheduled_for: dueAt,
           status: RenewalCycleStatus.SCHEDULED,
         })
@@ -458,9 +458,9 @@ medusaIntegrationTestRunner({
         const locking = container.resolve(Modules.LOCKING)
 
         const dueAt = new Date("2026-05-15T10:00:00.000Z")
-        const orderId = "ord_rc1_late_failure_001"
+        const orderId = "ord_awaiting_late_failure"
         const subscription = await createSubscriptionSeed(container, {
-          reference: "SUB-RC1-LATE-FAILURE-001",
+          reference: "SUB-AWAITING-LATE-FAILURE-001",
           next_renewal_at: dueAt,
         })
         const cycle = await createRenewalCycleSeed(container, {
@@ -530,6 +530,69 @@ medusaIntegrationTestRunner({
         expect(dunningCases).toHaveLength(0)
       })
 
+      it("leaves a cycle settled as succeeded while the run waited on authorisation, closing its attempt as succeeded", async () => {
+        const container = getContainer()
+        const renewalModule =
+          container.resolve<RenewalModuleService>(RENEWAL_MODULE)
+        const activityLogModule =
+          container.resolve<ActivityLogModuleService>(ACTIVITY_LOG_MODULE)
+        const paymentModule =
+          container.resolve<IPaymentModuleService>(Modules.PAYMENT)
+
+        const dueAt = new Date("2026-05-17T10:00:00.000Z")
+        const orderId = "ord_settled_during_run"
+        const subscription = await createSubscriptionSeed(container, {
+          reference: "SUB-SETTLED-DURING-RUN-001",
+          next_renewal_at: dueAt,
+        })
+        const cycle = await createRenewalCycleSeed(container, {
+          subscription_id: subscription.id,
+          scheduled_for: dueAt,
+        })
+
+        const { sessionIds } = stubRenewalCharge(container, {
+          subscription,
+          order_id: orderId,
+        })
+
+        jest
+          .spyOn(paymentModule, "authorizePaymentSession")
+          .mockImplementation(async () => {
+            await renewalModule.updateRenewalCycles({
+              id: cycle.id,
+              status: RenewalCycleStatus.SUCCEEDED,
+            })
+
+            return null as never
+          })
+
+        await processRenewalCycleWorkflow(container).run({
+          input: {
+            renewal_cycle_id: cycle.id,
+            trigger_type: "scheduler",
+          },
+        })
+
+        const cycleAfter = await renewalModule.retrieveRenewalCycle(cycle.id)
+        const attempts = await renewalModule.listRenewalAttempts({
+          renewal_cycle_id: cycle.id,
+        })
+        const succeededEntries = await activityLogModule.listSubscriptionLogs({
+          subscription_id: subscription.id,
+          event_type: ActivityLogEventType.RENEWAL_SUCCEEDED,
+        })
+
+        expect(cycleAfter.status).toEqual(RenewalCycleStatus.SUCCEEDED)
+        expect(attempts).toHaveLength(1)
+        expect(attempts[0]).toMatchObject({
+          status: RenewalAttemptStatus.SUCCEEDED,
+          payment_reference: sessionIds[0],
+          order_id: orderId,
+        })
+        expect(attempts[0].finished_at).toBeTruthy()
+        expect(succeededEntries).toHaveLength(0)
+      })
+
       it("settles the cycle in the same run when authorisation returns a payment", async () => {
         const container = getContainer()
         const renewalModule =
@@ -542,9 +605,9 @@ medusaIntegrationTestRunner({
           container.resolve<IPaymentModuleService>(Modules.PAYMENT)
 
         const dueAt = new Date("2026-05-16T10:00:00.000Z")
-        const orderId = "ord_rc1_sync_001"
+        const orderId = "ord_sync_settled"
         const subscription = await createSubscriptionSeed(container, {
-          reference: "SUB-RC1-SYNC-001",
+          reference: "SUB-SYNC-SETTLED-001",
           next_renewal_at: dueAt,
         })
         const cycle = await createRenewalCycleSeed(container, {

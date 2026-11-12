@@ -198,7 +198,7 @@ medusaIntegrationTestRunner({
 
         const dueAt = new Date(Date.now() - 60 * 60 * 1000)
         const subscription = await createSubscriptionSeed(container, {
-          reference: "SUB-RC5-JOB-PARK-001",
+          reference: "SUB-DUNNING-JOB-PARK-001",
           next_renewal_at: dueAt,
         })
         const cycle = await createRenewalCycleSeed(container, {
@@ -208,7 +208,7 @@ medusaIntegrationTestRunner({
 
         stubRenewalCharge(container, {
           subscription,
-          order_id: "ord_rc5_job_park_001",
+          order_id: "ord_dunning_job_park_001",
         })
         answerAuthorizationWithNull(container)
         const entries = spyOnJobCycleLog(container)
@@ -244,7 +244,7 @@ medusaIntegrationTestRunner({
         const dueAt = new Date(Date.now() - 60 * 60 * 1000)
         const { subscription, cycle } = await seedFailedCycle(
           container,
-          "SUB-RC5-JOB-BLOCK-001",
+          "SUB-DUNNING-JOB-BLOCK-001",
           dueAt
         )
         await createRenewalAttemptSeed(container, {
@@ -259,7 +259,7 @@ medusaIntegrationTestRunner({
 
         stubRenewalCharge(container, {
           subscription,
-          order_id: "ord_rc5_job_block_001",
+          order_id: "ord_dunning_job_block_001",
         })
         const entries = spyOnJobCycleLog(container)
 
@@ -294,7 +294,7 @@ medusaIntegrationTestRunner({
 
           const { subscription, cycle } = await seedFailedCycle(
             container,
-            `SUB-RC5-ACTIVE-${status}`,
+            `SUB-DUNNING-ACTIVE-${status}`,
             new Date("2026-06-01T10:00:00.000Z")
           )
           await createRenewalAttemptSeed(container, {
@@ -308,7 +308,7 @@ medusaIntegrationTestRunner({
           })
           stubRenewalCharge(container, {
             subscription,
-            order_id: `ord_rc5_active_${status}`,
+            order_id: `ord_dunning_active_${status}`,
           })
 
           const error = await runScheduled(container, cycle.id)
@@ -334,7 +334,7 @@ medusaIntegrationTestRunner({
           const dueAt = new Date("2026-06-02T10:00:00.000Z")
           const { subscription, cycle } = await seedFailedCycle(
             container,
-            `SUB-RC5-CLOSED-${status}`,
+            `SUB-DUNNING-CLOSED-${status}`,
             dueAt
           )
           await createRenewalAttemptSeed(container, {
@@ -348,7 +348,7 @@ medusaIntegrationTestRunner({
           })
           stubRenewalCharge(container, {
             subscription,
-            order_id: `ord_rc5_closed_${status}`,
+            order_id: `ord_dunning_closed_${status}`,
           })
 
           const result = await runScheduled(container, cycle.id)
@@ -371,7 +371,7 @@ medusaIntegrationTestRunner({
 
         const { subscription, cycle } = await seedFailedCycle(
           container,
-          "SUB-RC5-NOCASE-001",
+          "SUB-DUNNING-NOCASE-001",
           new Date("2026-06-03T10:00:00.000Z")
         )
         await createRenewalAttemptSeed(container, {
@@ -380,7 +380,7 @@ medusaIntegrationTestRunner({
         })
         stubRenewalCharge(container, {
           subscription,
-          order_id: "ord_rc5_nocase_001",
+          order_id: "ord_dunning_nocase_001",
         })
 
         const result = await runScheduled(container, cycle.id)
@@ -402,7 +402,7 @@ medusaIntegrationTestRunner({
 
         const { subscription, cycle } = await seedFailedCycle(
           container,
-          "SUB-RC5-PENDING-001",
+          "SUB-DUNNING-PENDING-001",
           new Date("2026-06-04T10:00:00.000Z")
         )
         const { session } = await createPaymentSessionFixture(container, {
@@ -416,7 +416,7 @@ medusaIntegrationTestRunner({
         })
         stubRenewalCharge(container, {
           subscription,
-          order_id: "ord_rc5_pending_001",
+          order_id: "ord_dunning_pending_001",
         })
 
         const result = await runScheduled(container, cycle.id)
@@ -436,7 +436,7 @@ medusaIntegrationTestRunner({
         const container = getContainer()
         const { subscription, cycle } = await seedFailedCycle(
           container,
-          "SUB-RC5-FORCE-001",
+          "SUB-DUNNING-FORCE-001",
           new Date("2026-06-05T10:00:00.000Z")
         )
         await createRenewalAttemptSeed(container, {
@@ -450,13 +450,13 @@ medusaIntegrationTestRunner({
         })
         stubRenewalCharge(container, {
           subscription,
-          order_id: "ord_rc5_force_001",
+          order_id: "ord_dunning_force_001",
         })
         const entries = spyOnJobCycleLog(container)
 
         const forceError = await forceRenewalCycleWorkflow(container)
           .run({
-            input: { renewal_cycle_id: cycle.id, triggered_by: "admin_rc5" },
+            input: { renewal_cycle_id: cycle.id, triggered_by: "admin_dunning" },
           })
           .catch((error: unknown) => error)
         const manualError = await processRenewalCycleWorkflow(container)
@@ -464,7 +464,7 @@ medusaIntegrationTestRunner({
             input: {
               renewal_cycle_id: cycle.id,
               trigger_type: "manual",
-              triggered_by: "admin_rc5",
+              triggered_by: "admin_dunning",
             },
           })
           .catch((error: unknown) => error)

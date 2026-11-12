@@ -32,7 +32,7 @@ medusaIntegrationTestRunner({
           container.resolve<DunningModuleService>(DUNNING_MODULE)
         const settlementInputs = {
           attempt_id: "renatt_smoke_001",
-          audit: { provider: "p24", session_id: "payses_smoke_001" },
+          audit: { provider: "async_provider", session_id: "payses_smoke_001" },
         }
 
         const cycle = await renewalModule.createRenewalCycles({

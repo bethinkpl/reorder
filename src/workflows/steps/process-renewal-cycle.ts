@@ -961,7 +961,20 @@ export async function createRenewalOrder(
     },
   })
 
-  const { total, pending } = await loadOrderAmounts(container, order.id)
+  return { order }
+}
+
+/**
+ * Exported for unit tests. Runs after `applyRenewalCredits`, so the amounts
+ * are re-read here rather than carried over from order creation.
+ */
+export async function createRenewalPaymentCollection(
+  container: MedusaContainer,
+  cycle: { id: string },
+  subscription: SubscriptionType,
+  orderId: string
+) {
+  const { total, pending } = await loadOrderAmounts(container, orderId)
 
   let paymentCollections: PaymentCollectionDTO[] | null = null
   let payment: RenewalOrderStepResult["payment"] = null
@@ -985,7 +998,7 @@ export async function createRenewalOrder(
     const paymentCollectionsResult =
       await createOrUpdateOrderPaymentCollectionWorkflow(container).run({
         input: {
-          order_id: order.id,
+          order_id: orderId,
           amount: pending,
         },
       })
@@ -997,7 +1010,7 @@ export async function createRenewalOrder(
     if (!paymentCollection) {
       throw renewalErrors.renewalOrderCreationFailed(
         cycle.id,
-        `No payment collection was created for renewal order '${order.id}'`
+        `No payment collection was created for renewal order '${orderId}'`
       )
     }
 
@@ -1011,7 +1024,6 @@ export async function createRenewalOrder(
   }
 
   return {
-    order,
     total,
     payment_collections: paymentCollections,
     payment,
@@ -1470,7 +1482,7 @@ export const createRenewalOrderStep = createStep(
         }
       }
 
-      const { order, payment_collections, payment } = await createRenewalOrder(
+      const { order } = await createRenewalOrder(
         container,
         {
           id: context.renewal_cycle_id,
@@ -1495,9 +1507,45 @@ export const createRenewalOrderStep = createStep(
 
       return new StepResponse<RenewalOrderStepResult>({
         order,
-        payment_collections,
+        payment_collections: null,
         generated_order_id: order.id,
         resolved_source_snapshot: resolvedSourceSnapshot,
+        payment: null,
+      })
+    } catch (error) {
+      await recordRenewalFailure(container, context, error)
+      throw error
+    }
+  }
+)
+
+export const createRenewalPaymentCollectionStep = createStep(
+  "create-renewal-payment-collection",
+  async function (
+    input: {
+      context: RenewalExecutionContext
+      order_result: RenewalOrderStepResult
+    },
+    { container }
+  ) {
+    const { context, order_result } = input
+
+    if (!order_result.order) {
+      return new StepResponse<RenewalOrderStepResult>(order_result)
+    }
+
+    try {
+      const { payment_collections, payment } =
+        await createRenewalPaymentCollection(
+          container,
+          { id: context.renewal_cycle_id },
+          context.subscription,
+          order_result.order.id
+        )
+
+      return new StepResponse<RenewalOrderStepResult>({
+        ...order_result,
+        payment_collections,
         payment,
       })
     } catch (error) {

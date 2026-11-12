@@ -14,11 +14,25 @@ jest.mock("../../workflows/recover-dunning-from-captured-payment", () => ({
 
 import type { MedusaContainer } from "@medusajs/framework/types"
 import { DunningCaseStatus } from "../../modules/dunning/types"
-import { reconcilePaidDunningCases } from "../reconcile-paid-dunning-cases"
+import {
+  DUNNING_AWAITING_PAYMENT_OVERDUE_EVENT,
+  reconcilePaidDunningCases,
+} from "../reconcile-paid-dunning-cases"
 
 const recoverRun = jest.fn(async () => ({ result: {} }))
 
-type CaseStub = { id: string, renewal_order_id: string | null }
+type CaseStub = {
+  id: string
+  renewal_order_id: string | null
+  status?: DunningCaseStatus
+}
+
+type CaseFilters = {
+  status: DunningCaseStatus | DunningCaseStatus[]
+  id?: { $gt: string }
+}
+
+const LONG_AGO = new Date("2020-01-01T00:00:00.000Z")
 
 function buildContainer(options: {
   cases: CaseStub[]
@@ -26,9 +40,37 @@ function buildContainer(options: {
 }) {
   const { cases, pendingByOrder = {} } = options
   const listDunningCases = jest.fn(
-    async (_filters: { status: DunningCaseStatus[] }, _options: unknown) => cases
+    async (filters: CaseFilters, listOptions: { take: number }) => {
+      if (Array.isArray(filters.status)) {
+        return cases.slice(0, listOptions.take)
+      }
+
+      return cases
+        .filter(
+          (entry) =>
+            entry.status === filters.status &&
+            (!filters.id || entry.id > filters.id.$gt)
+        )
+        .sort((left, right) => left.id.localeCompare(right.id))
+        .slice(0, listOptions.take)
+    }
   )
+  const retrieveDunningCase = async (id: string) => ({
+    ...cases.find((entry) => entry.id === id),
+    subscription_id: `sub_${id}`,
+    renewal_cycle_id: `rc_${id}`,
+    metadata: null,
+    updated_at: LONG_AGO,
+  })
+  const listDunningAttempts = async (filters: { dunning_case_id: string }) => [
+    {
+      id: `datt_${filters.dunning_case_id}`,
+      started_at: LONG_AGO,
+      payment_reference: null,
+    },
+  ]
   const errorLogs: string[] = []
+  const warnLogs: string[] = []
 
   const graph = jest.fn(async ({ filters }: { filters: { id: string[] } }) => {
     const orderId = filters.id[0]
@@ -47,17 +89,30 @@ function buildContainer(options: {
   const container = {
     resolve: (key: string) => {
       if (key === "dunning") {
-        return { listDunningCases }
+        return {
+          listDunningCases,
+          retrieveDunningCase,
+          listDunningAttempts,
+          updateDunningCases: async (data: unknown) => data,
+        }
       }
 
       if (key === "query") {
         return { graph }
       }
 
+      if (key === "locking") {
+        return {
+          execute: async (_key: string, job: () => Promise<unknown>) => await job(),
+        }
+      }
+
       if (key === "logger") {
         return {
           info: jest.fn(),
-          warn: jest.fn(),
+          warn: (message: string) => {
+            warnLogs.push(message)
+          },
           error: (message: string) => {
             errorLogs.push(message)
           },
@@ -68,7 +123,7 @@ function buildContainer(options: {
     },
   } as unknown as MedusaContainer
 
-  return { container, listDunningCases, errorLogs }
+  return { container, listDunningCases, errorLogs, warnLogs }
 }
 
 describe("reconcilePaidDunningCases", () => {
@@ -150,5 +205,33 @@ describe("reconcilePaidDunningCases", () => {
 
     expect(recoverRun).not.toHaveBeenCalled()
     expect(result).toEqual({ scanned: 1, recovered: 0, unpaid: 0, failed: 0 })
+  })
+
+  it("raises the overdue alert for every unpaid awaiting case, past the first page as well", async () => {
+    const cases = Array.from({ length: 201 }, (_, index) => ({
+      id: `dun_${String(index).padStart(3, "0")}`,
+      renewal_order_id: `order_${index}`,
+      status: DunningCaseStatus.AWAITING_PAYMENT,
+    }))
+    const { container, warnLogs } = buildContainer({
+      cases,
+      pendingByOrder: Object.fromEntries(
+        cases.map((entry) => [entry.renewal_order_id, 40])
+      ),
+    })
+
+    await reconcilePaidDunningCases(container)
+
+    const alerted = warnLogs
+      .map((line) => JSON.parse(line))
+      .filter(
+        (entry) =>
+          entry.event === DUNNING_AWAITING_PAYMENT_OVERDUE_EVENT &&
+          entry.alertable === true
+      )
+      .map((entry) => entry.dunning_case_id)
+
+    expect(alerted).toHaveLength(201)
+    expect(alerted).toContain("dun_200")
   })
 })

@@ -43,6 +43,7 @@ import { SubscriptionStatus } from "../../src/modules/subscription/types"
 import activateSubscriptionOnPaymentCapturedHandler from "../../src/subscribers/activate-subscription-on-payment-captured"
 import { cancelPendingSubscriptionOnPaymentFailure } from "../../src/subscribers/cancel-pending-subscription-on-payment-failure"
 import {
+  cancelSubscriptionByCustomerWorkflow,
   cancelSubscriptionWorkflow,
   finalizeCancellationWorkflow,
 } from "../../src/workflows"
@@ -115,6 +116,27 @@ const cancelThenFail = failingAfter(
 const finalizeThenFail = failingAfter(
   "awaiting-lifecycle-finalize-then-fail",
   finalizeCancellationStep
+)
+
+const cancelAsStep = createWorkflow(
+  "awaiting-lifecycle-cancel-as-step",
+  function (input: { id: string, reason: string }) {
+    return new WorkflowResponse(cancelSubscriptionWorkflow.runAsStep({ input }))
+  }
+)
+const finalizeAsStep = createWorkflow(
+  "awaiting-lifecycle-finalize-as-step",
+  function (input: { cancellation_case_id: string }) {
+    return new WorkflowResponse(finalizeCancellationWorkflow.runAsStep({ input }))
+  }
+)
+const customerCancelAsStep = createWorkflow(
+  "awaiting-lifecycle-customer-cancel-as-step",
+  function (input: { subscription_id: string, reason: string }) {
+    return new WorkflowResponse(
+      cancelSubscriptionByCustomerWorkflow.runAsStep({ input })
+    )
+  }
 )
 
 medusaIntegrationTestRunner({
@@ -514,6 +536,67 @@ medusaIntegrationTestRunner({
             }),
           ])
           expect(cancelled.failedLogs).toHaveLength(1)
+        }
+      )
+
+      it.each([
+        { name: "admin cancellation", workflow: "cancel" },
+        { name: "finalised cancellation", workflow: "finalize" },
+        { name: "customer cancellation", workflow: "customer" },
+      ])(
+        "takes the renewal lock when the $name runs as a step of another workflow, writing nothing while a renewal holds it",
+        async ({ workflow }) => {
+          const container = getContainer()
+          const locking = container.resolve(Modules.LOCKING)
+          const seeded = await seedAwaitingRenewal(container, {
+            reference: `SUB-AWL-NESTED-${workflow.toUpperCase()}`,
+          })
+          const cancellationCase = await createCancellationCaseSeed(container, {
+            subscription_id: seeded.subscription.id,
+            reason: "customer left",
+          })
+          const lockKey = `renewal:subscription:${seeded.subscription.id}`
+          const holder = `renewal-run-during-nested-${workflow}`
+          const runNested = () => {
+            switch (workflow) {
+              case "cancel":
+                return cancelAsStep(container).run({
+                  input: { id: seeded.subscription.id, reason: "customer left" },
+                })
+              case "finalize":
+                return finalizeAsStep(container).run({
+                  input: { cancellation_case_id: cancellationCase.id },
+                })
+              default:
+                return customerCancelAsStep(container).run({
+                  input: {
+                    subscription_id: seeded.subscription.id,
+                    reason: "customer left",
+                  },
+                })
+            }
+          }
+          const before = await readState(seeded)
+
+          await locking.acquire(lockKey, { ownerId: holder, expire: 60 })
+
+          const refusal = await runNested()
+            .then(
+              () => null,
+              (error: unknown) => error
+            )
+            .finally(() => locking.release(lockKey, { ownerId: holder }))
+
+          expect(refusal).toMatchObject({
+            message: `Failed to acquire lock for key "${lockKey}"`,
+          })
+
+          const untouched = await readState(seeded)
+
+          expect(untouched.subscription).toEqual(before.subscription)
+          expect(untouched.cycle).toEqual(before.cycle)
+          expect(untouched.attempts).toEqual(before.attempts)
+          expect(untouched.failedLogs).toHaveLength(0)
         }
       )
     })

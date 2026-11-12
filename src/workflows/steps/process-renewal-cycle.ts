@@ -1619,6 +1619,28 @@ async function parkRenewalCycleAwaitingPayment(
     return
   }
 
+  if (cycle.status === RenewalCycleStatus.FAILED) {
+    logRenewalEvent(container.resolve("logger"), "error", {
+      event: "renewal.awaiting_payment_park",
+      outcome: "failed",
+      correlation_id: context.correlation_id,
+      renewal_cycle_id: context.renewal_cycle_id,
+      subscription_id: context.subscription_id,
+      trigger_type: context.trigger_type,
+      triggered_by: context.triggered_by ?? null,
+      attempt_no: context.attempt_no,
+      duration_ms: Date.now() - context.operation_started_at,
+      alertable: true,
+      message: `RenewalCycle '${context.renewal_cycle_id}' had already failed when its run came to park the charge submitted on payment session '${paymentSessionId}'; it was left failed`,
+      metadata: {
+        payment_session_id: paymentSessionId,
+        generated_order_id: orderId,
+      },
+    })
+
+    return
+  }
+
   await renewalModule.updateRenewalAttempts({
     id: context.attempt_id,
     payment_reference: paymentSessionId,
@@ -1723,7 +1745,10 @@ export const authorizeRenewalPaymentStep = createStep(
             data,
             // What tells a later renewal tick, and the dunning retry, that this session is one of
             // ours rather than one the customer opened.
-            context: { renewal_cycle_id: context.renewal_cycle_id },
+            context: {
+              renewal_cycle_id: context.renewal_cycle_id,
+              renewal_attempt_id: context.attempt_id,
+            },
           },
         })
       } catch (error) {

@@ -5,10 +5,26 @@ import { Modules } from "@medusajs/framework/utils"
 
 const RETRY_INTERVAL_MS = 300
 
+const LOCK_WAIT_TIMEOUT_MESSAGES = [
+  /^Timed-out acquiring lock\.$/,
+  /^Failed to acquire lock for key ".+"$/,
+  /^".+" is already locked\.$/,
+]
+
 /**
- * `locking.execute` uses its wait as the lock's lifetime too, so a short wait would let the lock
- * lapse while the job is still writing. This waits at most `wait_seconds` and holds the lock for up
- * to `hold_seconds`.
+ * The errors the locking providers (in-memory, Redis, Postgres) throw while another holder keeps the
+ * lock: `execute` once its wait runs out, `acquire` at once.
+ */
+export function isLockWaitTimeout(error: unknown): boolean {
+  return (
+    error instanceof Error &&
+    LOCK_WAIT_TIMEOUT_MESSAGES.some((pattern) => pattern.test(error.message))
+  )
+}
+
+/**
+ * In Medusa 2.12 `locking.execute` also uses its wait (`timeout`) as the lock's lifetime, so a short
+ * wait lets the lock lapse mid-job; newer versions (2.22) give `execute` its own renewed `expire`.
  */
 export async function runUnderLock<T>(
   container: MedusaContainer,

@@ -97,6 +97,7 @@ medusaIntegrationTestRunner({
           subscriptionStatus?: SubscriptionStatus
           cycleStatus?: RenewalCycleStatus
           marker?: boolean
+          attemptMarker?: boolean
         }
       ) {
         const renewalModule =
@@ -112,15 +113,22 @@ medusaIntegrationTestRunner({
           generated_order_id: ORDER_ID,
           attempt_count: 1,
         })
-        const { session } = await createPaymentSessionFixture(container, {
-          context:
-            input.marker === false ? {} : { renewal_cycle_id: cycle.id },
-        })
-        const attempt = await createRenewalAttemptSeed(container, {
+        const submitted = await createRenewalAttemptSeed(container, {
           renewal_cycle_id: cycle.id,
           status: RenewalAttemptStatus.PROCESSING,
-          payment_reference: session.id,
           order_id: ORDER_ID,
+        })
+        const { session } = await createPaymentSessionFixture(container, {
+          context:
+            input.marker === false
+              ? {}
+              : input.attemptMarker === false
+                ? { renewal_cycle_id: cycle.id }
+                : { renewal_cycle_id: cycle.id, renewal_attempt_id: submitted.id },
+        })
+        const attempt = await renewalModule.updateRenewalAttempts({
+          id: submitted.id,
+          payment_reference: session.id,
         })
 
         await renewalModule.updateRenewalCycles({
@@ -294,6 +302,73 @@ medusaIntegrationTestRunner({
 
         expect(after.cycle).toEqual(before.cycle)
         expect(after.cycle.status).toEqual(RenewalCycleStatus.AWAITING_PAYMENT)
+        expect(after.attempt).toEqual(before.attempt)
+        expect(after.subscription.status).toEqual(SubscriptionStatus.ACTIVE)
+        expect(after.cases).toHaveLength(0)
+        expect(dunningStartedEmissions()).toHaveLength(0)
+      })
+
+      it("fails the awaiting cycle through its attempt's recorded session when the session names no attempt", async () => {
+        const container = getContainer()
+        const seeded = await seedAwaitingCycle(container, {
+          reference: "SUB-FAIL-CYCLE-MARKER-ONLY",
+          attemptMarker: false,
+        })
+
+        decodeAs(PaymentActions.FAILED, seeded.session.id, "declined")
+        await deliver(container)
+
+        const state = await readState(container, seeded)
+
+        expect(state.cycle.status).toEqual(RenewalCycleStatus.FAILED)
+        expect(state.attempt).toMatchObject({
+          status: RenewalAttemptStatus.FAILED,
+          error_code: "declined",
+          payment_reference: seeded.session.id,
+        })
+        expect(state.cases).toEqual([
+          expect.objectContaining({
+            renewal_cycle_id: seeded.cycle.id,
+            status: DunningCaseStatus.RETRY_SCHEDULED,
+          }),
+        ])
+        expect(dunningStartedEmissions()).toHaveLength(1)
+      })
+
+      it("leaves a processing cycle alone on a failure for a session marked with another cycle", async () => {
+        const container = getContainer()
+        const subscription = await createSubscriptionSeed(container, {
+          reference: "SUB-FAIL-OTHER-CYCLE-SESSION",
+          status: SubscriptionStatus.ACTIVE,
+        })
+        const earlierCycle = await createRenewalCycleSeed(container, {
+          subscription_id: subscription.id,
+          status: RenewalCycleStatus.FAILED,
+          scheduled_for: new Date(Date.now() - 40 * 24 * 60 * 60 * 1000),
+          attempt_count: 1,
+        })
+        const cycle = await createRenewalCycleSeed(container, {
+          subscription_id: subscription.id,
+          status: RenewalCycleStatus.PROCESSING,
+          attempt_count: 1,
+        })
+        const attempt = await createRenewalAttemptSeed(container, {
+          renewal_cycle_id: cycle.id,
+          status: RenewalAttemptStatus.PROCESSING,
+        })
+        const { session } = await createPaymentSessionFixture(container, {
+          context: { renewal_cycle_id: earlierCycle.id },
+        })
+        const seeded = { subscription, cycle, attempt }
+        const before = await readState(container, seeded)
+
+        decodeAs(PaymentActions.FAILED, session.id, "declined")
+        await deliver(container)
+
+        const after = await readState(container, seeded)
+
+        expect(after.cycle).toEqual(before.cycle)
+        expect(after.cycle.status).toEqual(RenewalCycleStatus.PROCESSING)
         expect(after.attempt).toEqual(before.attempt)
         expect(after.subscription.status).toEqual(SubscriptionStatus.ACTIVE)
         expect(after.cases).toHaveLength(0)

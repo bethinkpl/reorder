@@ -555,6 +555,49 @@ medusaIntegrationTestRunner({
         expect(emitted(DunningEvents.STARTED)).toHaveLength(1)
       })
 
+      it("leaves the renewal cycle failed, and raises one alert, when the failure was handled after the run's lock lapsed", async () => {
+        const container = getContainer()
+        const locking = container.resolve(Modules.LOCKING)
+        const { subscription, cycle } = await seedDueRenewal("SUB-FAILED-BEFORE-PARK")
+        const { sessionIds } = stubRenewalCharge(container, {
+          subscription,
+          order_id: "order_failed_before_park",
+        })
+
+        jest
+          .spyOn(container.resolve<IPaymentModuleService>(Modules.PAYMENT), "authorizePaymentSession")
+          .mockImplementation(async (sessionId) => {
+            await locking.release(renewalLockKey(subscription.id))
+            await deliverFailure(sessionId)
+
+            return null as never
+          })
+        const alerts = watchAlerts()
+
+        const outcome = await processRenewalCycleWorkflow(container)
+          .run({ input: { renewal_cycle_id: cycle.id, trigger_type: "scheduler" } })
+          .then(({ result }) => result, (error: unknown) => error)
+        const state = await readRenewalState(subscription.id, cycle.id)
+
+        expect(outcome).toBeNull()
+        expect(state.cycle.status).toEqual(RenewalCycleStatus.FAILED)
+        expect(state.attempts).toEqual([
+          expect.objectContaining({
+            status: RenewalAttemptStatus.FAILED,
+            error_code: "declined",
+            payment_reference: sessionIds[0],
+          }),
+        ])
+        expect(state.cases).toEqual([
+          expect.objectContaining({
+            renewal_cycle_id: cycle.id,
+            status: DunningCaseStatus.RETRY_SCHEDULED,
+          }),
+        ])
+        expect(emitted(DunningEvents.STARTED)).toHaveLength(1)
+        expect(alerts(cycle.id, sessionIds[0])).toHaveLength(1)
+      })
+
       it("reschedules the dunning case once the retry run releases its lock", async () => {
         const scenario = await seedRetryScheduledCase("SUB-EARLY-RETRY-FAILURE")
         const sessions = routeRetrySessionsToFixture(getContainer())
@@ -824,8 +867,103 @@ medusaIntegrationTestRunner({
       })
     })
 
+    describe("a signal for an earlier attempt's session while a newer attempt's charge is in flight", () => {
+      async function seedNewerAttemptInFlight(reference: string) {
+        const container = getContainer()
+        const orderModule = container.resolve<IOrderModuleService>(Modules.ORDER)
+        const renewalModule = container.resolve<RenewalModuleService>(RENEWAL_MODULE)
+        const { subscription, cycle } = await seedDueRenewal(reference)
+        const order = await orderModule.createOrders({
+          currency_code: "pln",
+          email: "customer@example.com",
+          customer_id: subscription.customer_id,
+          items: [
+            { title: "Subscription renewal", quantity: 1, unit_price: RENEWAL_AMOUNT },
+          ],
+        })
+
+        await container.resolve(ContainerRegistrationKeys.LINK).create({
+          [SUBSCRIPTION_MODULE]: { subscription_id: subscription.id },
+          [Modules.ORDER]: { order_id: order.id },
+        })
+        await renewalModule.updateRenewalCycles({
+          id: cycle.id,
+          status: RenewalCycleStatus.PROCESSING,
+          attempt_count: 2,
+          generated_order_id: order.id,
+        })
+
+        const earlier = await createRenewalAttemptSeed(container, {
+          renewal_cycle_id: cycle.id,
+          attempt_no: 1,
+          status: RenewalAttemptStatus.FAILED,
+          error_code: "declined",
+          order_id: order.id,
+        })
+        const { session } = await createPaymentSessionFixture(container, {
+          amount: RENEWAL_AMOUNT,
+          context: { renewal_cycle_id: cycle.id, renewal_attempt_id: earlier.id },
+        })
+
+        await renewalModule.updateRenewalAttempts({
+          id: earlier.id,
+          payment_reference: session.id,
+        })
+
+        const newer = await createRenewalAttemptSeed(container, {
+          renewal_cycle_id: cycle.id,
+          attempt_no: 2,
+          status: RenewalAttemptStatus.PROCESSING,
+          order_id: order.id,
+        })
+
+        return { subscription, cycle, order, session, newer }
+      }
+
+      function expectNewerAttemptStillInFlight(
+        state: Awaited<ReturnType<typeof readRenewalState>>,
+        newerAttemptId: string
+      ) {
+        expect(state.cycle.status).toEqual(RenewalCycleStatus.PROCESSING)
+        expect(state.attempts).toEqual(
+          expect.arrayContaining([
+            expect.objectContaining({
+              id: newerAttemptId,
+              status: RenewalAttemptStatus.PROCESSING,
+              error_code: null,
+            }),
+          ])
+        )
+        expect(state.cases).toHaveLength(0)
+      }
+
+      it("ignores the failure of the earlier attempt's session", async () => {
+        const scenario = await seedNewerAttemptInFlight("SUB-EARLIER-ATTEMPT-FAILED")
+
+        await deliverFailure(scenario.session.id)
+
+        expectNewerAttemptStillInFlight(
+          await readRenewalState(scenario.subscription.id, scenario.cycle.id),
+          scenario.newer.id
+        )
+        expect(emitted(DunningEvents.STARTED)).toHaveLength(0)
+      })
+
+      it("does not settle the cycle on the capture of the earlier attempt's session", async () => {
+        const scenario = await seedNewerAttemptInFlight("SUB-EARLIER-ATTEMPT-CAPTURED")
+        const payment = await captureOnOrder(scenario.session.id, scenario.order.id)
+
+        await deliverCapture(payment.id)
+
+        expectNewerAttemptStillInFlight(
+          await readRenewalState(scenario.subscription.id, scenario.cycle.id),
+          scenario.newer.id
+        )
+      })
+    })
+
     describe("a failure that arrives while a run holds the renewal lock", () => {
-      it("rejects after an alertable entry, so the bus delivers it again, and fails the cycle on a delivery after the lock is free", async () => {
+      it("rejects after a non-alertable entry, so the bus delivers it again, and fails the cycle on a delivery after the lock is free", async () => {
         const container = getContainer()
         const locking = container.resolve(Modules.LOCKING)
         const seeded = await seedAwaitingRenewal(container, {
@@ -833,6 +971,7 @@ medusaIntegrationTestRunner({
         })
         const lockKey = renewalLockKey(seeded.subscription.id)
         const holder = "renewal-run-in-progress"
+        const logs = watchLogs()
         const alerts = watchAlerts()
         const deliver = () =>
           cancelPendingSubscriptionOnPaymentFailureHandler({
@@ -853,7 +992,15 @@ medusaIntegrationTestRunner({
           await locking.release(lockKey, { ownerId: holder })
         }
 
-        expect(alerts(seeded.cycle.id, seeded.session.id)).toHaveLength(1)
+        expect(alerts(seeded.cycle.id, seeded.session.id)).toHaveLength(0)
+        expect(
+          logs().filter(
+            (entry) =>
+              entry.alertable === false &&
+              entry.renewal_cycle_id === seeded.cycle.id &&
+              entry.payment_session_id === seeded.session.id
+          )
+        ).toHaveLength(1)
         expect(
           (await readRenewalState(seeded.subscription.id, seeded.cycle.id)).cycle.status
         ).toEqual(RenewalCycleStatus.AWAITING_PAYMENT)
@@ -965,11 +1112,44 @@ medusaIntegrationTestRunner({
         const clock = jest.spyOn(Date, "now").mockReturnValue(realNow + offsetMs)
 
         try {
-          await reconcileAwaitingRenewalCycles(getContainer())
+          return await reconcileAwaitingRenewalCycles(getContainer())
         } finally {
           clock.mockRestore()
         }
       }
+
+      it("raises the overdue alert for the other processing cycles when reading one of them fails", async () => {
+        const renewalModule =
+          getContainer().resolve<RenewalModuleService>(RENEWAL_MODULE)
+        const unreadable = await seedProcessingCycle(
+          "SUB-PROCESSING-UNREADABLE",
+          "payses_unreadable_charge"
+        )
+        const readable = await seedProcessingCycle(
+          "SUB-PROCESSING-READABLE",
+          "payses_readable_charge"
+        )
+        const retrieve = renewalModule.retrieveRenewalCycle.bind(renewalModule)
+
+        jest
+          .spyOn(renewalModule, "retrieveRenewalCycle")
+          .mockImplementation(async (id, ...rest) => {
+            if (id === unreadable.cycle.id) {
+              throw new Error(WRITE_FAILURE)
+            }
+
+            return await retrieve(id, ...rest)
+          })
+        const alerts = watchAlerts()
+
+        const result = await sweepAt((DEFAULT_AWAITING_PAYMENT_ALERT_HOURS + 1) * HOUR_MS)
+
+        expect(
+          alerts().filter((entry) => entry.event === AWAITING_PAYMENT_OVERDUE_EVENT)
+        ).toEqual([expect.objectContaining({ renewal_cycle_id: readable.cycle.id })])
+        expect(alerts(unreadable.cycle.id, WRITE_FAILURE)).toHaveLength(1)
+        expect(result).toMatchObject({ processing_overdue: 1, failed: 1 })
+      })
 
       it("raises the overdue alert once per cycle, only past the limit, with or without a recorded session, and changes no status", async () => {
         const renewalModule =

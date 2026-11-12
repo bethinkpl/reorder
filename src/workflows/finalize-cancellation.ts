@@ -27,6 +27,7 @@ export const finalizeCancellationWorkflow = createWorkflow(
       key: renewalLockKey,
       timeout: 5,
       ttl: 120,
+      executeOnSubWorkflow: true,
     }).config({
       name: "acquire-finalize-cancellation-renewal-lock",
     })
@@ -54,6 +55,7 @@ export const finalizeCancellationWorkflow = createWorkflow(
 
     releaseLockStep({
       key: renewalLockKey,
+      executeOnSubWorkflow: true,
     }).config({
       name: "release-finalize-cancellation-renewal-lock",
     })

@@ -42,6 +42,7 @@ export const cancelSubscriptionByCustomerWorkflow = createWorkflow(
       key: subscriptionLockKey,
       timeout: 5,
       ttl: 120,
+      executeOnSubWorkflow: true,
     }).config({
       name: "acquire-customer-cancellation-subscription-lock",
     })
@@ -50,6 +51,7 @@ export const cancelSubscriptionByCustomerWorkflow = createWorkflow(
       key: renewalLockKey,
       timeout: 5,
       ttl: 120,
+      executeOnSubWorkflow: true,
     }).config({
       name: "acquire-customer-cancellation-renewal-lock",
     })
@@ -145,12 +147,14 @@ export const cancelSubscriptionByCustomerWorkflow = createWorkflow(
 
     releaseLockStep({
       key: renewalLockKey,
+      executeOnSubWorkflow: true,
     }).config({
       name: "release-customer-cancellation-renewal-lock",
     })
 
     releaseLockStep({
       key: subscriptionLockKey,
+      executeOnSubWorkflow: true,
     }).config({
       name: "release-customer-cancellation-subscription-lock",
     })

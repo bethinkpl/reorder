@@ -97,10 +97,6 @@ async function findDueOverdueAlert(
   }
 }
 
-/**
- * A failure signal that never arrives leaves the case awaiting for ever, with retry blocked. Alerts
- * once per submitted charge: the marker it leaves on the case names the charge's attempt.
- */
 async function raiseOverdueAlertOnce(
   container: MedusaContainer,
   caseId: string,
@@ -157,6 +153,69 @@ async function raiseOverdueAlertOnce(
   }
 }
 
+function reportCaseFailure(
+  container: MedusaContainer,
+  dunningCase: Pick<DunningCaseRecord, "id" | "renewal_order_id">,
+  error: unknown
+) {
+  container.resolve("logger").error(
+    JSON.stringify({
+      domain: "subscriptions",
+      event: `${JOB_NAME}.case_failed`,
+      job_name: JOB_NAME,
+      dunning_case_id: dunningCase.id,
+      renewal_order_id: dunningCase.renewal_order_id,
+      alertable: true,
+      message: getErrorMessage(error),
+    })
+  )
+}
+
+async function alertOverdueAwaitingCases(
+  container: MedusaContainer,
+  input: OverdueAlertInput,
+  result: ReconcilePaidDunningCasesResult
+): Promise<void> {
+  const dunningModule = container.resolve<DunningModuleService>(DUNNING_MODULE)
+  let cursor: string | null = null
+
+  while (true) {
+    const cases = (await dunningModule.listDunningCases(
+      {
+        status: DunningCaseStatus.AWAITING_PAYMENT,
+        ...(cursor ? { id: { $gt: cursor } } : {}),
+      },
+      { select: ["id", "renewal_order_id"], take: BATCH_SIZE, order: { id: "ASC" } }
+    )) as DunningCaseRecord[]
+
+    for (const dunningCase of cases) {
+      if (!dunningCase.renewal_order_id) {
+        continue
+      }
+
+      try {
+        const { pending } = await loadOrderAmounts(
+          container,
+          dunningCase.renewal_order_id
+        )
+
+        if (pending > 0) {
+          await raiseOverdueAlertOnce(container, dunningCase.id, input)
+        }
+      } catch (error) {
+        result.failed += 1
+        reportCaseFailure(container, dunningCase, error)
+      }
+    }
+
+    if (cases.length < BATCH_SIZE) {
+      return
+    }
+
+    cursor = cases[cases.length - 1].id
+  }
+}
+
 /**
  * Closes dunning cases whose renewal order is already paid in full.
  *
@@ -202,10 +261,6 @@ export async function reconcilePaidDunningCases(
       if (pending > 0) {
         result.unpaid += 1
 
-        if (dunningCase.status === DunningCaseStatus.AWAITING_PAYMENT) {
-          await raiseOverdueAlertOnce(container, dunningCase.id, alertInput)
-        }
-
         continue
       }
 
@@ -216,20 +271,11 @@ export async function reconcilePaidDunningCases(
       result.recovered += 1
     } catch (error) {
       result.failed += 1
-
-      container.resolve("logger").error(
-        JSON.stringify({
-          domain: "subscriptions",
-          event: `${JOB_NAME}.case_failed`,
-          job_name: JOB_NAME,
-          dunning_case_id: dunningCase.id,
-          renewal_order_id: dunningCase.renewal_order_id,
-          alertable: true,
-          message: getErrorMessage(error),
-        })
-      )
+      reportCaseFailure(container, dunningCase, error)
     }
   }
+
+  await alertOverdueAwaitingCases(container, alertInput, result)
 
   return result
 }

@@ -17,6 +17,10 @@ import { ensureNextRenewalCycleWorkflow } from "../ensure-next-renewal-cycle"
 import { loadOrderAmounts } from "../steps/run-dunning-retry"
 import { toISOStringOrNull } from "./date-output"
 import {
+  type RenewalSessionSignal,
+  signalNamesAttempt,
+} from "./renewal-session-marker"
+import {
   readStoredSettlementInputs,
   settleRenewalCycleSucceeded,
   type StoredRenewalSettlementInputs,
@@ -24,7 +28,7 @@ import {
 
 const RENEWAL_LOCK_TIMEOUT_SECONDS = 30
 
-type SettleOptions = { include_processing?: boolean }
+type SettleOptions = { processing_signal?: RenewalSessionSignal }
 
 export type SettleAwaitingRenewalCycleOutcome =
   | "settled"
@@ -43,14 +47,18 @@ type RenewalAttemptRecord = Awaited<
 
 async function findProcessingAttempt(
   renewalModule: RenewalModuleService,
-  renewalCycleId: string
+  renewalCycleId: string,
+  signal: RenewalSessionSignal
 ): Promise<RenewalAttemptRecord | null> {
   const [latest] = await renewalModule.listRenewalAttempts(
     { renewal_cycle_id: renewalCycleId },
     { order: { attempt_no: "DESC" }, take: 1 }
   )
 
-  return latest?.status === RenewalAttemptStatus.PROCESSING ? latest : null
+  return latest?.status === RenewalAttemptStatus.PROCESSING &&
+    signalNamesAttempt(latest, signal)
+    ? latest
+    : null
 }
 
 function readMetadataString(
@@ -98,11 +106,6 @@ function settlementInputsOfSubmittedAttempt(
   }
 }
 
-/**
- * `include_processing` also settles a `processing` cycle whose latest attempt is still `processing`:
- * a run that could not park it, whether or not it recorded the session. Only safe under the renewal
- * lock, which a live run holds until it has finalised.
- */
 export async function settleAwaitingRenewalCycleUnderLock(
   container: MedusaContainer,
   renewalCycleId: string,
@@ -118,10 +121,14 @@ export async function settleAwaitingRenewalCycleUnderLock(
   if (cycle.status === RenewalCycleStatus.AWAITING_PAYMENT) {
     stored = readStoredSettlementInputs(cycle.settlement_inputs)
   } else if (
-    options.include_processing &&
+    options.processing_signal &&
     cycle.status === RenewalCycleStatus.PROCESSING
   ) {
-    const attempt = await findProcessingAttempt(renewalModule, cycle.id)
+    const attempt = await findProcessingAttempt(
+      renewalModule,
+      cycle.id,
+      options.processing_signal
+    )
 
     if (!attempt) {
       return "not_awaiting"
@@ -204,11 +211,6 @@ export async function settleAwaitingRenewalCycleUnderLock(
   return "settled"
 }
 
-/**
- * Takes the renewal run's own lock, so a payment confirmed before the run has parked the cycle
- * waits for it instead of finding the cycle still `processing`. Only a caller that found the cycle
- * through the captured session's marker passes `include_processing`.
- */
 export async function settleAwaitingRenewalCycle(
   container: MedusaContainer,
   renewalCycleId: string,
@@ -218,7 +220,7 @@ export async function settleAwaitingRenewalCycle(
   const cycle = await renewalModule.retrieveRenewalCycle(renewalCycleId)
   const worthWaitingFor =
     cycle.status === RenewalCycleStatus.AWAITING_PAYMENT ||
-    (options.include_processing && cycle.status === RenewalCycleStatus.PROCESSING)
+    (options.processing_signal && cycle.status === RenewalCycleStatus.PROCESSING)
 
   if (!worthWaitingFor) {
     return "not_awaiting"

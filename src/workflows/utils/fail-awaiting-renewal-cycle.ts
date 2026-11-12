@@ -27,6 +27,10 @@ import {
 import { startDunningWorkflow } from "../start-dunning"
 import { persistSubscriptionLogEvent } from "../steps/create-subscription-log-event"
 import { toISOStringOrNull } from "./date-output"
+import {
+  type RenewalSessionSignal,
+  signalNamesAttempt,
+} from "./renewal-session-marker"
 import { runUnderLock } from "./run-under-lock"
 import type { RenewalSettlementAudit } from "./settle-renewal-cycle-succeeded"
 
@@ -46,6 +50,7 @@ const DUNNING_SUBSCRIPTION_STATUSES = new Set<SubscriptionStatus>([
 export type FailAwaitingRenewalCycleInput = {
   renewal_cycle_id: string
   session_id: string | null
+  attempt_id: string | null
   action: string
   reason: string | null
   message?: string
@@ -113,31 +118,22 @@ async function loadCycle(
   return (cycle as RenewalCycleRecord | undefined) ?? null
 }
 
-/**
- * The cycle's latest attempt, when it charged on this session. A `failed` one is a failure that was
- * recorded before the cycle write fell over, which a redelivered event has to finish. An attempt
- * that never recorded its session is taken only on a cycle left `processing` by a run that could not
- * park it.
- */
 async function findAttemptForSession(
   renewalModule: RenewalModuleService,
   cycle: RenewalCycleRecord,
-  sessionId: string | null
+  signal: RenewalSessionSignal
 ): Promise<RenewalAttemptRecord | null> {
   const [latest] = await renewalModule.listRenewalAttempts(
     { renewal_cycle_id: cycle.id },
     { order: { attempt_no: "DESC" }, take: 1 }
   )
 
-  if (!latest) {
+  if (!latest || !signalNamesAttempt(latest, signal)) {
     return null
   }
 
   if (latest.payment_reference) {
-    return latest.payment_reference === sessionId &&
-      SUBMITTED_ATTEMPT_STATUSES.includes(latest.status)
-      ? latest
-      : null
+    return SUBMITTED_ATTEMPT_STATUSES.includes(latest.status) ? latest : null
   }
 
   return cycle.status === RenewalCycleStatus.PROCESSING &&
@@ -182,11 +178,10 @@ export async function failAwaitingRenewalCycleUnderLock(
     return false
   }
 
-  const attempt = await findAttemptForSession(
-    renewalModule,
-    cycle,
-    input.session_id
-  )
+  const attempt = await findAttemptForSession(renewalModule, cycle, {
+    session_id: input.session_id,
+    attempt_id: input.attempt_id,
+  })
 
   if (!attempt) {
     return false

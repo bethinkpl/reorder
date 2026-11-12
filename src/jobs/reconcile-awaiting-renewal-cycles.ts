@@ -89,10 +89,6 @@ async function findDueOverdueAlert(
   }
 }
 
-/**
- * Raises the alert once per submitted charge: the marker it leaves on the cycle names the charge's
- * attempt, so a later sweep stays quiet and a new charge on the same cycle alerts again.
- */
 async function raiseOverdueAlertOnce(
   container: MedusaContainer,
   cycle: { id: string, subscription_id: string },
@@ -152,16 +148,29 @@ async function raiseOverdueAlertOnce(
   }
 }
 
-/**
- * A run that stopped before it could park or close its cycle leaves it `processing`, which no other
- * path looks at again. Alerts only: the capture's settlement or an admin's resolve closes it.
- */
+function reportCycleFailure(
+  container: MedusaContainer,
+  cycleId: string,
+  error: unknown
+) {
+  container.resolve("logger").error(
+    JSON.stringify({
+      domain: "subscriptions",
+      event: `${JOB_NAME}.cycle_failed`,
+      job_name: JOB_NAME,
+      renewal_cycle_id: cycleId,
+      alertable: true,
+      message: getErrorMessage(error),
+    })
+  )
+}
+
 async function alertOverdueProcessingCycles(
   container: MedusaContainer,
-  input: OverdueAlertInput
-): Promise<number> {
+  input: OverdueAlertInput,
+  result: ReconcileAwaitingRenewalCyclesResult
+): Promise<void> {
   const renewalModule = container.resolve<RenewalModuleService>(RENEWAL_MODULE)
-  let overdue = 0
   let cursor: string | null = null
 
   while (true) {
@@ -178,20 +187,25 @@ async function alertOverdueProcessingCycles(
     )
 
     for (const cycle of cycles) {
-      if (
-        await raiseOverdueAlertOnce(
-          container,
-          cycle,
-          RenewalCycleStatus.PROCESSING,
-          input
-        )
-      ) {
-        overdue += 1
+      try {
+        if (
+          await raiseOverdueAlertOnce(
+            container,
+            cycle,
+            RenewalCycleStatus.PROCESSING,
+            input
+          )
+        ) {
+          result.processing_overdue += 1
+        }
+      } catch (error) {
+        result.failed += 1
+        reportCycleFailure(container, cycle.id, error)
       }
     }
 
     if (cycles.length < BATCH_SIZE) {
-      return overdue
+      return
     }
 
     cursor = cycles[cycles.length - 1].id
@@ -209,7 +223,6 @@ export async function reconcileAwaitingRenewalCycles(
   container: MedusaContainer
 ): Promise<ReconcileAwaitingRenewalCyclesResult> {
   const renewalModule = container.resolve<RenewalModuleService>(RENEWAL_MODULE)
-  const logger = container.resolve("logger")
   const alertInput: OverdueAlertInput = {
     now: new Date(Date.now()),
     alertHours: resolveAwaitingPaymentAlertHours(),
@@ -262,17 +275,7 @@ export async function reconcileAwaitingRenewalCycles(
         }
       } catch (error) {
         result.failed += 1
-
-        logger.error(
-          JSON.stringify({
-            domain: "subscriptions",
-            event: `${JOB_NAME}.cycle_failed`,
-            job_name: JOB_NAME,
-            renewal_cycle_id: cycle.id,
-            alertable: true,
-            message: getErrorMessage(error),
-          })
-        )
+        reportCycleFailure(container, cycle.id, error)
       }
     }
 
@@ -283,10 +286,7 @@ export async function reconcileAwaitingRenewalCycles(
     cursor = cycles[cycles.length - 1].id
   }
 
-  result.processing_overdue = await alertOverdueProcessingCycles(
-    container,
-    alertInput
-  )
+  await alertOverdueProcessingCycles(container, alertInput, result)
 
   return result
 }

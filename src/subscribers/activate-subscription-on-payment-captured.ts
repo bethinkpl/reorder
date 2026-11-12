@@ -15,12 +15,16 @@ import { findSubscriptionAndOrderForPaymentCollection } from "../modules/subscri
 import { refreshSubscriptionPaymentContext } from "../modules/subscription/utils/resolve-captured-payment-method"
 import { ensureNextRenewalCycleWorkflow } from "../workflows/ensure-next-renewal-cycle"
 import { recoverDunningFromCapturedPaymentWorkflow } from "../workflows/recover-dunning-from-captured-payment"
+import {
+  readRenewalSessionMarkers,
+  type RenewalSessionSignal,
+} from "../workflows/utils/renewal-session-marker"
 import { settleAwaitingRenewalCycle } from "../workflows/utils/settle-awaiting-renewal-cycle"
 
 type PaymentRecord = {
   id: string
   payment_collection_id: string | null
-  payment_session: { context: Record<string, unknown> | null } | null
+  payment_session: { id: string, context: Record<string, unknown> | null } | null
 }
 
 type SubscriptionRecord = {
@@ -128,11 +132,12 @@ async function runAwaitingRenewalSettlement(
     renewal_cycle_id: string
     subscription_id: string
     payment_id: string
+    signal: RenewalSessionSignal
   }
 ) {
   try {
     await settleAwaitingRenewalCycle(container, input.renewal_cycle_id, {
-      include_processing: true,
+      processing_signal: input.signal,
     })
   } catch (error) {
     container.resolve("logger").error(
@@ -157,7 +162,12 @@ export async function activateSubscriptionOnPaymentCaptured(
 
   const { data: payments } = await query.graph({
     entity: "payment",
-    fields: ["id", "payment_collection_id", "payment_session.context"],
+    fields: [
+      "id",
+      "payment_collection_id",
+      "payment_session.id",
+      "payment_session.context",
+    ],
     filters: { id: paymentId },
   })
   const payment = (payments as PaymentRecord[])[0]
@@ -228,13 +238,17 @@ export async function activateSubscriptionOnPaymentCaptured(
     return
   }
 
-  const renewalCycleId = payment.payment_session?.context?.renewal_cycle_id
+  const markers = readRenewalSessionMarkers(payment.payment_session?.context)
 
-  if (typeof renewalCycleId === "string") {
+  if (markers.renewal_cycle_id) {
     await runAwaitingRenewalSettlement(container, {
-      renewal_cycle_id: renewalCycleId,
+      renewal_cycle_id: markers.renewal_cycle_id,
       subscription_id: subscription.id,
       payment_id: paymentId,
+      signal: {
+        session_id: payment.payment_session?.id ?? null,
+        attempt_id: markers.renewal_attempt_id,
+      },
     })
   }
 

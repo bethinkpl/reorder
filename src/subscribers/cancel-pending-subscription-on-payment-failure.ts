@@ -2,6 +2,7 @@ import type { SubscriberArgs, SubscriberConfig } from "@medusajs/framework"
 import type { IPaymentModuleService, MedusaContainer } from "@medusajs/framework/types"
 import {
   ContainerRegistrationKeys,
+  MedusaError,
   Modules,
   PaymentActions,
   PaymentWebhookEvents,
@@ -11,6 +12,8 @@ import { cancelAbandonedSubscription } from "../modules/subscription/utils/cance
 import { findSubscriptionIdForPaymentCollection } from "../modules/subscription/utils/find-subscription-for-payment"
 import { failAwaitingDunningAttempt } from "../workflows/utils/fail-awaiting-dunning-attempt"
 import { failAwaitingRenewalCycle } from "../workflows/utils/fail-awaiting-renewal-cycle"
+import { readRenewalSessionMarkers } from "../workflows/utils/renewal-session-marker"
+import { isLockWaitTimeout } from "../workflows/utils/run-under-lock"
 
 type WebhookEventData = {
   provider: string
@@ -54,7 +57,14 @@ export const config: SubscriberConfig = {
   },
 }
 
-/** Rethrows after logging, so that the event bus delivers the failure again. */
+function isGone(error: unknown) {
+  return (
+    MedusaError.isMedusaError(error) &&
+    error.type === MedusaError.Types.NOT_FOUND
+  )
+}
+
+/** Rethrows what a later delivery can still handle, so that the event bus delivers it again. */
 async function reportingFailure(
   container: MedusaContainer,
   context: {
@@ -68,16 +78,25 @@ async function reportingFailure(
   try {
     await run()
   } catch (error) {
-    container.resolve("logger").error(
-      JSON.stringify({
-        domain: "subscriptions",
-        ...context,
-        alertable: true,
-        message: error instanceof Error ? error.message : String(error),
-      })
-    )
+    const logger = container.resolve("logger")
+    const retryable = !isGone(error)
+    const alertable = retryable && !isLockWaitTimeout(error)
+    const line = JSON.stringify({
+      domain: "subscriptions",
+      ...context,
+      alertable,
+      message: error instanceof Error ? error.message : String(error),
+    })
 
-    throw error
+    if (alertable) {
+      logger.error(line)
+    } else {
+      logger.warn(line)
+    }
+
+    if (retryable) {
+      throw error
+    }
   }
 }
 
@@ -113,12 +132,13 @@ export async function cancelPendingSubscriptionOnPaymentFailure(
   })
 
   const session: PaymentSessionRecord | undefined = sessions[0]
-  const renewalCycleId = session?.context?.renewal_cycle_id
+  const renewalMarkers = readRenewalSessionMarkers(session?.context)
+  const renewalCycleId = renewalMarkers.renewal_cycle_id
   const dunningCaseId = session?.context?.dunning_case_id
   const reason =
     typeof decoded?.reason === "string" && decoded.reason ? decoded.reason : null
 
-  if (typeof renewalCycleId === "string" && renewalCycleId) {
+  if (renewalCycleId) {
     await reportingFailure(
       container,
       {
@@ -130,6 +150,7 @@ export async function cancelPendingSubscriptionOnPaymentFailure(
         failAwaitingRenewalCycle(container, {
           renewal_cycle_id: renewalCycleId,
           session_id: sessionId,
+          attempt_id: renewalMarkers.renewal_attempt_id,
           action: processed.action,
           reason,
         })

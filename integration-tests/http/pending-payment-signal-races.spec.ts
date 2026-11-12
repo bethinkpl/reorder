@@ -212,6 +212,49 @@ function watchLockRequests(container: MedusaContainer, key: string) {
     })
 }
 
+/**
+ * Frees `holder`'s lock on the key as soon as anything else asks for it: a request that waits for
+ * the lock then gets it, a request that does not wait has already been refused.
+ */
+function releaseOnFirstRequest(
+  container: MedusaContainer,
+  key: string,
+  holder: string
+) {
+  const locking = container.resolve(Modules.LOCKING)
+  const execute = locking.execute.bind(locking)
+  const acquire = locking.acquire.bind(locking)
+  const asksForKey = (keys: string | string[]) =>
+    (Array.isArray(keys) ? keys : [keys]).includes(key)
+  let released = false
+
+  const releaseHolder = async () => {
+    if (!released) {
+      released = true
+      await locking.release(key, { ownerId: holder })
+    }
+  }
+
+  jest.spyOn(locking, "execute").mockImplementation((keys, job, args) => {
+    const result = execute(keys, job, args)
+
+    if (asksForKey(keys)) {
+      void releaseHolder()
+    }
+
+    return result
+  })
+  jest.spyOn(locking, "acquire").mockImplementation(async (keys, args) => {
+    try {
+      return await acquire(keys, args)
+    } finally {
+      if (asksForKey(keys)) {
+        await releaseHolder()
+      }
+    }
+  })
+}
+
 medusaIntegrationTestRunner({
   medusaConfigFile: path.resolve(process.cwd(), "integration-tests"),
   env: {
@@ -1016,6 +1059,85 @@ medusaIntegrationTestRunner({
             status: DunningCaseStatus.RETRY_SCHEDULED,
           }),
         ])
+      })
+    })
+
+    describe("a capture that arrives while another holder has the renewal lock", () => {
+      async function seedCapturedRenewal(
+        reference: string,
+        cycleStatus: RenewalCycleStatus
+      ) {
+        const container = getContainer()
+        const seeded = await seedAwaitingRenewal(container, {
+          reference,
+          cycle_status: cycleStatus,
+        })
+        const payment = await authorizeAndCapturePaymentSession(
+          container,
+          seeded.session.id
+        )
+
+        await recordOrderCaptureTransactions(container, seeded.order.id, payment.id)
+
+        const holder = `renewal-run-${reference.toLowerCase()}`
+
+        await container
+          .resolve(Modules.LOCKING)
+          .acquire(renewalLockKey(seeded.subscription.id), { ownerId: holder, expire: 60 })
+        releaseOnFirstRequest(container, renewalLockKey(seeded.subscription.id), holder)
+
+        return { ...seeded, payment }
+      }
+
+      it("leaves a processing renewal cycle to the holder without waiting for the lock or raising an alert, and settles it on a delivery after the lock is free", async () => {
+        const seeded = await seedCapturedRenewal(
+          "SUB-PROCESSING-CAPTURE-WHILE-LOCKED",
+          RenewalCycleStatus.PROCESSING
+        )
+        const before = await readRenewalState(seeded.subscription.id, seeded.cycle.id)
+        const alerts = watchAlerts()
+
+        await expect(deliverCapture(seeded.payment.id)).resolves.toBeUndefined()
+
+        const untouched = await readRenewalState(seeded.subscription.id, seeded.cycle.id)
+
+        expect(untouched.cycle).toEqual(before.cycle)
+        expect(untouched.attempts).toEqual(before.attempts)
+        expect(untouched.cases).toHaveLength(0)
+        expect(alerts(seeded.cycle.id)).toHaveLength(0)
+
+        await deliverCapture(seeded.payment.id)
+
+        const settled = await readRenewalState(seeded.subscription.id, seeded.cycle.id)
+
+        expect(settled.cycle.status).toEqual(RenewalCycleStatus.SUCCEEDED)
+        expect(settled.attempts).toEqual([
+          expect.objectContaining({
+            id: seeded.attempt.id,
+            status: RenewalAttemptStatus.SUCCEEDED,
+          }),
+        ])
+      })
+
+      it("waits for the lock and settles a renewal cycle awaiting its payment once the holder lets go", async () => {
+        const seeded = await seedCapturedRenewal(
+          "SUB-AWAITING-CAPTURE-WHILE-LOCKED",
+          RenewalCycleStatus.AWAITING_PAYMENT
+        )
+        const alerts = watchAlerts()
+
+        await deliverCapture(seeded.payment.id)
+
+        const settled = await readRenewalState(seeded.subscription.id, seeded.cycle.id)
+
+        expect(settled.cycle.status).toEqual(RenewalCycleStatus.SUCCEEDED)
+        expect(settled.attempts).toEqual([
+          expect.objectContaining({
+            id: seeded.attempt.id,
+            status: RenewalAttemptStatus.SUCCEEDED,
+          }),
+        ])
+        expect(alerts(seeded.cycle.id)).toHaveLength(0)
       })
     })
 

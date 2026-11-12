@@ -20,6 +20,7 @@ import {
   type RenewalSessionSignal,
   signalNamesAttempt,
 } from "./renewal-session-marker"
+import { isLockWaitTimeout, runUnderLock } from "./run-under-lock"
 import {
   readStoredSettlementInputs,
   settleRenewalCycleSucceeded,
@@ -27,6 +28,7 @@ import {
 } from "./settle-renewal-cycle-succeeded"
 
 const RENEWAL_LOCK_TIMEOUT_SECONDS = 30
+const PROCESSING_LOCK_HOLD_SECONDS = 120
 
 type SettleOptions = { processing_signal?: RenewalSessionSignal }
 
@@ -218,19 +220,41 @@ export async function settleAwaitingRenewalCycle(
 ): Promise<SettleAwaitingRenewalCycleOutcome> {
   const renewalModule = container.resolve<RenewalModuleService>(RENEWAL_MODULE)
   const cycle = await renewalModule.retrieveRenewalCycle(renewalCycleId)
-  const worthWaitingFor =
-    cycle.status === RenewalCycleStatus.AWAITING_PAYMENT ||
-    (options.processing_signal && cycle.status === RenewalCycleStatus.PROCESSING)
+  const lockKey = `renewal:subscription:${cycle.subscription_id}`
+  const settle = () =>
+    settleAwaitingRenewalCycleUnderLock(container, renewalCycleId, options)
 
-  if (!worthWaitingFor) {
+  if (cycle.status === RenewalCycleStatus.AWAITING_PAYMENT) {
+    return await container
+      .resolve(Modules.LOCKING)
+      .execute(lockKey, settle, { timeout: RENEWAL_LOCK_TIMEOUT_SECONDS })
+  }
+
+  if (
+    !options.processing_signal ||
+    cycle.status !== RenewalCycleStatus.PROCESSING
+  ) {
     return "not_awaiting"
   }
 
-  return await container
-    .resolve(Modules.LOCKING)
-    .execute(
-      `renewal:subscription:${cycle.subscription_id}`,
-      () => settleAwaitingRenewalCycleUnderLock(container, renewalCycleId, options),
-      { timeout: RENEWAL_LOCK_TIMEOUT_SECONDS }
+  let locked = false
+
+  try {
+    return await runUnderLock(
+      container,
+      lockKey,
+      () => {
+        locked = true
+
+        return settle()
+      },
+      { wait_seconds: 0, hold_seconds: PROCESSING_LOCK_HOLD_SECONDS }
     )
+  } catch (error) {
+    if (!locked && isLockWaitTimeout(error)) {
+      return "not_awaiting"
+    }
+
+    throw error
+  }
 }

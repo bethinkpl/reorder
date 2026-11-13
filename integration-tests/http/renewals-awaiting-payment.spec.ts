@@ -1,45 +1,44 @@
 import { medusaIntegrationTestRunner } from "@medusajs/test-utils"
 import path from "path"
-import type {
-  IPaymentModuleService,
-  Logger,
-  MedusaContainer,
-} from "@medusajs/framework/types"
-import { MedusaError, Modules } from "@medusajs/framework/utils"
+import {
+  ContainerRegistrationKeys,
+  MedusaError,
+  Modules,
+  PaymentActions,
+  PaymentEvents,
+} from "@medusajs/framework/utils"
+import { DateTime } from "luxon"
+import { FrequencyInterval } from "../../src/common/types/frequency-interval"
+import { reconcileAwaitingRenewalCycles } from "../../src/jobs/reconcile-awaiting-renewal-cycles"
 import { ACTIVITY_LOG_MODULE } from "../../src/modules/activity-log"
 import type ActivityLogModuleService from "../../src/modules/activity-log/service"
 import { ActivityLogEventType } from "../../src/modules/activity-log/types"
 import { DUNNING_MODULE } from "../../src/modules/dunning"
+import { DunningEvents } from "../../src/modules/dunning/events"
 import type DunningModuleService from "../../src/modules/dunning/service"
+import { DunningCaseStatus } from "../../src/modules/dunning/types"
 import { PlanOfferScope } from "../../src/modules/plan-offer/types"
 import { RENEWAL_MODULE } from "../../src/modules/renewal"
 import type RenewalModuleService from "../../src/modules/renewal/service"
-import {
-  RenewalAttemptStatus,
-  RenewalCycleStatus,
-} from "../../src/modules/renewal/types"
+import { RenewalAttemptStatus, RenewalCycleStatus } from "../../src/modules/renewal/types"
 import { renewalErrors } from "../../src/modules/renewal/utils/errors"
-import {
-  classifyRenewalFailure,
-  isAlertableRenewalFailure,
-} from "../../src/modules/renewal/utils/observability"
 import { SUBSCRIPTION_MODULE } from "../../src/modules/subscription"
 import type SubscriptionModuleService from "../../src/modules/subscription/service"
+import { type SubscriptionSourceSnapshot, SubscriptionStatus } from "../../src/modules/subscription/types"
+import activateSubscriptionOnPaymentCapturedHandler from "../../src/subscribers/activate-subscription-on-payment-captured"
+import { cancelPendingSubscriptionOnPaymentFailure } from "../../src/subscribers/cancel-pending-subscription-on-payment-failure"
+import { forceRenewalCycleWorkflow, processRenewalCycleWorkflow } from "../../src/workflows"
+import { loadOrderAmounts } from "../../src/workflows/steps/run-dunning-retry"
+import { recordOrderCaptureTransactions } from "../../src/workflows/utils/record-order-capture-transactions"
+import { type SeededAwaitingRenewal, seedAwaitingRenewal } from "../helpers/awaiting-renewal-fixtures"
+import { createDunningCaseSeed } from "../helpers/dunning-fixtures"
 import {
-  type SubscriptionSourceSnapshot,
-  SubscriptionStatus,
-} from "../../src/modules/subscription/types"
-import { isBlockedRenewalOutcome } from "../../src/jobs/process-renewal-cycles"
-import {
-  forceRenewalCycleWorkflow,
-  processRenewalCycleWorkflow,
-} from "../../src/workflows"
-import { FrequencyInterval } from "../../src/common/types/frequency-interval"
+  SYSTEM_PAYMENT_PROVIDER_ID,
+  authorizeAndCapturePaymentSession,
+  createPaymentSessionFixture,
+} from "../helpers/payment-fixtures"
 import { createPlanOfferSeed } from "../helpers/plan-offer-fixtures"
-import {
-  answerAuthorizationWithNull,
-  createRenewalChargeStub,
-} from "../helpers/renewal-charge-fixtures"
+import { answerAuthorizationWithNull, createRenewalChargeStub } from "../helpers/renewal-charge-fixtures"
 import {
   createRenewalAttemptSeed,
   createRenewalCycleSeed,
@@ -50,159 +49,237 @@ const mockCreateOrderRun = jest.fn()
 const mockCreateOrUpdateOrderPaymentCollectionRun = jest.fn()
 const mockCreatePaymentSessionsRun = jest.fn()
 
-jest.mock("@medusajs/medusa/core-flows", () => {
-  const actual = jest.requireActual("@medusajs/medusa/core-flows")
-
-  return {
-    ...actual,
-    createOrderWorkflow: () => ({
-      run: mockCreateOrderRun,
-    }),
-    createOrUpdateOrderPaymentCollectionWorkflow: () => ({
-      run: mockCreateOrUpdateOrderPaymentCollectionRun,
-    }),
-    createPaymentSessionsWorkflow: () => ({
-      run: mockCreatePaymentSessionsRun,
-    }),
-  }
-})
+jest.mock("@medusajs/medusa/core-flows", () => ({
+  ...jest.requireActual("@medusajs/medusa/core-flows"),
+  createOrderWorkflow: () => ({ run: mockCreateOrderRun }),
+  createOrUpdateOrderPaymentCollectionWorkflow: () => ({
+    run: mockCreateOrUpdateOrderPaymentCollectionRun,
+  }),
+  createPaymentSessionsWorkflow: () => ({ run: mockCreatePaymentSessionsRun }),
+}))
 
 const stubRenewalCharge = createRenewalChargeStub({
   createOrderRun: mockCreateOrderRun,
-  createOrUpdateOrderPaymentCollectionRun:
-    mockCreateOrUpdateOrderPaymentCollectionRun,
+  createOrUpdateOrderPaymentCollectionRun: mockCreateOrUpdateOrderPaymentCollectionRun,
   createPaymentSessionsRun: mockCreatePaymentSessionsRun,
 })
 
-function spyOnRenewalLog(container: MedusaContainer) {
-  const logger = container.resolve<Logger>("logger")
-  const spies = [
-    jest.spyOn(logger, "info"),
-    jest.spyOn(logger, "warn"),
-    jest.spyOn(logger, "error"),
-  ]
+const DAY_MS = 24 * 60 * 60 * 1000
+const FIRST_RETRY_MS = 1440 * 60 * 1000
+const PLAN_PRODUCT_ID = "prod_awaiting_plan"
 
-  return function executionOutcomes(renewalCycleId: string) {
-    return spies
-      .flatMap((spy) => spy.mock.calls.map(([line]) => String(line)))
-      .flatMap((line) => {
-        try {
-          const entry = JSON.parse(line)
+const webhookEvent = {
+  provider: "pp_test_provider",
+  payload: { data: {}, rawData: Buffer.from("{}"), headers: {} },
+}
 
-          return entry?.event === "renewal.execution" &&
-            entry.renewal_cycle_id === renewalCycleId
-            ? [String(entry.outcome)]
-            : []
-        } catch {
-          return []
-        }
-      })
+type SeededCycle = { subscription: { id: string }, cycle: { id: string } }
+
+const only = (fields: Record<string, unknown>) => [expect.objectContaining(fields)]
+
+function oneMonthAfter(date: Date) {
+  return DateTime.fromJSDate(date, { zone: "utc" }).plus({ months: 1 }).toJSDate()
+}
+
+function sourceSnapshot(variantId: string, title: string, unitPrice: number, sku: string) {
+  const snapshot: SubscriptionSourceSnapshot = {
+    product_id: PLAN_PRODUCT_ID,
+    variant_id: variantId,
+    title,
+    subtitle: null,
+    quantity: 1,
+    unit_price: unitPrice,
+    sku,
+    is_discountable: true,
+    is_tax_inclusive: false,
+    requires_shipping: true,
+    tax_lines: [],
+    adjustments: [],
   }
-}
 
-function renewalLockKey(subscriptionId: string) {
-  return `renewal:subscription:${subscriptionId}`
-}
-
-function expectBlockedAwaitingRefusal(error: unknown, renewalCycleId: string) {
-  expect(error).toMatchObject({ type: MedusaError.Types.CONFLICT })
-
-  const kind = classifyRenewalFailure(error)
-
-  expect(isBlockedRenewalOutcome(kind)).toBe(true)
-  expect(isAlertableRenewalFailure(kind)).toBe(false)
-  expect(error).toMatchObject({
-    message: renewalErrors.awaitingPayment(renewalCycleId).message,
-  })
+  return snapshot
 }
 
 medusaIntegrationTestRunner({
   medusaConfigFile: path.resolve(process.cwd(), "integration-tests"),
-  env: {
-    JWT_SECRET: "supersecret",
-    COOKIE_SECRET: "supersecret",
-  },
+  env: { JWT_SECRET: "supersecret", COOKIE_SECRET: "supersecret" },
   testSuite: ({ getContainer }) => {
-    describe("renewal cycles awaiting their payment", () => {
-      beforeEach(() => {
-        jest.restoreAllMocks()
-        jest.clearAllMocks()
+    const renewals = () => getContainer().resolve<RenewalModuleService>(RENEWAL_MODULE)
+    const subscriptions = () => getContainer().resolve<SubscriptionModuleService>(SUBSCRIPTION_MODULE)
+    const dunning = () => getContainer().resolve<DunningModuleService>(DUNNING_MODULE)
+    const activityLog = () => getContainer().resolve<ActivityLogModuleService>(ACTIVITY_LOG_MODULE)
+    const payments = () => getContainer().resolve(Modules.PAYMENT)
+    const lockKeyOf = (seeded: SeededCycle) => `renewal:subscription:${seeded.subscription.id}`
+
+    async function seedDueRenewal(input: {
+      dueAt: Date
+      orderId: string
+      subscription?: Parameters<typeof createSubscriptionSeed>[1]
+      orderItem?: SubscriptionSourceSnapshot
+    }) {
+      const container = getContainer()
+      const subscription = await createSubscriptionSeed(container, {
+        next_renewal_at: input.dueAt,
+        ...input.subscription,
+      })
+      const cycle = await createRenewalCycleSeed(container, {
+        subscription_id: subscription.id,
+        scheduled_for: input.dueAt,
+      })
+      const { sessionIds } = stubRenewalCharge(container, {
+        subscription,
+        order_id: input.orderId,
+        order_item: input.orderItem,
       })
 
-      it("parks the cycle when authorisation answers null, keeping the order, the settlement inputs and the subscription's dates", async () => {
-        const container = getContainer()
-        const renewalModule =
-          container.resolve<RenewalModuleService>(RENEWAL_MODULE)
-        const subscriptionModule =
-          container.resolve<SubscriptionModuleService>(SUBSCRIPTION_MODULE)
-        const activityLogModule =
-          container.resolve<ActivityLogModuleService>(ACTIVITY_LOG_MODULE)
-        const dunningModule =
-          container.resolve<DunningModuleService>(DUNNING_MODULE)
-        const locking = container.resolve(Modules.LOCKING)
+      return { subscription, cycle, sessionIds }
+    }
 
+    const runRenewal = (renewalCycleId: string, correlationId?: string) =>
+      processRenewalCycleWorkflow(getContainer()).run({
+        input: {
+          renewal_cycle_id: renewalCycleId,
+          trigger_type: "scheduler",
+          correlation_id: correlationId,
+        },
+      })
+
+    async function seedAwaitingWithSavedCard(reference: string) {
+      const container = getContainer()
+      const email = `${reference.toLowerCase()}@example.com`
+      const customer = await container.resolve(Modules.CUSTOMER).createCustomers({ email })
+      const accountHolder = await payments().createAccountHolder({
+        provider_id: SYSTEM_PAYMENT_PROVIDER_ID,
+        context: { customer: { id: customer.id, email } },
+      })
+      await container.resolve(ContainerRegistrationKeys.LINK).create({
+        [Modules.CUSTOMER]: { customer_id: customer.id },
+        [Modules.PAYMENT]: { account_holder_id: accountHolder.id },
+      })
+      const seeded = await seedAwaitingRenewal(container, { reference })
+      await subscriptions().updateSubscriptions({
+        id: seeded.subscription.id,
+        customer_id: customer.id,
+        payment_context: {
+          payment_provider_id: SYSTEM_PAYMENT_PROVIDER_ID,
+          account_holder_id: accountHolder.id,
+          payment_method_id: "pm_old",
+        },
+      })
+
+      return seeded
+    }
+
+    async function useSessionNamingAttempt(seeded: SeededAwaitingRenewal) {
+      const { session } = await createPaymentSessionFixture(getContainer(), {
+        context: { renewal_cycle_id: seeded.cycle.id, renewal_attempt_id: seeded.attempt.id },
+      })
+      await renewals().updateRenewalAttempts({ id: seeded.attempt.id, payment_reference: session.id })
+
+      return session.id
+    }
+
+    async function captureInFull(seeded: SeededAwaitingRenewal) {
+      const payment = await authorizeAndCapturePaymentSession(getContainer(), seeded.session.id)
+      await recordOrderCaptureTransactions(getContainer(), seeded.order.id, payment.id)
+
+      return payment
+    }
+
+    async function deliverCapture(paymentId: string) {
+      await activateSubscriptionOnPaymentCapturedHandler({
+        event: { name: PaymentEvents.CAPTURED, data: { id: paymentId } },
+        container: getContainer(),
+        pluginOptions: {},
+      })
+    }
+
+    async function deliverFailure(sessionId: string, action: string, reason?: string) {
+      jest.spyOn(payments(), "getWebhookActionAndData").mockResolvedValue({
+        action,
+        data: { session_id: sessionId, amount: 100, ...(reason ? { reason } : {}) },
+      } as never)
+
+      await cancelPendingSubscriptionOnPaymentFailure(getContainer(), webhookEvent)
+    }
+
+    async function readState(seeded: SeededCycle) {
+      const subscriptionId = seeded.subscription.id
+      const cycles = await renewals().listRenewalCycles({ subscription_id: subscriptionId })
+      const logs = (eventType: ActivityLogEventType) =>
+        activityLog().listSubscriptionLogs({ subscription_id: subscriptionId, event_type: eventType })
+
+      return {
+        cycle: await renewals().retrieveRenewalCycle(seeded.cycle.id),
+        otherCycles: cycles.filter((cycle) => cycle.id !== seeded.cycle.id),
+        attempts: await renewals().listRenewalAttempts({ renewal_cycle_id: seeded.cycle.id }),
+        subscription: await subscriptions().retrieveSubscription(subscriptionId),
+        cases: await dunning().listDunningCases({ subscription_id: subscriptionId }),
+        succeededLogs: await logs(ActivityLogEventType.RENEWAL_SUCCEEDED),
+        failedLogs: await logs(ActivityLogEventType.RENEWAL_FAILED),
+      }
+    }
+
+    function watchLogEntries() {
+      const logger = getContainer().resolve("logger")
+      const spies = [jest.spyOn(logger, "info"), jest.spyOn(logger, "warn"), jest.spyOn(logger, "error")]
+
+      return function entries(event: string): Record<string, unknown>[] {
+        return spies
+          .flatMap((spy) => spy.mock.calls.map(([line]) => String(line)))
+          .flatMap((line) => {
+            try {
+              const entry = JSON.parse(line)
+
+              return entry?.event === event ? [entry] : []
+            } catch {
+              return []
+            }
+          })
+      }
+    }
+
+    function watchDunningStarted() {
+      const emit = jest.spyOn(getContainer().resolve(Modules.EVENT_BUS), "emit")
+
+      return function dunningStarted() {
+        return emit.mock.calls
+          .map(([message]) => message as { name?: string, data: unknown })
+          .filter((message) => message?.name === DunningEvents.STARTED)
+      }
+    }
+
+    beforeEach(() => {
+      jest.restoreAllMocks()
+      jest.clearAllMocks()
+    })
+
+    describe("a renewal run whose charge is confirmed later", () => {
+      it("parks the cycle when authorisation answers null, keeping the order, the settlement inputs and the subscription's dates", async () => {
+        const locking = getContainer().resolve(Modules.LOCKING)
         const dueAt = new Date("2026-05-10T10:00:00.000Z")
         const orderId = "ord_awaiting_parked"
-        const subscription = await createSubscriptionSeed(container, {
-          reference: "SUB-AWAITING-PARK-001",
-          next_renewal_at: dueAt,
-        })
-        const cycle = await createRenewalCycleSeed(container, {
-          subscription_id: subscription.id,
-          scheduled_for: dueAt,
-        })
+        const seeded = await seedDueRenewal({ dueAt, orderId })
+        answerAuthorizationWithNull(getContainer())
+        const logEntries = watchLogEntries()
 
-        const { sessionIds } = stubRenewalCharge(container, {
-          subscription,
-          order_id: orderId,
-        })
-        answerAuthorizationWithNull(container)
-        const executionOutcomes = spyOnRenewalLog(container)
+        await runRenewal(seeded.cycle.id, "corr-awaiting-park")
 
-        await processRenewalCycleWorkflow(container).run({
-          input: {
-            renewal_cycle_id: cycle.id,
-            trigger_type: "scheduler",
-            correlation_id: "corr-awaiting-park-001",
-          },
-        })
+        const state = await readState(seeded)
 
-        const parked = await renewalModule.retrieveRenewalCycle(cycle.id)
-        const attempts = await renewalModule.listRenewalAttempts({
-          renewal_cycle_id: cycle.id,
-        })
-        const cycles = await renewalModule.listRenewalCycles({
-          subscription_id: subscription.id,
-        })
-        const subscriptionAfter = await subscriptionModule.retrieveSubscription(
-          subscription.id
-        )
-        const outcomeEntries = await activityLogModule.listSubscriptionLogs({
-          subscription_id: subscription.id,
-          event_type: [
-            ActivityLogEventType.RENEWAL_SUCCEEDED,
-            ActivityLogEventType.RENEWAL_FAILED,
-          ],
-        })
-        const dunningCases = await dunningModule.listDunningCases({
-          subscription_id: subscription.id,
-        })
-
-        expect(sessionIds).toHaveLength(1)
-        expect(parked).toMatchObject({
+        expect(seeded.sessionIds).toHaveLength(1)
+        expect(state.cycle).toMatchObject({
           status: RenewalCycleStatus.AWAITING_PAYMENT,
           generated_order_id: orderId,
           attempt_count: 1,
         })
-        expect(attempts).toHaveLength(1)
-        expect(attempts[0]).toMatchObject({
-          status: RenewalAttemptStatus.PROCESSING,
-          payment_reference: sessionIds[0],
-        })
-        expect(parked.settlement_inputs).toEqual({
-          attempt_id: attempts[0].id,
+        expect(state.attempts).toEqual(
+          only({ status: RenewalAttemptStatus.PROCESSING, payment_reference: seeded.sessionIds[0] })
+        )
+        expect(state.cycle.settlement_inputs).toEqual({
+          attempt_id: state.attempts[0].id,
           audit: {
-            correlation_id: "corr-awaiting-park-001",
+            correlation_id: "corr-awaiting-park",
             trigger_type: "scheduler",
             triggered_by: null,
             attempt_no: 1,
@@ -218,85 +295,52 @@ medusaIntegrationTestRunner({
           },
           source_snapshot: null,
         })
-        expect(cycles.map((record) => record.id)).toEqual([cycle.id])
-        expect(subscriptionAfter.status).toEqual(SubscriptionStatus.ACTIVE)
-        expect(new Date(subscriptionAfter.next_renewal_at!).toISOString()).toEqual(
-          dueAt.toISOString()
-        )
-        expect(subscriptionAfter.last_renewal_at).toBeNull()
-        expect(outcomeEntries).toHaveLength(0)
-        expect(executionOutcomes(cycle.id)).toContain("started")
-        expect(executionOutcomes(cycle.id)).not.toContain("succeeded")
-        expect(executionOutcomes(cycle.id)).not.toContain("failed")
-        expect(dunningCases).toHaveLength(0)
-
-        const lockKey = renewalLockKey(subscription.id)
-
+        expect(state.otherCycles).toHaveLength(0)
+        expect(state.subscription).toMatchObject({
+          status: SubscriptionStatus.ACTIVE,
+          next_renewal_at: dueAt,
+          last_renewal_at: null,
+        })
+        expect(state.succeededLogs).toHaveLength(0)
+        expect(state.failedLogs).toHaveLength(0)
+        expect(state.cases).toHaveLength(0)
+        expect(
+          logEntries("renewal.execution")
+            .filter((entry) => entry.renewal_cycle_id === seeded.cycle.id)
+            .map((entry) => entry.outcome)
+        ).toEqual(["started", "awaiting_payment"])
         await expect(
-          locking.acquire(lockKey, { ownerId: "lock-probe", expire: 5 })
+          locking.acquire(lockKeyOf(seeded), { ownerId: "lock-probe", expire: 5 })
         ).resolves.toBeUndefined()
-        await locking.release(lockKey, { ownerId: "lock-probe" })
+        await locking.release(lockKeyOf(seeded), { ownerId: "lock-probe" })
       })
 
       it("parks a plan-change cycle with the new variant's snapshot and leaves the plan change unapplied", async () => {
-        const container = getContainer()
-        const renewalModule =
-          container.resolve<RenewalModuleService>(RENEWAL_MODULE)
-        const subscriptionModule =
-          container.resolve<SubscriptionModuleService>(SUBSCRIPTION_MODULE)
-
-        const dueAt = new Date("2026-05-11T10:00:00.000Z")
-        const orderId = "ord_awaiting_plan"
-        const productId = "prod_awaiting_plan"
         const oldVariantId = "variant_awaiting_old"
         const newVariantId = "variant_awaiting_new"
-        const newVariantSnapshot: SubscriptionSourceSnapshot = {
-          product_id: productId,
-          variant_id: newVariantId,
-          title: "New Variant",
-          subtitle: null,
-          quantity: 1,
-          unit_price: 7500,
-          sku: "NEW-SKU",
-          is_discountable: true,
-          is_tax_inclusive: false,
-          requires_shipping: true,
-          tax_lines: [],
-          adjustments: [],
-        }
+        const newSnapshot = sourceSnapshot(newVariantId, "New Variant", 7500, "NEW-SKU")
+        const { product_id, variant_id, title, quantity, unit_price, sku } = newSnapshot
 
-        await createPlanOfferSeed(container, {
+        await createPlanOfferSeed(getContainer(), {
           name: "Awaiting plan change offer",
           scope: PlanOfferScope.VARIANT,
-          product_id: productId,
+          product_id: PLAN_PRODUCT_ID,
           variant_id: newVariantId,
           is_enabled: true,
           allowed_frequencies: [{ interval: FrequencyInterval.MONTH, value: 1 }],
         })
-
-        const subscription = await createSubscriptionSeed(container, {
-          reference: "SUB-AWAITING-PLAN-001",
-          next_renewal_at: dueAt,
-          product_id: productId,
-          variant_id: oldVariantId,
-          source_snapshot: {
-            product_id: productId,
+        const seeded = await seedDueRenewal({
+          dueAt: new Date("2026-05-11T10:00:00.000Z"),
+          orderId: "ord_awaiting_plan",
+          orderItem: newSnapshot,
+          subscription: {
+            product_id: PLAN_PRODUCT_ID,
             variant_id: oldVariantId,
-            title: "Old Variant",
-            subtitle: null,
-            quantity: 1,
-            unit_price: 5000,
-            sku: "OLD-SKU",
-            is_discountable: true,
-            is_tax_inclusive: false,
-            requires_shipping: true,
-            tax_lines: [],
-            adjustments: [],
+            source_snapshot: sourceSnapshot(oldVariantId, "Old Variant", 5000, "OLD-SKU"),
           },
         })
-
-        await subscriptionModule.updateSubscriptions({
-          id: subscription.id,
+        await subscriptions().updateSubscriptions({
+          id: seeded.subscription.id,
           pending_update_data: {
             variant_id: newVariantId,
             variant_title: "New Variant",
@@ -308,363 +352,459 @@ medusaIntegrationTestRunner({
             requested_by: null,
           },
         })
+        answerAuthorizationWithNull(getContainer())
 
-        const cycle = await createRenewalCycleSeed(container, {
-          subscription_id: subscription.id,
-          scheduled_for: dueAt,
-        })
+        await runRenewal(seeded.cycle.id)
 
-        stubRenewalCharge(container, {
-          subscription,
-          order_id: orderId,
-          order_item: newVariantSnapshot,
-        })
-        answerAuthorizationWithNull(container)
+        const state = await readState(seeded)
 
-        await processRenewalCycleWorkflow(container).run({
-          input: {
-            renewal_cycle_id: cycle.id,
-            trigger_type: "scheduler",
+        expect(state.cycle).toMatchObject({
+          status: RenewalCycleStatus.AWAITING_PAYMENT,
+          settlement_inputs: {
+            source_snapshot: { product_id, variant_id, title, quantity, unit_price, sku },
           },
         })
-
-        const parked = await renewalModule.retrieveRenewalCycle(cycle.id)
-        const subscriptionAfter = await subscriptionModule.retrieveSubscription(
-          subscription.id
-        )
-
-        expect(parked.status).toEqual(RenewalCycleStatus.AWAITING_PAYMENT)
-        expect(parked.settlement_inputs).toMatchObject({
-          source_snapshot: {
-            product_id: productId,
-            variant_id: newVariantId,
-            title: "New Variant",
-            quantity: 1,
-            unit_price: 7500,
-            sku: "NEW-SKU",
-          },
-        })
-        expect(subscriptionAfter.variant_id).toEqual(oldVariantId)
-        expect(subscriptionAfter.source_snapshot).toMatchObject({
+        expect(state.subscription).toMatchObject({
           variant_id: oldVariantId,
-          unit_price: 5000,
-        })
-        expect(subscriptionAfter.pending_update_data).toMatchObject({
-          variant_id: newVariantId,
+          source_snapshot: { variant_id: oldVariantId, unit_price: 5000 },
+          pending_update_data: { variant_id: newVariantId },
         })
       })
 
-      it("refuses forced and manual runs of a cycle awaiting its payment as blocked and never alertable", async () => {
+      it("refuses forced and manual runs of a cycle awaiting its payment, writes nothing, and keeps it off the scheduler's due list", async () => {
         const container = getContainer()
-        const renewalModule =
-          container.resolve<RenewalModuleService>(RENEWAL_MODULE)
-        const activityLogModule =
-          container.resolve<ActivityLogModuleService>(ACTIVITY_LOG_MODULE)
-
-        const dueAt = new Date("2026-05-12T10:00:00.000Z")
-        const subscription = await createSubscriptionSeed(container, {
-          reference: "SUB-AWAITING-REFUSE-001",
-          next_renewal_at: dueAt,
-          skip_next_cycle: true,
-        })
-        const cycle = await createRenewalCycleSeed(container, {
-          subscription_id: subscription.id,
-          scheduled_for: dueAt,
-          status: RenewalCycleStatus.AWAITING_PAYMENT,
-          generated_order_id: "ord_awaiting_refuse",
-          attempt_count: 1,
-        })
-        await createRenewalAttemptSeed(container, {
-          renewal_cycle_id: cycle.id,
-          status: RenewalAttemptStatus.PROCESSING,
-          payment_reference: "payses_awaiting_refuse",
-        })
-
-        const forceError = await forceRenewalCycleWorkflow(container)
-          .run({
-            input: {
-              renewal_cycle_id: cycle.id,
-              triggered_by: "admin_awaiting",
-            },
-          })
-          .catch((error: unknown) => error)
-        const manualError = await processRenewalCycleWorkflow(container)
-          .run({
-            input: {
-              renewal_cycle_id: cycle.id,
-              trigger_type: "manual",
-              triggered_by: "admin_awaiting",
-            },
-          })
-          .catch((error: unknown) => error)
-
-        expectBlockedAwaitingRefusal(forceError, cycle.id)
-        expectBlockedAwaitingRefusal(manualError, cycle.id)
-
-        const cycleAfter = await renewalModule.retrieveRenewalCycle(cycle.id)
-        const attempts = await renewalModule.listRenewalAttempts({
-          renewal_cycle_id: cycle.id,
-        })
-        const forceEntries = await activityLogModule.listSubscriptionLogs({
-          subscription_id: subscription.id,
-          event_type: ActivityLogEventType.RENEWAL_FORCE_REQUESTED,
-        })
-
-        expect(cycleAfter).toMatchObject({
-          status: RenewalCycleStatus.AWAITING_PAYMENT,
-          attempt_count: 1,
-        })
-        expect(attempts).toHaveLength(1)
-        expect(attempts[0].status).toEqual(RenewalAttemptStatus.PROCESSING)
-        expect(forceEntries).toHaveLength(0)
-      })
-
-      it("never hands a cycle awaiting its payment to the scheduler", async () => {
-        const container = getContainer()
-        const renewalModule =
-          container.resolve<RenewalModuleService>(RENEWAL_MODULE)
-
-        const dueAt = new Date("2026-05-13T10:00:00.000Z")
-        const awaiting = await createRenewalCycleSeed(container, {
-          subscription_id: "sub_due_awaiting",
-          scheduled_for: dueAt,
-          status: RenewalCycleStatus.AWAITING_PAYMENT,
-        })
+        const seeded = await seedAwaitingRenewal(container, { reference: "SUB-AWAITING-REFUSE" })
         const scheduled = await createRenewalCycleSeed(container, {
           subscription_id: "sub_due_scheduled",
-          scheduled_for: dueAt,
-          status: RenewalCycleStatus.SCHEDULED,
+          scheduled_for: seeded.scheduledFor,
         })
+        const input = { renewal_cycle_id: seeded.cycle.id, triggered_by: "admin_awaiting" }
+        const refusal = {
+          type: MedusaError.Types.CONFLICT,
+          message: renewalErrors.awaitingPayment(seeded.cycle.id).message,
+        }
 
-        const due = await renewalModule.listDueRenewalCyclesForWindow({
-          dueBefore: new Date("2026-05-14T00:00:00.000Z"),
+        await expect(forceRenewalCycleWorkflow(container).run({ input })).rejects.toMatchObject(refusal)
+        await expect(
+          processRenewalCycleWorkflow(container).run({ input: { ...input, trigger_type: "manual" } })
+        ).rejects.toMatchObject(refusal)
+
+        const state = await readState(seeded)
+        const forceEntries = await activityLog().listSubscriptionLogs({
+          subscription_id: seeded.subscription.id,
+          event_type: ActivityLogEventType.RENEWAL_FORCE_REQUESTED,
+        })
+        const due = await renewals().listDueRenewalCyclesForWindow({
+          dueBefore: new Date(Date.now() + DAY_MS),
           cursor: "",
           limit: 100,
         })
         const dueIds = due.map((record) => record.id)
 
+        expect(state.cycle).toMatchObject({
+          status: RenewalCycleStatus.AWAITING_PAYMENT,
+          attempt_count: 1,
+        })
+        expect(state.attempts).toEqual(only({ status: RenewalAttemptStatus.PROCESSING }))
+        expect(forceEntries).toHaveLength(0)
         expect(dueIds).toContain(scheduled.id)
-        expect(dueIds).not.toContain(awaiting.id)
+        expect(dueIds).not.toContain(seeded.cycle.id)
       })
 
       it("keeps a parked cycle awaiting its payment when a later step of the run fails", async () => {
-        const container = getContainer()
-        const renewalModule =
-          container.resolve<RenewalModuleService>(RENEWAL_MODULE)
-        const activityLogModule =
-          container.resolve<ActivityLogModuleService>(ACTIVITY_LOG_MODULE)
-        const dunningModule =
-          container.resolve<DunningModuleService>(DUNNING_MODULE)
-        const locking = container.resolve(Modules.LOCKING)
-
-        const dueAt = new Date("2026-05-15T10:00:00.000Z")
+        const locking = getContainer().resolve(Modules.LOCKING)
         const orderId = "ord_awaiting_late_failure"
-        const subscription = await createSubscriptionSeed(container, {
-          reference: "SUB-AWAITING-LATE-FAILURE-001",
-          next_renewal_at: dueAt,
-        })
-        const cycle = await createRenewalCycleSeed(container, {
-          subscription_id: subscription.id,
-          scheduled_for: dueAt,
-        })
+        const seeded = await seedDueRenewal({ dueAt: new Date("2026-05-15T10:00:00.000Z"), orderId })
+        answerAuthorizationWithNull(getContainer())
 
-        const { sessionIds } = stubRenewalCharge(container, {
-          subscription,
-          order_id: orderId,
-        })
-        answerAuthorizationWithNull(container)
-
-        const lockKey = renewalLockKey(subscription.id)
         const release = locking.release.bind(locking)
         let releaseRefused = false
 
-        jest
-          .spyOn(locking, "release")
-          .mockImplementation(async (keys, args) => {
-            const list = Array.isArray(keys) ? keys : [keys]
+        jest.spyOn(locking, "release").mockImplementation(async (keys, args) => {
+          const list = Array.isArray(keys) ? keys : [keys]
 
-            if (!releaseRefused && list.includes(lockKey)) {
-              releaseRefused = true
-              throw new Error("lock store unavailable")
-            }
+          if (!releaseRefused && list.includes(lockKeyOf(seeded))) {
+            releaseRefused = true
+            throw new Error("lock store unavailable")
+          }
 
-            return release(keys, args)
-          })
+          return release(keys, args)
+        })
 
-        await expect(
-          processRenewalCycleWorkflow(container).run({
-            input: {
-              renewal_cycle_id: cycle.id,
-              trigger_type: "scheduler",
-            },
-          })
-        ).rejects.toMatchObject({
+        await expect(runRenewal(seeded.cycle.id)).rejects.toMatchObject({
           message: expect.stringContaining("lock store unavailable"),
         })
 
-        const cycleAfter = await renewalModule.retrieveRenewalCycle(cycle.id)
-        const attempts = await renewalModule.listRenewalAttempts({
-          renewal_cycle_id: cycle.id,
-        })
-        const failedEntries = await activityLogModule.listSubscriptionLogs({
-          subscription_id: subscription.id,
-          event_type: ActivityLogEventType.RENEWAL_FAILED,
-        })
-        const dunningCases = await dunningModule.listDunningCases({
-          subscription_id: subscription.id,
-        })
+        const state = await readState(seeded)
 
-        expect(cycleAfter).toMatchObject({
+        expect(state.attempts).toEqual(
+          only({ status: RenewalAttemptStatus.PROCESSING, payment_reference: seeded.sessionIds[0] })
+        )
+        expect(state.cycle).toMatchObject({
           status: RenewalCycleStatus.AWAITING_PAYMENT,
           generated_order_id: orderId,
+          settlement_inputs: { attempt_id: state.attempts[0].id },
         })
-        expect(attempts).toHaveLength(1)
-        expect(cycleAfter.settlement_inputs).toMatchObject({
-          attempt_id: attempts[0].id,
-        })
-        expect(attempts[0]).toMatchObject({
-          status: RenewalAttemptStatus.PROCESSING,
-          payment_reference: sessionIds[0],
-        })
-        expect(failedEntries).toHaveLength(0)
-        expect(dunningCases).toHaveLength(0)
+        expect(state.failedLogs).toHaveLength(0)
+        expect(state.cases).toHaveLength(0)
       })
 
       it("leaves a cycle settled as succeeded while the run waited on authorisation, closing its attempt as succeeded", async () => {
-        const container = getContainer()
-        const renewalModule =
-          container.resolve<RenewalModuleService>(RENEWAL_MODULE)
-        const activityLogModule =
-          container.resolve<ActivityLogModuleService>(ACTIVITY_LOG_MODULE)
-        const paymentModule =
-          container.resolve<IPaymentModuleService>(Modules.PAYMENT)
-
-        const dueAt = new Date("2026-05-17T10:00:00.000Z")
         const orderId = "ord_settled_during_run"
-        const subscription = await createSubscriptionSeed(container, {
-          reference: "SUB-SETTLED-DURING-RUN-001",
-          next_renewal_at: dueAt,
-        })
-        const cycle = await createRenewalCycleSeed(container, {
-          subscription_id: subscription.id,
-          scheduled_for: dueAt,
-        })
+        const seeded = await seedDueRenewal({ dueAt: new Date("2026-05-17T10:00:00.000Z"), orderId })
 
-        const { sessionIds } = stubRenewalCharge(container, {
-          subscription,
-          order_id: orderId,
-        })
-
-        jest
-          .spyOn(paymentModule, "authorizePaymentSession")
-          .mockImplementation(async () => {
-            await renewalModule.updateRenewalCycles({
-              id: cycle.id,
-              status: RenewalCycleStatus.SUCCEEDED,
-            })
-
-            return null as never
+        jest.spyOn(payments(), "authorizePaymentSession").mockImplementation(async () => {
+          await renewals().updateRenewalCycles({
+            id: seeded.cycle.id,
+            status: RenewalCycleStatus.SUCCEEDED,
           })
 
-        await processRenewalCycleWorkflow(container).run({
-          input: {
-            renewal_cycle_id: cycle.id,
-            trigger_type: "scheduler",
-          },
+          return null as never
         })
 
-        const cycleAfter = await renewalModule.retrieveRenewalCycle(cycle.id)
-        const attempts = await renewalModule.listRenewalAttempts({
-          renewal_cycle_id: cycle.id,
-        })
-        const succeededEntries = await activityLogModule.listSubscriptionLogs({
-          subscription_id: subscription.id,
-          event_type: ActivityLogEventType.RENEWAL_SUCCEEDED,
-        })
+        await runRenewal(seeded.cycle.id)
 
-        expect(cycleAfter.status).toEqual(RenewalCycleStatus.SUCCEEDED)
-        expect(attempts).toHaveLength(1)
-        expect(attempts[0]).toMatchObject({
-          status: RenewalAttemptStatus.SUCCEEDED,
-          payment_reference: sessionIds[0],
-          order_id: orderId,
-        })
-        expect(attempts[0].finished_at).toBeTruthy()
-        expect(succeededEntries).toHaveLength(0)
+        const state = await readState(seeded)
+
+        expect(state.cycle.status).toEqual(RenewalCycleStatus.SUCCEEDED)
+        expect(state.attempts).toEqual(
+          only({
+            status: RenewalAttemptStatus.SUCCEEDED,
+            payment_reference: seeded.sessionIds[0],
+            order_id: orderId,
+            finished_at: expect.anything(),
+          })
+        )
+        expect(state.succeededLogs).toHaveLength(0)
       })
 
       it("settles the cycle in the same run when authorisation returns a payment", async () => {
-        const container = getContainer()
-        const renewalModule =
-          container.resolve<RenewalModuleService>(RENEWAL_MODULE)
-        const subscriptionModule =
-          container.resolve<SubscriptionModuleService>(SUBSCRIPTION_MODULE)
-        const activityLogModule =
-          container.resolve<ActivityLogModuleService>(ACTIVITY_LOG_MODULE)
-        const paymentModule =
-          container.resolve<IPaymentModuleService>(Modules.PAYMENT)
-
         const dueAt = new Date("2026-05-16T10:00:00.000Z")
         const orderId = "ord_sync_settled"
-        const subscription = await createSubscriptionSeed(container, {
-          reference: "SUB-SYNC-SETTLED-001",
-          next_renewal_at: dueAt,
-        })
-        const cycle = await createRenewalCycleSeed(container, {
-          subscription_id: subscription.id,
-          scheduled_for: dueAt,
-        })
+        const seeded = await seedDueRenewal({ dueAt, orderId })
 
-        const { sessionIds } = stubRenewalCharge(container, {
-          subscription,
-          order_id: orderId,
-        })
+        await runRenewal(seeded.cycle.id)
 
-        await processRenewalCycleWorkflow(container).run({
-          input: {
-            renewal_cycle_id: cycle.id,
-            trigger_type: "scheduler",
-          },
-        })
+        const state = await readState(seeded)
 
-        const settled = await renewalModule.retrieveRenewalCycle(cycle.id)
-        const attempts = await renewalModule.listRenewalAttempts({
-          renewal_cycle_id: cycle.id,
-        })
-        const cycles = await renewalModule.listRenewalCycles({
-          subscription_id: subscription.id,
-        })
-        const subscriptionAfter = await subscriptionModule.retrieveSubscription(
-          subscription.id
-        )
-        const succeededEntries = await activityLogModule.listSubscriptionLogs({
-          subscription_id: subscription.id,
-          event_type: ActivityLogEventType.RENEWAL_SUCCEEDED,
-        })
-        const payments = await paymentModule.listPayments({
-          payment_session_id: sessionIds[0],
-        })
-
-        expect(settled).toMatchObject({
+        expect(state.cycle).toMatchObject({
           status: RenewalCycleStatus.SUCCEEDED,
           generated_order_id: orderId,
         })
-        expect(attempts).toHaveLength(1)
-        expect(attempts[0].status).toEqual(RenewalAttemptStatus.SUCCEEDED)
-        expect(payments).toHaveLength(1)
-        expect(payments[0].captured_at).toBeTruthy()
+        expect(state.attempts).toEqual(only({ status: RenewalAttemptStatus.SUCCEEDED }))
         expect(
-          new Date(subscriptionAfter.next_renewal_at!).getTime()
-        ).toBeGreaterThan(dueAt.getTime())
-        expect(subscriptionAfter.last_renewal_at).toBeTruthy()
-        expect(succeededEntries).toHaveLength(1)
-        expect(cycles).toHaveLength(2)
-        expect(
-          cycles.find((record) => record.id !== cycle.id)?.status
-        ).toEqual(RenewalCycleStatus.SCHEDULED)
+          await payments().listPayments({ payment_session_id: seeded.sessionIds[0] })
+        ).toEqual(only({ captured_at: expect.anything() }))
+        expect(new Date(state.subscription.next_renewal_at!).getTime()).toBeGreaterThan(dueAt.getTime())
+        expect(state.subscription.last_renewal_at).toBeTruthy()
+        expect(state.succeededLogs).toHaveLength(1)
+        expect(state.otherCycles).toEqual(only({ status: RenewalCycleStatus.SCHEDULED }))
+      })
+    })
+
+    describe("payment.captured for a renewal cycle awaiting payment", () => {
+      it.each([
+        { name: "once", deliveries: 1 },
+        { name: "twice at the same time", deliveries: 2 },
+      ])("settles once, from the cycle's due date and with the stored inputs, when the capture is delivered $name", async ({ deliveries }) => {
+        const reference = `SUB-AWAIT-SETTLE-${deliveries}`
+        const scheduledFor = new Date(Date.now() - 3 * DAY_MS)
+        const seeded = await seedAwaitingRenewal(getContainer(), {
+          reference,
+          scheduled_for: scheduledFor,
+        })
+        const payment = await captureInFull(seeded)
+
+        await Promise.all(Array.from({ length: deliveries }, () => deliverCapture(payment.id)))
+
+        const state = await readState(seeded)
+
+        expect(state.cycle).toMatchObject({
+          status: RenewalCycleStatus.SUCCEEDED,
+          generated_order_id: seeded.order.id,
+        })
+        expect(state.attempts).toEqual(
+          only({
+            id: seeded.attempt.id,
+            status: RenewalAttemptStatus.SUCCEEDED,
+            order_id: seeded.order.id,
+          })
+        )
+        expect(state.subscription.next_renewal_at).toEqual(oneMonthAfter(scheduledFor))
+        expect(state.otherCycles).toEqual(
+          only({ status: RenewalCycleStatus.SCHEDULED, scheduled_for: oneMonthAfter(scheduledFor) })
+        )
+        expect(state.succeededLogs).toEqual(
+          only({
+            metadata: expect.objectContaining({
+              order_id: seeded.order.id,
+              correlation_id: `renewal-scheduler-${reference}`,
+            }),
+          })
+        )
+      })
+
+      it("leaves the cycle awaiting until the order is paid up", async () => {
+        const container = getContainer()
+        const seeded = await seedAwaitingRenewal(container, { reference: "SUB-AWAIT-PARTIAL" })
+        const payment = await payments().authorizePaymentSession(seeded.session.id, {})
+
+        await payments().capturePayment({ payment_id: payment.id, amount: 40 })
+        await recordOrderCaptureTransactions(container, seeded.order.id, payment.id)
+        expect((await loadOrderAmounts(container, seeded.order.id)).pending).toEqual(60)
+
+        await deliverCapture(payment.id)
+
+        const partlyPaid = await readState(seeded)
+
+        expect(partlyPaid.cycle.status).toEqual(RenewalCycleStatus.AWAITING_PAYMENT)
+        expect(partlyPaid.attempts).toEqual(only({ status: RenewalAttemptStatus.PROCESSING }))
+        expect(partlyPaid.subscription.next_renewal_at).toEqual(seeded.scheduledFor)
+        expect(partlyPaid.succeededLogs).toHaveLength(0)
+
+        await payments().capturePayment({ payment_id: payment.id, amount: 60 })
+        await recordOrderCaptureTransactions(container, seeded.order.id, payment.id)
+        expect((await loadOrderAmounts(container, seeded.order.id)).pending).toEqual(0)
+
+        await deliverCapture(payment.id)
+
+        const paidUp = await readState(seeded)
+
+        expect(paidUp.cycle.status).toEqual(RenewalCycleStatus.SUCCEEDED)
+        expect(paidUp.subscription.next_renewal_at).toEqual(oneMonthAfter(seeded.scheduledFor))
+      })
+
+      it("closes the cycle without moving any date once billing has moved past it", async () => {
+        const seeded = await seedAwaitingRenewal(getContainer(), { reference: "SUB-AWAIT-MOVED" })
+        const movedTo = oneMonthAfter(seeded.scheduledFor)
+        await subscriptions().updateSubscriptions({
+          id: seeded.subscription.id,
+          next_renewal_at: movedTo,
+        })
+        const payment = await captureInFull(seeded)
+
+        await deliverCapture(payment.id)
+
+        const state = await readState(seeded)
+
+        expect(state.cycle.status).toEqual(RenewalCycleStatus.SUCCEEDED)
+        expect(state.subscription.next_renewal_at).toEqual(movedTo)
+        expect(state.subscription.last_renewal_at).toBeNull()
+      })
+
+      it.each([
+        {
+          name: "refreshing the payment context",
+          message: "payment provider unavailable",
+          failLaterEffect: (message: string) => {
+            jest.spyOn(payments(), "listPaymentMethods").mockRejectedValue(new Error(message))
+          },
+        },
+        {
+          name: "the dunning lookup",
+          message: "dunning store unavailable",
+          failLaterEffect: (message: string) => {
+            const dunningModule = dunning()
+            const list = dunningModule.listDunningCases.bind(dunningModule)
+
+            jest.spyOn(dunningModule, "listDunningCases").mockImplementation(async (filters, config) => {
+              if (filters && "renewal_order_id" in filters) {
+                throw new Error(message)
+              }
+
+              return await list(filters, config)
+            })
+          },
+        },
+      ])("settles when $name fails", async ({ name, message, failLaterEffect }) => {
+        const seeded = await seedAwaitingWithSavedCard(`SUB-AWAIT-${name.replace(/\s+/g, "-")}`)
+        const payment = await captureInFull(seeded)
+        failLaterEffect(message)
+
+        await expect(deliverCapture(payment.id)).rejects.toThrow(message)
+
+        expect((await readState(seeded)).cycle.status).toEqual(RenewalCycleStatus.SUCCEEDED)
+      })
+
+      it("still refreshes the payment context and recovers dunning when the settlement fails", async () => {
+        const seeded = await seedAwaitingWithSavedCard("SUB-AWAIT-SETTLE-FAIL")
+        const dunningCase = await createDunningCaseSeed(getContainer(), {
+          subscription_id: seeded.subscription.id,
+          renewal_cycle_id: seeded.cycle.id,
+          renewal_order_id: seeded.order.id,
+          status: DunningCaseStatus.RETRY_SCHEDULED,
+        })
+        const payment = await captureInFull(seeded)
+
+        jest.spyOn(payments(), "listPaymentMethods").mockResolvedValue([
+          { id: "pm_new", provider_id: SYSTEM_PAYMENT_PROVIDER_ID, data: { created: 2 } },
+        ])
+        jest
+          .spyOn(subscriptions(), "retrieveSubscription")
+          .mockRejectedValueOnce(new Error("renewal settlement failed"))
+        const logEntries = watchLogEntries()
+
+        await deliverCapture(payment.id)
+
+        const state = await readState(seeded)
+
+        expect(logEntries("renewal_settlement_from_capture_failed")).toEqual(
+          only({
+            renewal_cycle_id: seeded.cycle.id,
+            subscription_id: seeded.subscription.id,
+            payment_id: payment.id,
+          })
+        )
+        expect(state.subscription.payment_context?.payment_method_id).toEqual("pm_new")
+        expect((await dunning().retrieveDunningCase(dunningCase.id)).status).toEqual(
+          DunningCaseStatus.RECOVERED
+        )
+      })
+
+      it("settles a paid cycle on the sweep and leaves an unpaid one awaiting", async () => {
+        const container = getContainer()
+        const paid = await seedAwaitingRenewal(container, { reference: "SUB-AWAIT-SWEEP-PAID" })
+        const unpaid = await seedAwaitingRenewal(container, { reference: "SUB-AWAIT-SWEEP-UNPAID" })
+        await captureInFull(paid)
+
+        await reconcileAwaitingRenewalCycles(container)
+
+        const paidState = await readState(paid)
+        const unpaidState = await readState(unpaid)
+
+        expect(paidState.cycle.status).toEqual(RenewalCycleStatus.SUCCEEDED)
+        expect(paidState.attempts).toEqual(
+          only({ id: paid.attempt.id, status: RenewalAttemptStatus.SUCCEEDED })
+        )
+        expect(paidState.subscription.next_renewal_at).toEqual(oneMonthAfter(paid.scheduledFor))
+        expect(paidState.otherCycles).toEqual(only({ status: RenewalCycleStatus.SCHEDULED }))
+        expect(unpaidState.cycle.status).toEqual(RenewalCycleStatus.AWAITING_PAYMENT)
+        expect(unpaidState.attempts).toEqual(only({ status: RenewalAttemptStatus.PROCESSING }))
+        expect(unpaidState.subscription.next_renewal_at).toEqual(unpaid.scheduledFor)
+      })
+    })
+
+    describe("a failed or canceled payment for a renewal cycle awaiting payment", () => {
+      it.each([
+        { action: PaymentActions.FAILED, reason: "declined", namesAttempt: true },
+        { action: PaymentActions.CANCELED, reason: undefined, namesAttempt: false },
+      ])("fails the cycle and opens dunning once on '$action' with reason $reason (session names its attempt: $namesAttempt), and changes nothing when delivered again", async ({ action, reason, namesAttempt }) => {
+        const seeded = await seedAwaitingRenewal(getContainer(), { reference: `SUB-FAIL-${action}` })
+        const sessionId = namesAttempt ? await useSessionNamingAttempt(seeded) : seeded.session.id
+        const errorCode = reason ?? action
+        const dunningStarted = watchDunningStarted()
+
+        const before = Date.now()
+        await deliverFailure(sessionId, action, reason)
+        const after = Date.now()
+
+        const state = await readState(seeded)
+
+        expect(state.cycle).toMatchObject({
+          status: RenewalCycleStatus.FAILED,
+          generated_order_id: seeded.order.id,
+          last_error: expect.stringContaining(action),
+        })
+        expect(state.attempts).toEqual(
+          only({
+            id: seeded.attempt.id,
+            status: RenewalAttemptStatus.FAILED,
+            error_code: errorCode,
+            payment_reference: sessionId,
+            finished_at: expect.anything(),
+          })
+        )
+        expect(state.subscription.status).toEqual(SubscriptionStatus.PAST_DUE)
+        expect(state.cases).toEqual(
+          only({
+            renewal_cycle_id: seeded.cycle.id,
+            renewal_order_id: seeded.order.id,
+            status: DunningCaseStatus.RETRY_SCHEDULED,
+            last_payment_error_code: errorCode,
+          })
+        )
+
+        const nextRetryAt = new Date(state.cases[0].next_retry_at!).getTime()
+
+        expect(nextRetryAt).toBeGreaterThanOrEqual(before + FIRST_RETRY_MS)
+        expect(nextRetryAt).toBeLessThanOrEqual(after + FIRST_RETRY_MS)
+        expect(dunningStarted().map((message) => message.data)).toEqual(
+          only({
+            subscription_id: seeded.subscription.id,
+            dunning_case_id: state.cases[0].id,
+            renewal_cycle_id: seeded.cycle.id,
+          })
+        )
+        expect(state.failedLogs).toHaveLength(1)
+
+        await deliverFailure(sessionId, action, reason)
+
+        const replayed = await readState(seeded)
+
+        expect(replayed.cycle).toEqual(state.cycle)
+        expect(replayed.attempts).toEqual(state.attempts)
+        expect(replayed.cases).toEqual(state.cases)
+        expect(replayed.subscription.status).toEqual(SubscriptionStatus.PAST_DUE)
+        expect(replayed.failedLogs).toHaveLength(1)
+        expect(dunningStarted()).toHaveLength(1)
+      })
+
+      it("fails the cycle but opens no dunning case when the subscription is paused", async () => {
+        const seeded = await seedAwaitingRenewal(getContainer(), {
+          reference: "SUB-FAIL-PAUSED",
+          subscription_status: SubscriptionStatus.PAUSED,
+        })
+        const dunningStarted = watchDunningStarted()
+
+        await deliverFailure(seeded.session.id, PaymentActions.FAILED, "declined")
+
+        const state = await readState(seeded)
+
+        expect(state.cycle).toMatchObject({
+          status: RenewalCycleStatus.FAILED,
+          generated_order_id: seeded.order.id,
+        })
+        expect(state.attempts).toEqual(
+          only({ status: RenewalAttemptStatus.FAILED, error_code: "declined" })
+        )
+        expect(state.subscription.status).toEqual(SubscriptionStatus.PAUSED)
+        expect(state.cases).toHaveLength(0)
+        expect(dunningStarted()).toHaveLength(0)
+      })
+
+      it("ignores a failure for a session whose cycle already succeeded, leaving the subscription's processing cycle alone", async () => {
+        const container = getContainer()
+        const settled = await seedAwaitingRenewal(container, {
+          reference: "SUB-FAIL-STALE",
+          cycle_status: RenewalCycleStatus.SUCCEEDED,
+        })
+        const current = {
+          subscription: settled.subscription,
+          cycle: await createRenewalCycleSeed(container, {
+            subscription_id: settled.subscription.id,
+            status: RenewalCycleStatus.PROCESSING,
+            attempt_count: 1,
+          }),
+        }
+        await createRenewalAttemptSeed(container, {
+          renewal_cycle_id: current.cycle.id,
+          status: RenewalAttemptStatus.PROCESSING,
+        })
+        const dunningStarted = watchDunningStarted()
+        const before = [await readState(settled), await readState(current)]
+
+        await deliverFailure(settled.session.id, PaymentActions.FAILED, "declined")
+
+        const after = [await readState(settled), await readState(current)]
+
+        expect(after).toEqual(before)
+        expect(after[1].cycle.status).toEqual(RenewalCycleStatus.PROCESSING)
+        expect(after[0].subscription.status).toEqual(SubscriptionStatus.ACTIVE)
+        expect(after[0].cases).toHaveLength(0)
+        expect(dunningStarted()).toHaveLength(0)
       })
     })
   },
 })
 
-jest.setTimeout(60 * 1000)
+jest.setTimeout(120 * 1000)

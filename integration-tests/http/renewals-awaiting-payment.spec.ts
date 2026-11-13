@@ -497,38 +497,48 @@ medusaIntegrationTestRunner({
         expect(state.subscription.last_renewal_at).toBeNull()
       })
 
-      it.each([
-        {
-          name: "refreshing the payment context",
-          message: "payment provider unavailable",
-          failLaterEffect: (message: string) => {
-            jest.spyOn(payments(), "listPaymentMethods").mockRejectedValue(new Error(message))
-          },
-        },
-        {
-          name: "the dunning lookup",
-          message: "dunning store unavailable",
-          failLaterEffect: (message: string) => {
-            const dunningModule = dunning()
-            const list = dunningModule.listDunningCases.bind(dunningModule)
-
-            jest.spyOn(dunningModule, "listDunningCases").mockImplementation(async (filters, config) => {
-              if (filters && "renewal_order_id" in filters) {
-                throw new Error(message)
-              }
-
-              return await list(filters, config)
-            })
-          },
-        },
-      ])("settles when $name fails", async ({ name, message, failLaterEffect }) => {
-        const seeded = await seedAwaitingWithSavedCard(`SUB-AWAIT-${name.replace(/\s+/g, "-")}`)
+      it("settles when refreshing the payment context fails", async () => {
+        const seeded = await seedAwaitingWithSavedCard("SUB-AWAIT-REFRESH-FAILS")
         const payment = await captureOnOrder(getContainer(), seeded.order.id, seeded.session.id)
-        failLaterEffect(message)
 
-        await expect(deliverCapture(getContainer(), payment.id)).rejects.toThrow(message)
+        jest
+          .spyOn(payments(), "listPaymentMethods")
+          .mockRejectedValue(new Error("payment provider unavailable"))
+
+        await expect(deliverCapture(getContainer(), payment.id)).rejects.toThrow(
+          "payment provider unavailable"
+        )
 
         expect((await readRenewalState(getContainer(), seeded)).cycle.status).toEqual(RenewalCycleStatus.SUCCEEDED)
+      })
+
+      it("settles and raises an alertable entry, without failing the delivery, when the dunning lookup fails", async () => {
+        const seeded = await seedAwaitingWithSavedCard("SUB-AWAIT-DUNNING-LOOKUP-FAILS")
+        const payment = await captureOnOrder(getContainer(), seeded.order.id, seeded.session.id)
+        const dunningModule = dunning()
+        const list = dunningModule.listDunningCases.bind(dunningModule)
+
+        jest.spyOn(dunningModule, "listDunningCases").mockImplementation(async (filters, config) => {
+          if (filters && "renewal_order_id" in filters) {
+            throw new Error("dunning store unavailable")
+          }
+
+          return await list(filters, config)
+        })
+        const logEntries = watchLogs(getContainer())
+
+        await expect(deliverCapture(getContainer(), payment.id)).resolves.toBeUndefined()
+
+        expect((await readRenewalState(getContainer(), seeded)).cycle.status).toEqual(RenewalCycleStatus.SUCCEEDED)
+        expect(logEntries({ event: "dunning_recovery_from_capture_failed" })).toEqual(
+          only({
+            subscription_id: seeded.subscription.id,
+            order_id: seeded.order.id,
+            dunning_case_id: null,
+            payment_id: payment.id,
+            alertable: true,
+          })
+        )
       })
 
       it("still refreshes the payment context and recovers dunning when the settlement fails", async () => {

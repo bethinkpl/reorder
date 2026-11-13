@@ -392,6 +392,7 @@ describe("activateSubscriptionOnPaymentCaptured", () => {
       domain: "subscriptions",
       event: "dunning_recovery_from_capture_failed",
       subscription_id: "sub_1",
+      order_id: "order_1",
       dunning_case_id: "dun_1",
       payment_id: "pay_1",
       alertable: true,

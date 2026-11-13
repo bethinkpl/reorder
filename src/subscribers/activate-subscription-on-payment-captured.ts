@@ -95,17 +95,21 @@ async function runDunningRecovery(
     include_unrecovered?: boolean
   }
 ) {
-  const dunningCase = await findDunningCaseForOrder(
-    container,
-    input.order_id,
-    Boolean(input.include_unrecovered)
-  )
-
-  if (!dunningCase) {
-    return false
-  }
+  let dunningCaseId: string | null = null
 
   try {
+    const dunningCase = await findDunningCaseForOrder(
+      container,
+      input.order_id,
+      Boolean(input.include_unrecovered)
+    )
+
+    if (!dunningCase) {
+      return false
+    }
+
+    dunningCaseId = dunningCase.id
+
     await recoverDunningFromCapturedPaymentWorkflow(container).run({
       input: { dunning_case_id: dunningCase.id, payment_id: input.payment_id },
     })
@@ -115,7 +119,8 @@ async function runDunningRecovery(
         domain: "subscriptions",
         event: "dunning_recovery_from_capture_failed",
         subscription_id: input.subscription_id,
-        dunning_case_id: dunningCase.id,
+        order_id: input.order_id,
+        dunning_case_id: dunningCaseId,
         payment_id: input.payment_id,
         alertable: true,
         message: error instanceof Error ? error.message : String(error),
@@ -123,7 +128,7 @@ async function runDunningRecovery(
     )
   }
 
-  return true
+  return dunningCaseId !== null
 }
 
 async function runAwaitingRenewalSettlement(

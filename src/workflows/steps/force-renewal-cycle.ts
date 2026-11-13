@@ -75,7 +75,7 @@ export const forceRenewalCycleStep = createStep(
       triggered_by: input.triggered_by ?? null,
     })
 
-    let parked = false
+    let cycleStatus: RenewalCycleStatus = RenewalCycleStatus.SUCCEEDED
 
     try {
       if (cycle.status === RenewalCycleStatus.PROCESSING) {
@@ -148,10 +148,11 @@ export const forceRenewalCycleStep = createStep(
         },
       })
 
-      parked =
-        !result &&
-        (await renewalModule.retrieveRenewalCycle(cycle.id, { select: ["status"] }))
-          .status === RenewalCycleStatus.AWAITING_PAYMENT
+      if (!result) {
+        cycleStatus = (
+          await renewalModule.retrieveRenewalCycle(cycle.id, { select: ["status"] })
+        ).status
+      }
     } catch (error) {
       const failureKind = classifyRenewalFailure(error)
       const blocked =
@@ -176,16 +177,23 @@ export const forceRenewalCycleStep = createStep(
       throw error
     }
 
-    logRenewalEvent(logger, "info", {
+    const outcome =
+      cycleStatus === RenewalCycleStatus.SUCCEEDED
+        ? "succeeded"
+        : cycleStatus === RenewalCycleStatus.FAILED
+          ? "failed"
+          : "awaiting_payment"
+
+    logRenewalEvent(logger, outcome === "failed" ? "warn" : "info", {
       event: "renewal.force",
-      outcome: parked ? "awaiting_payment" : "succeeded",
+      outcome,
       correlation_id: correlationId,
       renewal_cycle_id: cycle.id,
       subscription_id: cycle.subscription_id,
       trigger_type: "manual",
       triggered_by: input.triggered_by ?? null,
-      success_count: parked ? 0 : 1,
-      failure_count: 0,
+      success_count: outcome === "succeeded" ? 1 : 0,
+      failure_count: outcome === "failed" ? 1 : 0,
     })
 
     return new StepResponse(cycle.id)

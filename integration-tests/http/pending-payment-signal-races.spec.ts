@@ -722,7 +722,7 @@ medusaIntegrationTestRunner({
       })
     })
 
-    it("raises the overdue alert for a renewal cycle left processing once, only past the limit, and keeps sweeping when one cycle cannot be read", async () => {
+    it("raises the overdue alert for a renewal cycle left processing once, only past the limit, and keeps sweeping when one cycle cannot be read under its lock", async () => {
       const container = getContainer()
       const module = renewalModule()
       const seedProcessingCycle = async (reference: string, paymentReference: string | null) => {
@@ -758,11 +758,13 @@ medusaIntegrationTestRunner({
 
       expect(overdueCycleIds()).toHaveLength(0)
 
+      const readTimeout = "Query read timeout"
+      let unrecordedReads = 0
       const unreadable = jest
         .spyOn(module, "retrieveRenewalCycle")
         .mockImplementation(async (id, ...rest) => {
-          if (id === unrecorded.cycle.id) {
-            throw new Error(WRITE_FAILURE)
+          if (id === unrecorded.cycle.id && ++unrecordedReads === 2) {
+            throw new Error(readTimeout)
           }
 
           return await retrieve(id, ...rest)
@@ -773,7 +775,7 @@ medusaIntegrationTestRunner({
         failed: 1,
       })
       expect(overdueCycleIds()).toEqual([submitted.cycle.id])
-      expect(alerts(unrecorded.cycle.id, WRITE_FAILURE)).toHaveLength(1)
+      expect(alerts(unrecorded.cycle.id, readTimeout)).toHaveLength(1)
 
       unreadable.mockRestore()
       await sweepAt(DEFAULT_AWAITING_PAYMENT_ALERT_HOURS + 2)
@@ -818,17 +820,26 @@ medusaIntegrationTestRunner({
       })
     })
 
-    it("logs a forced run that parked as awaiting its payment, counting it neither succeeded nor failed", async () => {
+    it.each([
+      { name: "parked", failWrite: () => undefined, leftAs: RenewalCycleStatus.AWAITING_PAYMENT },
+      {
+        name: "could not record its wait",
+        failWrite: () => failCycleWriteOnce(RenewalCycleStatus.AWAITING_PAYMENT),
+        leftAs: RenewalCycleStatus.PROCESSING,
+      },
+    ])("logs a forced run that $name as awaiting its payment, counting it neither succeeded nor failed", async ({ failWrite, leftAs }) => {
       const container = getContainer()
       const { cycle } = await seedDueCharge("SUB-FORCED-RUN-PARKED")
 
       answerAuthorizationWithNull(container)
+      failWrite()
       const logs = watchLogs(container)
 
       await forceRenewalCycleWorkflow(container).run({
         input: { renewal_cycle_id: cycle.id, triggered_by: "user_forcing_the_run" },
       })
 
+      expect((await renewalModule().retrieveRenewalCycle(cycle.id)).status).toEqual(leftAs)
       expect(
         logs().filter(
           (entry) =>

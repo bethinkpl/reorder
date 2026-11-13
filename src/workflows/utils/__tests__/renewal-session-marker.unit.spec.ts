@@ -5,87 +5,33 @@ import {
 
 describe("readRenewalSessionMarkers", () => {
   it.each([
-    {
-      name: "both markers",
-      context: { renewal_cycle_id: "rc_1", renewal_attempt_id: "ra_1" },
-      expected: { renewal_cycle_id: "rc_1", renewal_attempt_id: "ra_1" },
-    },
-    {
-      name: "the cycle marker alone",
-      context: { renewal_cycle_id: "rc_1" },
-      expected: { renewal_cycle_id: "rc_1", renewal_attempt_id: null },
-    },
-    {
-      name: "empty or non-string markers",
-      context: { renewal_cycle_id: "", renewal_attempt_id: 42 },
-      expected: { renewal_cycle_id: null, renewal_attempt_id: null },
-    },
-    {
-      name: "no context",
-      context: null,
-      expected: { renewal_cycle_id: null, renewal_attempt_id: null },
-    },
-  ])("reads $name", ({ context, expected }) => {
-    expect(readRenewalSessionMarkers(context)).toEqual(expected)
+    ["both markers", { renewal_cycle_id: "rc_1", renewal_attempt_id: "ra_1" }, "rc_1", "ra_1"],
+    ["the cycle marker alone", { renewal_cycle_id: "rc_1" }, "rc_1", null],
+    ["empty or non-string markers", { renewal_cycle_id: "", renewal_attempt_id: 42 }, null, null],
+    ["no context", null, null, null],
+  ])("reads %s", (_name, context, cycleId, attemptId) => {
+    expect(readRenewalSessionMarkers(context)).toEqual({
+      renewal_cycle_id: cycleId,
+      renewal_attempt_id: attemptId,
+    })
   })
 })
 
 describe("signalNamesAttempt", () => {
-  const latest = (payment_reference: string | null) => ({
-    id: "ra_latest",
-    payment_reference,
-  })
-
   it.each([
-    {
-      name: "the marker names the attempt, which recorded no session",
-      attempt: latest(null),
-      signal: { session_id: "payses_1", attempt_id: "ra_latest" },
-      expected: true,
-    },
-    {
-      name: "the marker names the attempt, which recorded this session",
-      attempt: latest("payses_1"),
-      signal: { session_id: "payses_1", attempt_id: "ra_latest" },
-      expected: true,
-    },
-    {
-      name: "the marker names the attempt, which recorded another session",
-      attempt: latest("payses_2"),
-      signal: { session_id: "payses_1", attempt_id: "ra_latest" },
-      expected: false,
-    },
-    {
-      name: "the marker names an earlier attempt",
-      attempt: latest(null),
-      signal: { session_id: "payses_1", attempt_id: "ra_earlier" },
-      expected: false,
-    },
-    {
-      name: "no marker, and the attempt recorded this session",
-      attempt: latest("payses_1"),
-      signal: { session_id: "payses_1", attempt_id: null },
-      expected: true,
-    },
-    {
-      name: "no marker, and the attempt recorded another session",
-      attempt: latest("payses_2"),
-      signal: { session_id: "payses_1", attempt_id: null },
-      expected: false,
-    },
-    {
-      name: "no marker, and the attempt recorded no session",
-      attempt: latest(null),
-      signal: { session_id: "payses_1", attempt_id: null },
-      expected: false,
-    },
-    {
-      name: "neither a marker nor a session, and the attempt recorded no session",
-      attempt: latest(null),
-      signal: { session_id: null, attempt_id: null },
-      expected: false,
-    },
-  ])("$name: $expected", ({ attempt, signal, expected }) => {
-    expect(signalNamesAttempt(attempt, signal)).toBe(expected)
+    ["the marker names the attempt, which recorded no session", null, "payses_1", "ra_latest", true],
+    ["the marker names the attempt, which recorded this session", "payses_1", "payses_1", "ra_latest", true],
+    ["the marker names the attempt, which recorded another session", "payses_2", "payses_1", "ra_latest", false],
+    ["the marker names an earlier attempt", null, "payses_1", "ra_earlier", false],
+    ["no marker, and the attempt recorded this session", "payses_1", "payses_1", null, true],
+    ["no marker, and the attempt recorded another session", "payses_2", "payses_1", null, false],
+    ["neither a marker nor a session, and the attempt recorded no session", null, null, null, false],
+  ])("%s: %s", (_name, paymentReference, sessionId, attemptId, expected) => {
+    expect(
+      signalNamesAttempt(
+        { id: "ra_latest", payment_reference: paymentReference },
+        { session_id: sessionId, attempt_id: attemptId }
+      )
+    ).toBe(expected)
   })
 })

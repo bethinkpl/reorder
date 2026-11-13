@@ -13,6 +13,7 @@ import {
   createRenewalCorrelationId,
   logRenewalEvent,
 } from "../modules/renewal/utils/observability"
+import { isLockWaitTimeout } from "../workflows/utils/run-under-lock"
 import {
   settleAwaitingRenewalCycle,
   type SettleAwaitingRenewalCycleOutcome,
@@ -42,12 +43,6 @@ export type ReconcileAwaitingRenewalCyclesResult = Record<
 
 function getErrorMessage(error: unknown) {
   return error instanceof Error ? error.message : String(error)
-}
-
-function isLockTimeout(message: string) {
-  const lowered = message.toLowerCase()
-
-  return lowered.includes("timed-out acquiring lock") || lowered.includes("timeout")
 }
 
 async function findDueOverdueAlert(
@@ -140,7 +135,7 @@ async function raiseOverdueAlertOnce(
       { timeout: ALERT_LOCK_TIMEOUT_SECONDS }
     )
   } catch (error) {
-    if (isLockTimeout(getErrorMessage(error))) {
+    if (isLockWaitTimeout(error)) {
       return false
     }
 
@@ -312,7 +307,7 @@ export default async function reconcileAwaitingRenewalCyclesJob(
   } catch (error) {
     const message = getErrorMessage(error)
 
-    if (isLockTimeout(message)) {
+    if (isLockWaitTimeout(error)) {
       logger.warn(`[${JOB_NAME}] did not complete: ${message}`)
     } else {
       logger.error(`[${JOB_NAME}] did not complete: ${message}`)

@@ -1,9 +1,11 @@
 import type {
+  IOrderModuleService,
   IPaymentModuleService,
   MedusaContainer,
 } from "@medusajs/framework/types"
 import { ContainerRegistrationKeys, Modules } from "@medusajs/framework/utils"
 import type { SubscriptionSourceSnapshot } from "../../src/modules/subscription/types"
+import { processRenewalCycleWorkflow } from "../../src/workflows"
 import { createPaymentSessionFixture } from "./payment-fixtures"
 import type { createSubscriptionSeed } from "./renewal-fixtures"
 
@@ -39,10 +41,6 @@ function targetsOrder(input: GraphInput, orderId: string) {
   return Array.isArray(id) ? id.includes(orderId) : id === orderId
 }
 
-/**
- * The core-flows workflows a renewal run calls can only be replaced by a `jest.mock` in the spec
- * file itself, so each spec passes in the mock functions its own factory returns.
- */
 export function createRenewalChargeStub(mocks: RenewalChargeMocks) {
   return function stubRenewalCharge(
     container: MedusaContainer,
@@ -142,4 +140,32 @@ export function answerAuthorizationWithNull(container: MedusaContainer) {
   jest
     .spyOn(paymentModule, "authorizePaymentSession")
     .mockResolvedValue(null as never)
+}
+
+export async function runRenewal(
+  container: MedusaContainer,
+  renewalCycleId: string,
+  correlationId?: string
+) {
+  const { result } = await processRenewalCycleWorkflow(container).run({
+    input: {
+      renewal_cycle_id: renewalCycleId,
+      trigger_type: "scheduler",
+      correlation_id: correlationId,
+    },
+  })
+
+  return result
+}
+
+export async function createUnpaidOrder(
+  container: MedusaContainer,
+  metadata?: Record<string, unknown>
+) {
+  return await container.resolve<IOrderModuleService>(Modules.ORDER).createOrders({
+    currency_code: "pln",
+    email: "customer@example.com",
+    metadata,
+    items: [{ title: "Subscription renewal", quantity: 1, unit_price: RENEWAL_AMOUNT }],
+  })
 }

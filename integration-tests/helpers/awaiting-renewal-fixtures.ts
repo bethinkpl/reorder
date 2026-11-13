@@ -3,6 +3,12 @@ import type {
   MedusaContainer,
 } from "@medusajs/framework/types"
 import { ContainerRegistrationKeys, Modules } from "@medusajs/framework/utils"
+import { DateTime } from "luxon"
+import { ACTIVITY_LOG_MODULE } from "../../src/modules/activity-log"
+import type ActivityLogModuleService from "../../src/modules/activity-log/service"
+import { ActivityLogEventType } from "../../src/modules/activity-log/types"
+import { DUNNING_MODULE } from "../../src/modules/dunning"
+import type DunningModuleService from "../../src/modules/dunning/service"
 import { RENEWAL_MODULE } from "../../src/modules/renewal"
 import type RenewalModuleService from "../../src/modules/renewal/service"
 import {
@@ -10,6 +16,7 @@ import {
   RenewalCycleStatus,
 } from "../../src/modules/renewal/types"
 import { SUBSCRIPTION_MODULE } from "../../src/modules/subscription"
+import type SubscriptionModuleService from "../../src/modules/subscription/service"
 import { SubscriptionStatus } from "../../src/modules/subscription/types"
 import { createPaymentSessionFixture } from "./payment-fixtures"
 import {
@@ -25,15 +32,11 @@ type AwaitingRenewalSeedInput = {
   scheduled_for?: Date
   subscription_status?: SubscriptionStatus
   cycle_status?: RenewalCycleStatus
-  /** When the attempt submitted its charge; the age the overdue checks read. */
   submitted_at?: Date
 }
 
-/**
- * Parks a renewal the way a `null` authorisation leaves it: the cycle holds the order and the
- * stored settlement inputs, the attempt is `processing` against the session, and the order is
- * unpaid until a test captures the session.
- */
+export type RenewalRefs = { subscription: { id: string }, cycle: { id: string } }
+
 export async function seedAwaitingRenewal(
   container: MedusaContainer,
   input: AwaitingRenewalSeedInput
@@ -120,3 +123,76 @@ export async function seedAwaitingRenewal(
 }
 
 export type SeededAwaitingRenewal = Awaited<ReturnType<typeof seedAwaitingRenewal>>
+
+export async function readRenewalState(
+  container: MedusaContainer,
+  { subscription, cycle }: RenewalRefs
+) {
+  const renewalModule = container.resolve<RenewalModuleService>(RENEWAL_MODULE)
+  const activityLog = container.resolve<ActivityLogModuleService>(ACTIVITY_LOG_MODULE)
+  const logsOf = (event_type: ActivityLogEventType) =>
+    activityLog.listSubscriptionLogs({ subscription_id: subscription.id, event_type })
+  const cycles = await renewalModule.listRenewalCycles({ subscription_id: subscription.id })
+
+  return {
+    cycle: await renewalModule.retrieveRenewalCycle(cycle.id),
+    cycles,
+    otherCycles: cycles.filter(({ id }) => id !== cycle.id),
+    attempts: await renewalModule.listRenewalAttempts({ renewal_cycle_id: cycle.id }),
+    subscription: await container
+      .resolve<SubscriptionModuleService>(SUBSCRIPTION_MODULE)
+      .retrieveSubscription(subscription.id),
+    cases: await container
+      .resolve<DunningModuleService>(DUNNING_MODULE)
+      .listDunningCases({ subscription_id: subscription.id }),
+    failedLogs: await logsOf(ActivityLogEventType.RENEWAL_FAILED),
+    succeededLogs: await logsOf(ActivityLogEventType.RENEWAL_SUCCEEDED),
+    forceLogs: await logsOf(ActivityLogEventType.RENEWAL_FORCE_REQUESTED),
+  }
+}
+
+export function oneMonthAfter(date: Date) {
+  return DateTime.fromJSDate(date, { zone: "utc" }).plus({ months: 1 }).toJSDate()
+}
+
+export function renewalLockKey(subscriptionId: string) {
+  return `renewal:subscription:${subscriptionId}`
+}
+
+export async function whileRenewalLockHeld<T>(
+  container: MedusaContainer,
+  subscriptionId: string,
+  run: () => Promise<T>
+) {
+  const locking = container.resolve(Modules.LOCKING)
+  const key = renewalLockKey(subscriptionId)
+  const ownerId = `renewal-run-on-${subscriptionId}`
+
+  await locking.acquire(key, { ownerId, expire: 60 })
+
+  try {
+    return await run()
+  } finally {
+    await locking.release(key, { ownerId })
+  }
+}
+
+export function failRenewalLockReleaseOnce(
+  container: MedusaContainer,
+  subscriptionId: string,
+  message: string
+) {
+  const locking = container.resolve(Modules.LOCKING)
+  const release = locking.release.bind(locking)
+  const key = renewalLockKey(subscriptionId)
+  let failed = false
+
+  jest.spyOn(locking, "release").mockImplementation(async (keys, args) => {
+    if (!failed && (Array.isArray(keys) ? keys : [keys]).includes(key)) {
+      failed = true
+      throw new Error(message)
+    }
+
+    return release(keys, args)
+  })
+}

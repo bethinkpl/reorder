@@ -5,9 +5,7 @@ import {
   MedusaError,
   Modules,
   PaymentActions,
-  PaymentEvents,
 } from "@medusajs/framework/utils"
-import { DateTime } from "luxon"
 import { FrequencyInterval } from "../../src/common/types/frequency-interval"
 import { reconcileAwaitingRenewalCycles } from "../../src/jobs/reconcile-awaiting-renewal-cycles"
 import { ACTIVITY_LOG_MODULE } from "../../src/modules/activity-log"
@@ -25,25 +23,37 @@ import { renewalErrors } from "../../src/modules/renewal/utils/errors"
 import { SUBSCRIPTION_MODULE } from "../../src/modules/subscription"
 import type SubscriptionModuleService from "../../src/modules/subscription/service"
 import { type SubscriptionSourceSnapshot, SubscriptionStatus } from "../../src/modules/subscription/types"
-import activateSubscriptionOnPaymentCapturedHandler from "../../src/subscribers/activate-subscription-on-payment-captured"
-import { cancelPendingSubscriptionOnPaymentFailure } from "../../src/subscribers/cancel-pending-subscription-on-payment-failure"
 import { forceRenewalCycleWorkflow, processRenewalCycleWorkflow } from "../../src/workflows"
 import { loadOrderAmounts } from "../../src/workflows/steps/run-dunning-retry"
 import { recordOrderCaptureTransactions } from "../../src/workflows/utils/record-order-capture-transactions"
-import { type SeededAwaitingRenewal, seedAwaitingRenewal } from "../helpers/awaiting-renewal-fixtures"
+import {
+  type SeededAwaitingRenewal,
+  failRenewalLockReleaseOnce,
+  oneMonthAfter,
+  readRenewalState,
+  renewalLockKey,
+  seedAwaitingRenewal,
+} from "../helpers/awaiting-renewal-fixtures"
 import { createDunningCaseSeed } from "../helpers/dunning-fixtures"
 import {
   SYSTEM_PAYMENT_PROVIDER_ID,
-  authorizeAndCapturePaymentSession,
+  captureOnOrder,
   createPaymentSessionFixture,
+  deliverCapture,
+  deliverFailure,
 } from "../helpers/payment-fixtures"
 import { createPlanOfferSeed } from "../helpers/plan-offer-fixtures"
-import { answerAuthorizationWithNull, createRenewalChargeStub } from "../helpers/renewal-charge-fixtures"
+import {
+  answerAuthorizationWithNull,
+  createRenewalChargeStub,
+  runRenewal,
+} from "../helpers/renewal-charge-fixtures"
 import {
   createRenewalAttemptSeed,
   createRenewalCycleSeed,
   createSubscriptionSeed,
 } from "../helpers/renewal-fixtures"
+import { watchEvents, watchLogs } from "../helpers/spy-fixtures"
 
 const mockCreateOrderRun = jest.fn()
 const mockCreateOrUpdateOrderPaymentCollectionRun = jest.fn()
@@ -68,18 +78,7 @@ const DAY_MS = 24 * 60 * 60 * 1000
 const FIRST_RETRY_MS = 1440 * 60 * 1000
 const PLAN_PRODUCT_ID = "prod_awaiting_plan"
 
-const webhookEvent = {
-  provider: "pp_test_provider",
-  payload: { data: {}, rawData: Buffer.from("{}"), headers: {} },
-}
-
-type SeededCycle = { subscription: { id: string }, cycle: { id: string } }
-
 const only = (fields: Record<string, unknown>) => [expect.objectContaining(fields)]
-
-function oneMonthAfter(date: Date) {
-  return DateTime.fromJSDate(date, { zone: "utc" }).plus({ months: 1 }).toJSDate()
-}
 
 function sourceSnapshot(variantId: string, title: string, unitPrice: number, sku: string) {
   const snapshot: SubscriptionSourceSnapshot = {
@@ -109,7 +108,6 @@ medusaIntegrationTestRunner({
     const dunning = () => getContainer().resolve<DunningModuleService>(DUNNING_MODULE)
     const activityLog = () => getContainer().resolve<ActivityLogModuleService>(ACTIVITY_LOG_MODULE)
     const payments = () => getContainer().resolve(Modules.PAYMENT)
-    const lockKeyOf = (seeded: SeededCycle) => `renewal:subscription:${seeded.subscription.id}`
 
     async function seedDueRenewal(input: {
       dueAt: Date
@@ -134,15 +132,6 @@ medusaIntegrationTestRunner({
 
       return { subscription, cycle, sessionIds }
     }
-
-    const runRenewal = (renewalCycleId: string, correlationId?: string) =>
-      processRenewalCycleWorkflow(getContainer()).run({
-        input: {
-          renewal_cycle_id: renewalCycleId,
-          trigger_type: "scheduler",
-          correlation_id: correlationId,
-        },
-      })
 
     async function seedAwaitingWithSavedCard(reference: string) {
       const container = getContainer()
@@ -179,76 +168,6 @@ medusaIntegrationTestRunner({
       return session.id
     }
 
-    async function captureInFull(seeded: SeededAwaitingRenewal) {
-      const payment = await authorizeAndCapturePaymentSession(getContainer(), seeded.session.id)
-      await recordOrderCaptureTransactions(getContainer(), seeded.order.id, payment.id)
-
-      return payment
-    }
-
-    async function deliverCapture(paymentId: string) {
-      await activateSubscriptionOnPaymentCapturedHandler({
-        event: { name: PaymentEvents.CAPTURED, data: { id: paymentId } },
-        container: getContainer(),
-        pluginOptions: {},
-      })
-    }
-
-    async function deliverFailure(sessionId: string, action: string, reason?: string) {
-      jest.spyOn(payments(), "getWebhookActionAndData").mockResolvedValue({
-        action,
-        data: { session_id: sessionId, amount: 100, ...(reason ? { reason } : {}) },
-      } as never)
-
-      await cancelPendingSubscriptionOnPaymentFailure(getContainer(), webhookEvent)
-    }
-
-    async function readState(seeded: SeededCycle) {
-      const subscriptionId = seeded.subscription.id
-      const cycles = await renewals().listRenewalCycles({ subscription_id: subscriptionId })
-      const logs = (eventType: ActivityLogEventType) =>
-        activityLog().listSubscriptionLogs({ subscription_id: subscriptionId, event_type: eventType })
-
-      return {
-        cycle: await renewals().retrieveRenewalCycle(seeded.cycle.id),
-        otherCycles: cycles.filter((cycle) => cycle.id !== seeded.cycle.id),
-        attempts: await renewals().listRenewalAttempts({ renewal_cycle_id: seeded.cycle.id }),
-        subscription: await subscriptions().retrieveSubscription(subscriptionId),
-        cases: await dunning().listDunningCases({ subscription_id: subscriptionId }),
-        succeededLogs: await logs(ActivityLogEventType.RENEWAL_SUCCEEDED),
-        failedLogs: await logs(ActivityLogEventType.RENEWAL_FAILED),
-      }
-    }
-
-    function watchLogEntries() {
-      const logger = getContainer().resolve("logger")
-      const spies = [jest.spyOn(logger, "info"), jest.spyOn(logger, "warn"), jest.spyOn(logger, "error")]
-
-      return function entries(event: string): Record<string, unknown>[] {
-        return spies
-          .flatMap((spy) => spy.mock.calls.map(([line]) => String(line)))
-          .flatMap((line) => {
-            try {
-              const entry = JSON.parse(line)
-
-              return entry?.event === event ? [entry] : []
-            } catch {
-              return []
-            }
-          })
-      }
-    }
-
-    function watchDunningStarted() {
-      const emit = jest.spyOn(getContainer().resolve(Modules.EVENT_BUS), "emit")
-
-      return function dunningStarted() {
-        return emit.mock.calls
-          .map(([message]) => message as { name?: string, data: unknown })
-          .filter((message) => message?.name === DunningEvents.STARTED)
-      }
-    }
-
     beforeEach(() => {
       jest.restoreAllMocks()
       jest.clearAllMocks()
@@ -261,11 +180,11 @@ medusaIntegrationTestRunner({
         const orderId = "ord_awaiting_parked"
         const seeded = await seedDueRenewal({ dueAt, orderId })
         answerAuthorizationWithNull(getContainer())
-        const logEntries = watchLogEntries()
+        const logEntries = watchLogs(getContainer())
 
-        await runRenewal(seeded.cycle.id, "corr-awaiting-park")
+        await runRenewal(getContainer(), seeded.cycle.id, "corr-awaiting-park")
 
-        const state = await readState(seeded)
+        const state = await readRenewalState(getContainer(), seeded)
 
         expect(seeded.sessionIds).toHaveLength(1)
         expect(state.cycle).toMatchObject({
@@ -305,14 +224,14 @@ medusaIntegrationTestRunner({
         expect(state.failedLogs).toHaveLength(0)
         expect(state.cases).toHaveLength(0)
         expect(
-          logEntries("renewal.execution")
+          logEntries({ event: "renewal.execution" })
             .filter((entry) => entry.renewal_cycle_id === seeded.cycle.id)
             .map((entry) => entry.outcome)
         ).toEqual(["started", "awaiting_payment"])
         await expect(
-          locking.acquire(lockKeyOf(seeded), { ownerId: "lock-probe", expire: 5 })
+          locking.acquire(renewalLockKey(seeded.subscription.id), { ownerId: "lock-probe", expire: 5 })
         ).resolves.toBeUndefined()
-        await locking.release(lockKeyOf(seeded), { ownerId: "lock-probe" })
+        await locking.release(renewalLockKey(seeded.subscription.id), { ownerId: "lock-probe" })
       })
 
       it("parks a plan-change cycle with the new variant's snapshot and leaves the plan change unapplied", async () => {
@@ -354,9 +273,9 @@ medusaIntegrationTestRunner({
         })
         answerAuthorizationWithNull(getContainer())
 
-        await runRenewal(seeded.cycle.id)
+        await runRenewal(getContainer(), seeded.cycle.id)
 
-        const state = await readState(seeded)
+        const state = await readRenewalState(getContainer(), seeded)
 
         expect(state.cycle).toMatchObject({
           status: RenewalCycleStatus.AWAITING_PAYMENT,
@@ -389,7 +308,7 @@ medusaIntegrationTestRunner({
           processRenewalCycleWorkflow(container).run({ input: { ...input, trigger_type: "manual" } })
         ).rejects.toMatchObject(refusal)
 
-        const state = await readState(seeded)
+        const state = await readRenewalState(getContainer(), seeded)
         const forceEntries = await activityLog().listSubscriptionLogs({
           subscription_id: seeded.subscription.id,
           event_type: ActivityLogEventType.RENEWAL_FORCE_REQUESTED,
@@ -412,30 +331,16 @@ medusaIntegrationTestRunner({
       })
 
       it("keeps a parked cycle awaiting its payment when a later step of the run fails", async () => {
-        const locking = getContainer().resolve(Modules.LOCKING)
         const orderId = "ord_awaiting_late_failure"
         const seeded = await seedDueRenewal({ dueAt: new Date("2026-05-15T10:00:00.000Z"), orderId })
         answerAuthorizationWithNull(getContainer())
+        failRenewalLockReleaseOnce(getContainer(), seeded.subscription.id, "lock store unavailable")
 
-        const release = locking.release.bind(locking)
-        let releaseRefused = false
-
-        jest.spyOn(locking, "release").mockImplementation(async (keys, args) => {
-          const list = Array.isArray(keys) ? keys : [keys]
-
-          if (!releaseRefused && list.includes(lockKeyOf(seeded))) {
-            releaseRefused = true
-            throw new Error("lock store unavailable")
-          }
-
-          return release(keys, args)
-        })
-
-        await expect(runRenewal(seeded.cycle.id)).rejects.toMatchObject({
+        await expect(runRenewal(getContainer(), seeded.cycle.id)).rejects.toMatchObject({
           message: expect.stringContaining("lock store unavailable"),
         })
 
-        const state = await readState(seeded)
+        const state = await readRenewalState(getContainer(), seeded)
 
         expect(state.attempts).toEqual(
           only({ status: RenewalAttemptStatus.PROCESSING, payment_reference: seeded.sessionIds[0] })
@@ -462,9 +367,9 @@ medusaIntegrationTestRunner({
           return null as never
         })
 
-        await runRenewal(seeded.cycle.id)
+        await runRenewal(getContainer(), seeded.cycle.id)
 
-        const state = await readState(seeded)
+        const state = await readRenewalState(getContainer(), seeded)
 
         expect(state.cycle.status).toEqual(RenewalCycleStatus.SUCCEEDED)
         expect(state.attempts).toEqual(
@@ -483,9 +388,9 @@ medusaIntegrationTestRunner({
         const orderId = "ord_sync_settled"
         const seeded = await seedDueRenewal({ dueAt, orderId })
 
-        await runRenewal(seeded.cycle.id)
+        await runRenewal(getContainer(), seeded.cycle.id)
 
-        const state = await readState(seeded)
+        const state = await readRenewalState(getContainer(), seeded)
 
         expect(state.cycle).toMatchObject({
           status: RenewalCycleStatus.SUCCEEDED,
@@ -513,11 +418,11 @@ medusaIntegrationTestRunner({
           reference,
           scheduled_for: scheduledFor,
         })
-        const payment = await captureInFull(seeded)
+        const payment = await captureOnOrder(getContainer(), seeded.order.id, seeded.session.id)
 
-        await Promise.all(Array.from({ length: deliveries }, () => deliverCapture(payment.id)))
+        await Promise.all(Array.from({ length: deliveries }, () => deliverCapture(getContainer(), payment.id)))
 
-        const state = await readState(seeded)
+        const state = await readRenewalState(getContainer(), seeded)
 
         expect(state.cycle).toMatchObject({
           status: RenewalCycleStatus.SUCCEEDED,
@@ -553,9 +458,9 @@ medusaIntegrationTestRunner({
         await recordOrderCaptureTransactions(container, seeded.order.id, payment.id)
         expect((await loadOrderAmounts(container, seeded.order.id)).pending).toEqual(60)
 
-        await deliverCapture(payment.id)
+        await deliverCapture(getContainer(), payment.id)
 
-        const partlyPaid = await readState(seeded)
+        const partlyPaid = await readRenewalState(getContainer(), seeded)
 
         expect(partlyPaid.cycle.status).toEqual(RenewalCycleStatus.AWAITING_PAYMENT)
         expect(partlyPaid.attempts).toEqual(only({ status: RenewalAttemptStatus.PROCESSING }))
@@ -566,9 +471,9 @@ medusaIntegrationTestRunner({
         await recordOrderCaptureTransactions(container, seeded.order.id, payment.id)
         expect((await loadOrderAmounts(container, seeded.order.id)).pending).toEqual(0)
 
-        await deliverCapture(payment.id)
+        await deliverCapture(getContainer(), payment.id)
 
-        const paidUp = await readState(seeded)
+        const paidUp = await readRenewalState(getContainer(), seeded)
 
         expect(paidUp.cycle.status).toEqual(RenewalCycleStatus.SUCCEEDED)
         expect(paidUp.subscription.next_renewal_at).toEqual(oneMonthAfter(seeded.scheduledFor))
@@ -581,11 +486,11 @@ medusaIntegrationTestRunner({
           id: seeded.subscription.id,
           next_renewal_at: movedTo,
         })
-        const payment = await captureInFull(seeded)
+        const payment = await captureOnOrder(getContainer(), seeded.order.id, seeded.session.id)
 
-        await deliverCapture(payment.id)
+        await deliverCapture(getContainer(), payment.id)
 
-        const state = await readState(seeded)
+        const state = await readRenewalState(getContainer(), seeded)
 
         expect(state.cycle.status).toEqual(RenewalCycleStatus.SUCCEEDED)
         expect(state.subscription.next_renewal_at).toEqual(movedTo)
@@ -618,12 +523,12 @@ medusaIntegrationTestRunner({
         },
       ])("settles when $name fails", async ({ name, message, failLaterEffect }) => {
         const seeded = await seedAwaitingWithSavedCard(`SUB-AWAIT-${name.replace(/\s+/g, "-")}`)
-        const payment = await captureInFull(seeded)
+        const payment = await captureOnOrder(getContainer(), seeded.order.id, seeded.session.id)
         failLaterEffect(message)
 
-        await expect(deliverCapture(payment.id)).rejects.toThrow(message)
+        await expect(deliverCapture(getContainer(), payment.id)).rejects.toThrow(message)
 
-        expect((await readState(seeded)).cycle.status).toEqual(RenewalCycleStatus.SUCCEEDED)
+        expect((await readRenewalState(getContainer(), seeded)).cycle.status).toEqual(RenewalCycleStatus.SUCCEEDED)
       })
 
       it("still refreshes the payment context and recovers dunning when the settlement fails", async () => {
@@ -634,7 +539,7 @@ medusaIntegrationTestRunner({
           renewal_order_id: seeded.order.id,
           status: DunningCaseStatus.RETRY_SCHEDULED,
         })
-        const payment = await captureInFull(seeded)
+        const payment = await captureOnOrder(getContainer(), seeded.order.id, seeded.session.id)
 
         jest.spyOn(payments(), "listPaymentMethods").mockResolvedValue([
           { id: "pm_new", provider_id: SYSTEM_PAYMENT_PROVIDER_ID, data: { created: 2 } },
@@ -642,13 +547,13 @@ medusaIntegrationTestRunner({
         jest
           .spyOn(subscriptions(), "retrieveSubscription")
           .mockRejectedValueOnce(new Error("renewal settlement failed"))
-        const logEntries = watchLogEntries()
+        const logEntries = watchLogs(getContainer())
 
-        await deliverCapture(payment.id)
+        await deliverCapture(getContainer(), payment.id)
 
-        const state = await readState(seeded)
+        const state = await readRenewalState(getContainer(), seeded)
 
-        expect(logEntries("renewal_settlement_from_capture_failed")).toEqual(
+        expect(logEntries({ event: "renewal_settlement_from_capture_failed" })).toEqual(
           only({
             renewal_cycle_id: seeded.cycle.id,
             subscription_id: seeded.subscription.id,
@@ -665,12 +570,12 @@ medusaIntegrationTestRunner({
         const container = getContainer()
         const paid = await seedAwaitingRenewal(container, { reference: "SUB-AWAIT-SWEEP-PAID" })
         const unpaid = await seedAwaitingRenewal(container, { reference: "SUB-AWAIT-SWEEP-UNPAID" })
-        await captureInFull(paid)
+        await captureOnOrder(container, paid.order.id, paid.session.id)
 
         await reconcileAwaitingRenewalCycles(container)
 
-        const paidState = await readState(paid)
-        const unpaidState = await readState(unpaid)
+        const paidState = await readRenewalState(container, paid)
+        const unpaidState = await readRenewalState(container, unpaid)
 
         expect(paidState.cycle.status).toEqual(RenewalCycleStatus.SUCCEEDED)
         expect(paidState.attempts).toEqual(
@@ -692,13 +597,13 @@ medusaIntegrationTestRunner({
         const seeded = await seedAwaitingRenewal(getContainer(), { reference: `SUB-FAIL-${action}` })
         const sessionId = namesAttempt ? await useSessionNamingAttempt(seeded) : seeded.session.id
         const errorCode = reason ?? action
-        const dunningStarted = watchDunningStarted()
+        const emitted = watchEvents(getContainer())
 
         const before = Date.now()
-        await deliverFailure(sessionId, action, reason)
+        await deliverFailure(getContainer(), sessionId, { action, reason })
         const after = Date.now()
 
-        const state = await readState(seeded)
+        const state = await readRenewalState(getContainer(), seeded)
 
         expect(state.cycle).toMatchObject({
           status: RenewalCycleStatus.FAILED,
@@ -728,7 +633,7 @@ medusaIntegrationTestRunner({
 
         expect(nextRetryAt).toBeGreaterThanOrEqual(before + FIRST_RETRY_MS)
         expect(nextRetryAt).toBeLessThanOrEqual(after + FIRST_RETRY_MS)
-        expect(dunningStarted().map((message) => message.data)).toEqual(
+        expect(emitted(DunningEvents.STARTED).map((message) => message.data)).toEqual(
           only({
             subscription_id: seeded.subscription.id,
             dunning_case_id: state.cases[0].id,
@@ -737,16 +642,16 @@ medusaIntegrationTestRunner({
         )
         expect(state.failedLogs).toHaveLength(1)
 
-        await deliverFailure(sessionId, action, reason)
+        await deliverFailure(getContainer(), sessionId, { action, reason })
 
-        const replayed = await readState(seeded)
+        const replayed = await readRenewalState(getContainer(), seeded)
 
         expect(replayed.cycle).toEqual(state.cycle)
         expect(replayed.attempts).toEqual(state.attempts)
         expect(replayed.cases).toEqual(state.cases)
         expect(replayed.subscription.status).toEqual(SubscriptionStatus.PAST_DUE)
         expect(replayed.failedLogs).toHaveLength(1)
-        expect(dunningStarted()).toHaveLength(1)
+        expect(emitted(DunningEvents.STARTED)).toHaveLength(1)
       })
 
       it("fails the cycle but opens no dunning case when the subscription is paused", async () => {
@@ -754,11 +659,14 @@ medusaIntegrationTestRunner({
           reference: "SUB-FAIL-PAUSED",
           subscription_status: SubscriptionStatus.PAUSED,
         })
-        const dunningStarted = watchDunningStarted()
+        const emitted = watchEvents(getContainer())
 
-        await deliverFailure(seeded.session.id, PaymentActions.FAILED, "declined")
+        await deliverFailure(getContainer(), seeded.session.id, {
+          action: PaymentActions.FAILED,
+          reason: "declined",
+        })
 
-        const state = await readState(seeded)
+        const state = await readRenewalState(getContainer(), seeded)
 
         expect(state.cycle).toMatchObject({
           status: RenewalCycleStatus.FAILED,
@@ -769,7 +677,7 @@ medusaIntegrationTestRunner({
         )
         expect(state.subscription.status).toEqual(SubscriptionStatus.PAUSED)
         expect(state.cases).toHaveLength(0)
-        expect(dunningStarted()).toHaveLength(0)
+        expect(emitted(DunningEvents.STARTED)).toHaveLength(0)
       })
 
       it("ignores a failure for a session whose cycle already succeeded, leaving the subscription's processing cycle alone", async () => {
@@ -790,18 +698,21 @@ medusaIntegrationTestRunner({
           renewal_cycle_id: current.cycle.id,
           status: RenewalAttemptStatus.PROCESSING,
         })
-        const dunningStarted = watchDunningStarted()
-        const before = [await readState(settled), await readState(current)]
+        const emitted = watchEvents(getContainer())
+        const before = [await readRenewalState(container, settled), await readRenewalState(container, current)]
 
-        await deliverFailure(settled.session.id, PaymentActions.FAILED, "declined")
+        await deliverFailure(container, settled.session.id, {
+          action: PaymentActions.FAILED,
+          reason: "declined",
+        })
 
-        const after = [await readState(settled), await readState(current)]
+        const after = [await readRenewalState(container, settled), await readRenewalState(container, current)]
 
         expect(after).toEqual(before)
         expect(after[1].cycle.status).toEqual(RenewalCycleStatus.PROCESSING)
         expect(after[0].subscription.status).toEqual(SubscriptionStatus.ACTIVE)
         expect(after[0].cases).toHaveLength(0)
-        expect(dunningStarted()).toHaveLength(0)
+        expect(emitted(DunningEvents.STARTED)).toHaveLength(0)
       })
     })
   },

@@ -21,6 +21,7 @@ const RenewalCycle = model
     approval_reason: model.text().nullable(),
     generated_order_id: model.text().nullable(),
     applied_pending_update_data: model.json().nullable(),
+    settlement_inputs: model.json().nullable(),
     last_error: model.text().nullable(),
     attempt_count: model.number().default(0),
     attempts: model.hasMany(() => RenewalAttempt, {

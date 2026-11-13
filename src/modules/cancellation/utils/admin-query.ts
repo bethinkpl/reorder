@@ -93,6 +93,7 @@ type DunningCaseRecord = {
     | "open"
     | "retry_scheduled"
     | "retrying"
+    | "awaiting_payment"
     | "awaiting_manual_resolution"
     | "recovered"
     | "unrecovered"
@@ -104,7 +105,12 @@ type DunningCaseRecord = {
 type RenewalCycleRecord = {
   id: string
   subscription_id: string
-  status: "scheduled" | "processing" | "succeeded" | "failed"
+  status:
+    | "scheduled"
+    | "processing"
+    | "succeeded"
+    | "failed"
+    | "awaiting_payment"
   scheduled_for: string | Date
   approval_status: "pending" | "approved" | "rejected" | null
   generated_order_id: string | null
@@ -384,9 +390,10 @@ async function getActiveDunningSummaryMap(
 
   const activeStatusOrder = new Map([
     ["retrying", 0],
-    ["retry_scheduled", 1],
-    ["awaiting_manual_resolution", 2],
-    ["open", 3],
+    ["awaiting_payment", 1],
+    ["retry_scheduled", 2],
+    ["awaiting_manual_resolution", 3],
+    ["open", 4],
   ])
 
   const grouped = new Map<string, DunningCaseRecord[]>()
@@ -400,11 +407,7 @@ async function getActiveDunningSummaryMap(
 
   for (const [subscriptionId, records] of grouped.entries()) {
     const active = records
-      .filter((record) =>
-        ["open", "retry_scheduled", "retrying", "awaiting_manual_resolution"].includes(
-          record.status
-        )
-      )
+      .filter((record) => activeStatusOrder.has(record.status))
       .sort((left, right) => {
         const leftRank = activeStatusOrder.get(left.status) ?? 999
         const rightRank = activeStatusOrder.get(right.status) ?? 999

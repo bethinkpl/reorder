@@ -3,6 +3,8 @@ Customized fork of [@reorder/reorderjs](https://github.com/reorder-js/reorder).
 ## Changes
 ### New features
 - added day granularity for frequency intervals
+- support for payment providers that confirm a charge later: when `authorizePaymentSession` returns `null`, the renewal cycle or dunning case waits as `awaiting_payment` until `payment.captured` settles it or a `failed`/`canceled` `payment.webhook_received` fails it (a renewal then enters dunning, a dunning retry is rescheduled); requires `medusa db:migrate`
+- `POST /admin/renewals/:id/resolve-awaiting-payment` settles or fails a renewal cycle whose payment result never arrived; a charge waiting longer than `RENEWAL_AWAITING_PAYMENT_ALERT_HOURS` (default `96`) raises an alertable log
 ### Improvements / Fixes
 - prevents executing `POST /store/carts/{cartId}/complete` for carts containing subscription items
 - behaviour of `POST /store/carts/{cartId}/subscribe` matches it's non-subscription counterpart more closely (dropped `subscription` field, supports query params and uses same defaults)
@@ -19,6 +21,10 @@ Customized fork of [@reorder/reorderjs](https://github.com/reorder-js/reorder).
 - `source_snapshot` now truthfully captures the initial order's adjustments and tax lines (audit-only — renewals deliberately no longer replay them)
 - renewal cycles stranded in PROCESSING by an unhandled failure between steps are now marked FAILED via compensation, keeping them retryable
 - a renewal that succeeds after a failed attempt (dunning retry, the customer paying the renewal order, a re-run of a failed cycle) now counts the next billing period from the day it was paid instead of from the original due date, and so does a first attempt that succeeds so late that its next date has already passed; on-time renewals keep their original schedule
+- a failed renewal cycle is no longer re-run daily while its subscription has an active dunning case; dunning alone retries the charge
+- cancellation workflows take the `renewal:subscription:<id>` lock themselves (a host app must not hold it when calling them) and end a renewal cycle that is awaiting its payment
+- renewal payment sessions carry `context.renewal_attempt_id` next to `renewal_cycle_id`
+- workflow compensations no longer restore `payment_context`, so a payment method saved in the meantime is kept
 ### QoL
 - addition of eslint lint rules
 - improved test setup

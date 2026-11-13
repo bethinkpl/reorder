@@ -1624,6 +1624,8 @@ function formatDunningStatus(
       return "Retry scheduled"
     case "retrying":
       return "Retrying"
+    case "awaiting_payment":
+      return "Awaiting payment"
     case "awaiting_manual_resolution":
       return "Awaiting manual resolution"
     case "recovered":
@@ -1645,6 +1647,8 @@ function formatRenewalStatus(
       return "Succeeded"
     case "failed":
       return "Failed"
+    case "awaiting_payment":
+      return "Awaiting payment"
   }
 }
 

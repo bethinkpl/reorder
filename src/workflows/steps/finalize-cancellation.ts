@@ -13,9 +13,15 @@ import type SubscriptionModuleService from "../../modules/subscription/service"
 import { CANCELLABLE_SUBSCRIPTION_STATUSES, SubscriptionStatus } from "../../modules/subscription/types"
 import { subscriptionErrors } from "../../modules/subscription/utils/errors"
 import {
+  endAwaitingRenewalCyclesOnCancellation,
+  type EndedAwaitingRenewalCycle,
+  restoreAwaitingRenewalCycles,
+} from "../utils/end-awaiting-renewal-cycle-on-cancellation"
+import {
   CancellationSubscriptionDisplayRecord,
   type CancellationLogSource,
 } from "./shared-cancellation-log"
+import { withoutPaymentContext } from "./pause-subscription"
 
 const FINALIZABLE_CANCELLATION_CASE_STATUSES = new Set<CancellationCaseStatus>([
   CancellationCaseStatus.REQUESTED,
@@ -84,6 +90,7 @@ type FinalizeCancellationStepOutput = {
 type FinalizeCancellationCompensation = {
   previous_case: CancellationCaseRecord
   previous_subscription: SubscriptionRecord
+  ended_awaiting_renewals: EndedAwaitingRenewalCycle[]
 }
 
 async function loadCancellationCase(
@@ -324,6 +331,17 @@ export const finalizeCancellationStep = createStep(
       ),
     } as any)
 
+    const endedAwaitingRenewals = await endAwaitingRenewalCyclesOnCancellation(
+      container,
+      {
+        subscription,
+        cancelled_at: finalizedAt,
+        actor_id: input.finalized_by ?? null,
+        reason,
+        source: input.source ?? "admin",
+      }
+    )
+
     const updatedCase = (await cancellationModule.retrieveCancellationCase(
       cancellationCase.id
     )) as CancellationCaseRecord
@@ -345,6 +363,7 @@ export const finalizeCancellationStep = createStep(
       {
         previous_case: cancellationCase,
         previous_subscription: subscription,
+        ended_awaiting_renewals: endedAwaitingRenewals,
       }
     )
   },
@@ -358,9 +377,13 @@ export const finalizeCancellationStep = createStep(
     const subscriptionModule =
       container.resolve<SubscriptionModuleService>(SUBSCRIPTION_MODULE)
 
+    await restoreAwaitingRenewalCycles(
+      container,
+      compensation.ended_awaiting_renewals
+    )
     await cancellationModule.updateCancellationCases(compensation.previous_case as any)
     await subscriptionModule.updateSubscriptions(
-      compensation.previous_subscription as any
+      withoutPaymentContext(compensation.previous_subscription) as any
     )
   }
 )

@@ -1100,6 +1100,8 @@ function formatCaseStatus(status: DunningCaseAdminStatus) {
       return "Retry scheduled"
     case DunningCaseAdminStatus.RETRYING:
       return "Retrying"
+    case DunningCaseAdminStatus.AWAITING_PAYMENT:
+      return "Awaiting payment"
     case DunningCaseAdminStatus.AWAITING_MANUAL_RESOLUTION:
       return "Awaiting manual resolution"
     case DunningCaseAdminStatus.RECOVERED:
@@ -1115,6 +1117,8 @@ function formatRetryBlockedReason(reason: DunningRetryBlockedReason) {
       return "no active recovery case"
     case "retry_in_progress":
       return "a retry is already running"
+    case "payment_in_progress":
+      return "a payment is awaiting its result"
     case "case_closed":
       return "the case is closed"
     case "subscription_not_retryable":
@@ -1144,6 +1148,8 @@ function getCaseStatusColor(status: DunningCaseAdminStatus) {
     case DunningCaseAdminStatus.RETRY_SCHEDULED:
       return "orange"
     case DunningCaseAdminStatus.RETRYING:
+      return "blue"
+    case DunningCaseAdminStatus.AWAITING_PAYMENT:
       return "blue"
     case DunningCaseAdminStatus.AWAITING_MANUAL_RESOLUTION:
       return "grey"
@@ -1207,6 +1213,8 @@ function formatRenewalStatus(
       return "Succeeded"
     case "failed":
       return "Failed"
+    case "awaiting_payment":
+      return "Awaiting payment"
   }
 }
 

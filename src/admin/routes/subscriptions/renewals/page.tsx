@@ -38,6 +38,7 @@ const statusFilterOptions = [
   { label: "Processing", value: RenewalCycleAdminStatus.PROCESSING },
   { label: "Succeeded", value: RenewalCycleAdminStatus.SUCCEEDED },
   { label: "Failed", value: RenewalCycleAdminStatus.FAILED },
+  { label: "Awaiting payment", value: RenewalCycleAdminStatus.AWAITING_PAYMENT },
 ] as const
 
 const approvalFilterOptions = [
@@ -620,6 +621,8 @@ function formatCycleStatus(status: RenewalCycleAdminStatus) {
       return "Succeeded"
     case RenewalCycleAdminStatus.FAILED:
       return "Failed"
+    case RenewalCycleAdminStatus.AWAITING_PAYMENT:
+      return "Awaiting payment"
   }
 }
 
@@ -680,6 +683,8 @@ function formatRelativeCycleStatus(status: RenewalCycleAdminStatus) {
       return "Processed"
     case RenewalCycleAdminStatus.FAILED:
       return "Needs review"
+    case RenewalCycleAdminStatus.AWAITING_PAYMENT:
+      return "Awaiting payment"
   }
 }
 
@@ -693,6 +698,8 @@ function getCycleStatusColor(status: RenewalCycleAdminStatus) {
       return "green"
     case RenewalCycleAdminStatus.FAILED:
       return "red"
+    case RenewalCycleAdminStatus.AWAITING_PAYMENT:
+      return "orange"
   }
 }
 

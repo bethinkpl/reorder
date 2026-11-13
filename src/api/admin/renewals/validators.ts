@@ -8,6 +8,7 @@ const renewalCycleStatusSchema = z.enum([
   "processing",
   "succeeded",
   "failed",
+  "awaiting_payment",
 ])
 
 const renewalApprovalStatusSchema = z.enum([
@@ -87,4 +88,12 @@ export const PostAdminRejectRenewalChangesSchema = z.object({
 
 export type PostAdminRejectRenewalChangesSchemaType = z.infer<
   typeof PostAdminRejectRenewalChangesSchema
+>
+
+export const PostAdminResolveAwaitingRenewalPaymentSchema = z.object({
+  reason: z.string().trim().min(1).max(500).optional(),
+})
+
+export type PostAdminResolveAwaitingRenewalPaymentSchemaType = z.infer<
+  typeof PostAdminResolveAwaitingRenewalPaymentSchema
 >

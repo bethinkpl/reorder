@@ -72,7 +72,12 @@ type SubscriptionRecord = {
 
 type RenewalCycleRecord = {
   id: string
-  status: "scheduled" | "processing" | "succeeded" | "failed"
+  status:
+    | "scheduled"
+    | "processing"
+    | "succeeded"
+    | "failed"
+    | "awaiting_payment"
   scheduled_for: string
   generated_order_id: string | null
 }
@@ -167,7 +172,7 @@ const inMemorySortableFields = new Set([
   "order_display_id",
 ])
 
-function mapCaseStatus(status: DunningCaseRecord["status"]) {
+export function mapCaseStatus(status: DunningCaseRecord["status"]) {
   switch (status) {
     case DunningCaseStatus.OPEN:
       return DunningCaseAdminStatus.OPEN
@@ -175,6 +180,8 @@ function mapCaseStatus(status: DunningCaseRecord["status"]) {
       return DunningCaseAdminStatus.RETRY_SCHEDULED
     case DunningCaseStatus.RETRYING:
       return DunningCaseAdminStatus.RETRYING
+    case DunningCaseStatus.AWAITING_PAYMENT:
+      return DunningCaseAdminStatus.AWAITING_PAYMENT
     case DunningCaseStatus.AWAITING_MANUAL_RESOLUTION:
       return DunningCaseAdminStatus.AWAITING_MANUAL_RESOLUTION
     case DunningCaseStatus.RECOVERED:

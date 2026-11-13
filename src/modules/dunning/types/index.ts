@@ -2,6 +2,7 @@ export enum DunningCaseStatus {
   OPEN = "open",
   RETRY_SCHEDULED = "retry_scheduled",
   RETRYING = "retrying",
+  AWAITING_PAYMENT = "awaiting_payment",
   AWAITING_MANUAL_RESOLUTION = "awaiting_manual_resolution",
   RECOVERED = "recovered",
   UNRECOVERED = "unrecovered",

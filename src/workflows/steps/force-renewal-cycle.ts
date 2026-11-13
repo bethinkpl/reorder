@@ -22,6 +22,7 @@ import {
 } from "../../modules/activity-log/types"
 import { processRenewalCycleWorkflow } from "../process-renewal-cycle"
 import { persistSubscriptionLogEvent } from "./create-subscription-log-event"
+import { assertNoDunningOwnsFailedCycle } from "./process-renewal-cycle"
 
 export type ForceRenewalCycleStepInput = {
   renewal_cycle_id: string
@@ -74,6 +75,8 @@ export const forceRenewalCycleStep = createStep(
       triggered_by: input.triggered_by ?? null,
     })
 
+    let cycleStatus: RenewalCycleStatus = RenewalCycleStatus.SUCCEEDED
+
     try {
       if (cycle.status === RenewalCycleStatus.PROCESSING) {
         throw renewalErrors.alreadyProcessing(cycle.id)
@@ -82,6 +85,12 @@ export const forceRenewalCycleStep = createStep(
       if (cycle.status === RenewalCycleStatus.SUCCEEDED) {
         throw renewalErrors.duplicateExecutionBlocked(cycle.id)
       }
+
+      if (cycle.status === RenewalCycleStatus.AWAITING_PAYMENT) {
+        throw renewalErrors.awaitingPayment(cycle.id)
+      }
+
+      await assertNoDunningOwnsFailedCycle(container, cycle)
 
       if (
         cycle.status !== RenewalCycleStatus.SCHEDULED &&
@@ -129,7 +138,7 @@ export const forceRenewalCycleStep = createStep(
         },
       }))
 
-      await processRenewalCycleWorkflow(container).run({
+      const { result } = await processRenewalCycleWorkflow(container).run({
         input: {
           renewal_cycle_id: cycle.id,
           trigger_type: "manual",
@@ -138,19 +147,23 @@ export const forceRenewalCycleStep = createStep(
           correlation_id: correlationId,
         },
       })
+
+      if (!result) {
+        cycleStatus = (
+          await renewalModule.retrieveRenewalCycle(cycle.id, { select: ["status"] })
+        ).status
+      }
     } catch (error) {
       const failureKind = classifyRenewalFailure(error)
-      const level =
-        failureKind === "already_processing" || failureKind === "duplicate_execution"
-          ? "warn"
-          : "error"
+      const blocked =
+        failureKind === "already_processing" ||
+        failureKind === "duplicate_execution" ||
+        failureKind === "awaiting_payment" ||
+        failureKind === "dunning_owns_cycle"
 
-      logRenewalEvent(logger, level, {
+      logRenewalEvent(logger, blocked ? "warn" : "error", {
         event: "renewal.force",
-        outcome:
-          failureKind === "already_processing" || failureKind === "duplicate_execution"
-            ? "blocked"
-            : "failed",
+        outcome: blocked ? "blocked" : "failed",
         correlation_id: correlationId,
         renewal_cycle_id: cycle.id,
         subscription_id: cycle.subscription_id,
@@ -164,16 +177,23 @@ export const forceRenewalCycleStep = createStep(
       throw error
     }
 
-    logRenewalEvent(logger, "info", {
+    const outcome =
+      cycleStatus === RenewalCycleStatus.SUCCEEDED
+        ? "succeeded"
+        : cycleStatus === RenewalCycleStatus.FAILED
+          ? "failed"
+          : "awaiting_payment"
+
+    logRenewalEvent(logger, outcome === "failed" ? "warn" : "info", {
       event: "renewal.force",
-      outcome: "succeeded",
+      outcome,
       correlation_id: correlationId,
       renewal_cycle_id: cycle.id,
       subscription_id: cycle.subscription_id,
       trigger_type: "manual",
       triggered_by: input.triggered_by ?? null,
-      success_count: 1,
-      failure_count: 0,
+      success_count: outcome === "succeeded" ? 1 : 0,
+      failure_count: outcome === "failed" ? 1 : 0,
     })
 
     return new StepResponse(cycle.id)

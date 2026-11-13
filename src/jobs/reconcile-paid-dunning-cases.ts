@@ -3,22 +3,43 @@ import { Modules } from "@medusajs/framework/utils"
 import { DUNNING_MODULE } from "../modules/dunning"
 import type DunningModuleService from "../modules/dunning/service"
 import { DunningCaseStatus } from "../modules/dunning/types"
+import {
+  createDunningCorrelationId,
+  logDunningEvent,
+} from "../modules/dunning/utils/observability"
+import {
+  isOverdueAlertDue,
+  resolveAwaitingPaymentAlertHours,
+  withOverdueAlertMarker,
+} from "../modules/renewal/utils/awaiting-payment-age"
 import { recoverDunningFromCapturedPaymentWorkflow } from "../workflows/recover-dunning-from-captured-payment"
 import { loadOrderAmounts } from "../workflows/steps/run-dunning-retry"
 
 const JOB_NAME = "reconcile-paid-dunning-cases"
 const JOB_LOCK_KEY = "jobs:reconcile-paid-dunning-cases"
 const BATCH_SIZE = 200
+const ALERT_LOCK_TIMEOUT_SECONDS = 5
+
+export const DUNNING_AWAITING_PAYMENT_OVERDUE_EVENT =
+  "dunning.awaiting_payment_overdue"
 
 const OPEN_DUNNING_STATUSES = [
   DunningCaseStatus.OPEN,
   DunningCaseStatus.RETRY_SCHEDULED,
+  DunningCaseStatus.AWAITING_PAYMENT,
   DunningCaseStatus.AWAITING_MANUAL_RESOLUTION,
 ]
 
 type DunningCaseRecord = {
   id: string
+  status: DunningCaseStatus
   renewal_order_id: string | null
+}
+
+type OverdueAlertInput = {
+  now: Date
+  alertHours: number
+  correlationId: string
 }
 
 export type ReconcilePaidDunningCasesResult = {
@@ -36,6 +57,163 @@ function isLockTimeout(message: string) {
   const lowered = message.toLowerCase()
 
   return lowered.includes("timed-out acquiring lock") || lowered.includes("timeout")
+}
+
+async function findDueOverdueAlert(
+  dunningModule: DunningModuleService,
+  caseId: string,
+  input: OverdueAlertInput
+) {
+  const dunningCase = await dunningModule.retrieveDunningCase(caseId)
+
+  if (dunningCase.status !== DunningCaseStatus.AWAITING_PAYMENT) {
+    return null
+  }
+
+  const [latest] = await dunningModule.listDunningAttempts(
+    { dunning_case_id: dunningCase.id },
+    { order: { attempt_no: "DESC" }, take: 1 }
+  )
+  const alertKey = latest?.id ?? dunningCase.id
+  const submittedAt = latest?.started_at ?? dunningCase.updated_at
+
+  if (
+    !isOverdueAlertDue({
+      metadata: dunningCase.metadata,
+      alert_key: alertKey,
+      submitted_at: submittedAt,
+      now: input.now,
+      limit_hours: input.alertHours,
+    })
+  ) {
+    return null
+  }
+
+  return {
+    dunningCase,
+    alertKey,
+    submittedAt: new Date(submittedAt).toISOString(),
+    paymentSessionId: latest?.payment_reference ?? null,
+  }
+}
+
+async function raiseOverdueAlertOnce(
+  container: MedusaContainer,
+  caseId: string,
+  input: OverdueAlertInput
+): Promise<boolean> {
+  const dunningModule = container.resolve<DunningModuleService>(DUNNING_MODULE)
+
+  if (!(await findDueOverdueAlert(dunningModule, caseId, input))) {
+    return false
+  }
+
+  try {
+    return await container.resolve(Modules.LOCKING).execute(
+      `dunning:${caseId}`,
+      async () => {
+        const due = await findDueOverdueAlert(dunningModule, caseId, input)
+
+        if (!due) {
+          return false
+        }
+
+        await dunningModule.updateDunningCases({
+          id: caseId,
+          metadata: withOverdueAlertMarker(due.dunningCase.metadata, due.alertKey),
+        })
+
+        logDunningEvent(container.resolve("logger"), "warn", {
+          event: DUNNING_AWAITING_PAYMENT_OVERDUE_EVENT,
+          outcome: "awaiting_payment",
+          correlation_id: input.correlationId,
+          dunning_case_id: caseId,
+          subscription_id: due.dunningCase.subscription_id,
+          renewal_cycle_id: due.dunningCase.renewal_cycle_id,
+          job_name: JOB_NAME,
+          alertable: true,
+          message: `DunningCase '${caseId}' has awaited the payment of its retry for more than ${input.alertHours} hours`,
+          metadata: {
+            submitted_at: due.submittedAt,
+            alert_hours: input.alertHours,
+            payment_session_id: due.paymentSessionId,
+          },
+        })
+
+        return true
+      },
+      { timeout: ALERT_LOCK_TIMEOUT_SECONDS }
+    )
+  } catch (error) {
+    if (isLockTimeout(getErrorMessage(error))) {
+      return false
+    }
+
+    throw error
+  }
+}
+
+function reportCaseFailure(
+  container: MedusaContainer,
+  dunningCase: Pick<DunningCaseRecord, "id" | "renewal_order_id">,
+  error: unknown
+) {
+  container.resolve("logger").error(
+    JSON.stringify({
+      domain: "subscriptions",
+      event: `${JOB_NAME}.case_failed`,
+      job_name: JOB_NAME,
+      dunning_case_id: dunningCase.id,
+      renewal_order_id: dunningCase.renewal_order_id,
+      alertable: true,
+      message: getErrorMessage(error),
+    })
+  )
+}
+
+async function alertOverdueAwaitingCases(
+  container: MedusaContainer,
+  input: OverdueAlertInput,
+  result: ReconcilePaidDunningCasesResult
+): Promise<void> {
+  const dunningModule = container.resolve<DunningModuleService>(DUNNING_MODULE)
+  let cursor: string | null = null
+
+  while (true) {
+    const cases = (await dunningModule.listDunningCases(
+      {
+        status: DunningCaseStatus.AWAITING_PAYMENT,
+        ...(cursor ? { id: { $gt: cursor } } : {}),
+      },
+      { select: ["id", "renewal_order_id"], take: BATCH_SIZE, order: { id: "ASC" } }
+    )) as DunningCaseRecord[]
+
+    for (const dunningCase of cases) {
+      if (!dunningCase.renewal_order_id) {
+        continue
+      }
+
+      try {
+        const { pending } = await loadOrderAmounts(
+          container,
+          dunningCase.renewal_order_id
+        )
+
+        if (pending > 0) {
+          await raiseOverdueAlertOnce(container, dunningCase.id, input)
+        }
+      } catch (error) {
+        result.failed += 1
+        reportCaseFailure(container, dunningCase, error)
+      }
+    }
+
+    if (cases.length < BATCH_SIZE) {
+      return
+    }
+
+    cursor = cases[cases.length - 1].id
+  }
 }
 
 /**
@@ -63,6 +241,11 @@ export async function reconcilePaidDunningCases(
     unpaid: 0,
     failed: 0,
   }
+  const alertInput: OverdueAlertInput = {
+    now: new Date(Date.now()),
+    alertHours: resolveAwaitingPaymentAlertHours(),
+    correlationId: createDunningCorrelationId(JOB_NAME),
+  }
 
   for (const dunningCase of cases) {
     if (!dunningCase.renewal_order_id) {
@@ -88,20 +271,11 @@ export async function reconcilePaidDunningCases(
       result.recovered += 1
     } catch (error) {
       result.failed += 1
-
-      container.resolve("logger").error(
-        JSON.stringify({
-          domain: "subscriptions",
-          event: `${JOB_NAME}.case_failed`,
-          job_name: JOB_NAME,
-          dunning_case_id: dunningCase.id,
-          renewal_order_id: dunningCase.renewal_order_id,
-          alertable: true,
-          message: getErrorMessage(error),
-        })
-      )
+      reportCaseFailure(container, dunningCase, error)
     }
   }
+
+  await alertOverdueAwaitingCases(container, alertInput, result)
 
   return result
 }

@@ -763,6 +763,8 @@ function formatCycleStatus(status: RenewalCycleAdminStatus) {
       return "Succeeded"
     case RenewalCycleAdminStatus.FAILED:
       return "Failed"
+    case RenewalCycleAdminStatus.AWAITING_PAYMENT:
+      return "Awaiting payment"
   }
 }
 
@@ -833,6 +835,8 @@ function getCycleStatusColor(status: RenewalCycleAdminStatus) {
       return "green"
     case RenewalCycleAdminStatus.FAILED:
       return "red"
+    case RenewalCycleAdminStatus.AWAITING_PAYMENT:
+      return "orange"
   }
 }
 

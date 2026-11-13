@@ -21,11 +21,13 @@ import { subscriptionErrors } from "../../modules/subscription/utils/errors"
 import type { SubscriptionSettingsShape } from "../../modules/settings/utils/normalize-settings"
 import { toISOStringOrNull } from "../utils/date-output"
 import { getEffectiveSubscriptionSettings } from "../utils/subscription-settings"
+import { withoutPaymentContext } from "./pause-subscription"
 
 const ACTIVE_DUNNING_CASE_STATUSES = new Set<DunningCaseStatus>([
   DunningCaseStatus.OPEN,
   DunningCaseStatus.RETRY_SCHEDULED,
   DunningCaseStatus.RETRYING,
+  DunningCaseStatus.AWAITING_PAYMENT,
   DunningCaseStatus.AWAITING_MANUAL_RESOLUTION,
 ])
 
@@ -430,7 +432,9 @@ export const startDunningStep = createStep(
     }
 
     if (compensation.previous_subscription) {
-      await subscriptionModule.updateSubscriptions(compensation.previous_subscription)
+      await subscriptionModule.updateSubscriptions(
+        withoutPaymentContext(compensation.previous_subscription)
+      )
     }
   }
 )

@@ -38,18 +38,19 @@ async function processCase(
         correlation_id: caseCorrelationId,
       },
     })
+    const awaiting = result.outcome === "awaiting_payment"
 
     logDunningEvent(logger, "info", {
       event: "dunning.job.case",
       job_name: JOB_NAME,
-      outcome: "succeeded",
+      outcome: awaiting ? "awaiting_payment" : "succeeded",
       correlation_id: caseCorrelationId,
       dunning_case_id: dunningCase.id,
       subscription_id: dunningCase.subscription_id,
       renewal_cycle_id: dunningCase.renewal_cycle_id,
       attempt_no: dunningCase.attempt_count + 1,
       duration_ms: Date.now() - startedAt,
-      success_count: 1,
+      success_count: awaiting ? 0 : 1,
       failure_count: 0,
       metadata: {
         retry_outcome: result.outcome,
@@ -116,6 +117,7 @@ async function runJob(container: MedusaContainer) {
     let failed = 0
     let blocked = 0
     let parked = 0
+    let awaiting = 0
     let attemptTotal = 0
     let recoveredTtrTotal = 0
     let recoveredTtrCount = 0
@@ -180,6 +182,8 @@ async function runJob(container: MedusaContainer) {
           unrecovered += 1
         } else if (outcome === "awaiting_manual_resolution") {
           parked += 1
+        } else if (outcome === "awaiting_payment") {
+          awaiting += 1
         } else if (outcome === "blocked") {
           blocked += 1
         } else {
@@ -204,6 +208,7 @@ async function runJob(container: MedusaContainer) {
       unrecovered_count: unrecovered,
       failure_count: failed,
       blocked_count: blocked,
+      awaiting_count: awaiting,
       avg_attempts: processed ? Number((attemptTotal / processed).toFixed(2)) : 0,
       recovery_rate: processed
         ? Number((recovered / processed).toFixed(4))

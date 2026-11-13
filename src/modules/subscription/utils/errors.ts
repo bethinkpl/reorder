@@ -38,3 +38,18 @@ export const subscriptionErrors = {
     return new MedusaError(MedusaError.Types.CONFLICT, message)
   },
 }
+
+export function isLockAcquisitionFailure(error: unknown) {
+  const message =
+    typeof error === "object" &&
+    error !== null &&
+    "message" in error &&
+    typeof error.message === "string"
+      ? error.message.toLowerCase()
+      : ""
+
+  return (
+    message.includes("failed to acquire lock") ||
+    message.includes("acquiring lock")
+  )
+}

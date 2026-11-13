@@ -5,6 +5,7 @@ import { setTimeout as delay } from "node:timers/promises"
 import { DateTime } from "luxon"
 import { RENEWAL_MODULE } from "../modules/renewal"
 import type RenewalModuleService from "../modules/renewal/service"
+import { RenewalCycleStatus } from "../modules/renewal/types"
 import {
   isApprovalEligible,
   type DueRenewalCycleRecord,
@@ -84,8 +85,22 @@ export function isBlockedRenewalOutcome(failureKind: RenewalFailureKind) {
     failureKind === "already_processing" ||
     failureKind === "duplicate_execution" ||
     failureKind === "cycle_superseded" ||
-    failureKind === "customer_payment_in_progress"
+    failureKind === "customer_payment_in_progress" ||
+    failureKind === "awaiting_payment" ||
+    failureKind === "dunning_owns_cycle"
   )
+}
+
+async function isAwaitingPayment(
+  container: MedusaContainer,
+  renewalCycleId: string
+) {
+  const renewalModule = container.resolve<RenewalModuleService>(RENEWAL_MODULE)
+  const cycle = await renewalModule.retrieveRenewalCycle(renewalCycleId, {
+    select: ["status"],
+  })
+
+  return cycle.status === RenewalCycleStatus.AWAITING_PAYMENT
 }
 
 async function processCycle(
@@ -98,28 +113,32 @@ async function processCycle(
   const startedAt = Date.now()
 
   try {
-    await processRenewalCycleWorkflow(container).run({
+    const { result } = await processRenewalCycleWorkflow(container).run({
       input: {
         renewal_cycle_id: cycle.id,
         trigger_type: "scheduler",
         correlation_id: cycleCorrelationId,
       },
     })
+    const outcome =
+      !result && (await isAwaitingPayment(container, cycle.id))
+        ? ("awaiting_payment" as const)
+        : ("succeeded" as const)
 
     logRenewalEvent(logger, "info", {
       event: "renewal.job.cycle",
       job_name: JOB_NAME,
-      outcome: "succeeded",
+      outcome,
       correlation_id: cycleCorrelationId,
       renewal_cycle_id: cycle.id,
       subscription_id: cycle.subscription_id,
       trigger_type: "scheduler",
       duration_ms: Date.now() - startedAt,
-      success_count: 1,
+      success_count: outcome === "succeeded" ? 1 : 0,
       failure_count: 0,
     })
 
-    return "succeeded" as const
+    return outcome
   } catch (error) {
     const message = getRenewalErrorMessage(error)
     const failureKind = classifyRenewalFailure(error)
@@ -216,6 +235,7 @@ export default async function processRenewalCyclesJob(
         success_count: 0,
         failure_count: 0,
         blocked_count: 0,
+        awaiting_count: 0,
         message: "Renewal scheduler window empty; nothing due",
         metadata: { window_key: windowKey, cursor },
       })
@@ -227,6 +247,7 @@ export default async function processRenewalCyclesJob(
     let succeeded = 0
     let failed = 0
     let blocked = 0
+    let awaiting = 0
 
     for (let i = 0; i < renewable.length; i += CONCURRENT_RENEWAL_BATCH_SIZE) {
       const chunk = renewable.slice(i, i + CONCURRENT_RENEWAL_BATCH_SIZE)
@@ -244,6 +265,8 @@ export default async function processRenewalCyclesJob(
           succeeded += 1
         } else if (outcome === "blocked") {
           blocked += 1
+        } else if (outcome === "awaiting_payment") {
+          awaiting += 1
         } else {
           failed += 1
         }
@@ -273,6 +296,7 @@ export default async function processRenewalCyclesJob(
       success_count: succeeded,
       failure_count: failed,
       blocked_count: blocked,
+      awaiting_count: awaiting,
       message: "Renewal scheduler window batch completed",
       metadata: { window_key: windowKey, cursor: nextCursor },
     })

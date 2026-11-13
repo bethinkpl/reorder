@@ -6,6 +6,7 @@ import { dunningErrors } from "../../modules/dunning/utils/errors"
 import { SUBSCRIPTION_MODULE } from "../../modules/subscription"
 import type SubscriptionModuleService from "../../modules/subscription/service"
 import { SubscriptionStatus } from "../../modules/subscription/types"
+import { withoutPaymentContext } from "./pause-subscription"
 
 type SubscriptionRecord = {
   id: string
@@ -135,7 +136,7 @@ export const markDunningRecoveredStep = createStep(
 
     if (compensation.previous_subscription) {
       await subscriptionModule.updateSubscriptions(
-        compensation.previous_subscription as any
+        withoutPaymentContext(compensation.previous_subscription) as any
       )
     }
   }

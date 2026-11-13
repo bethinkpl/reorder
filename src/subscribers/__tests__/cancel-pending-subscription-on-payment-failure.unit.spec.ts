@@ -1,12 +1,28 @@
+jest.mock("../../workflows/utils/fail-awaiting-renewal-cycle", () => ({
+  failAwaitingRenewalCycle: jest.fn(),
+}))
+
+jest.mock("../../workflows/utils/fail-awaiting-dunning-attempt", () => ({
+  failAwaitingDunningAttempt: jest.fn(),
+}))
+
 import type { MedusaContainer } from "@medusajs/framework/types"
-import { ContainerRegistrationKeys, Modules, PaymentActions } from "@medusajs/framework/utils"
+import {
+  ContainerRegistrationKeys,
+  MedusaError,
+  Modules,
+  PaymentActions,
+} from "@medusajs/framework/utils"
 import { SUBSCRIPTION_MODULE } from "../../modules/subscription"
 import { SubscriptionStatus } from "../../modules/subscription/types"
+import { failAwaitingRenewalCycle } from "../../workflows/utils/fail-awaiting-renewal-cycle"
 import { cancelPendingSubscriptionOnPaymentFailure } from "../cancel-pending-subscription-on-payment-failure"
 
 type Staged = Record<string, unknown[]>
 
 type UpdateCall = Record<string, unknown>
+
+type LogEntry = { level: string, entry: Record<string, unknown> }
 
 const webhookEvent = {
   provider: "stripe-checkout-session",
@@ -31,9 +47,21 @@ function buildContainer(options: {
   staged: Staged
   action: string
   sessionId?: string | null
+  reason?: string
   captured: UpdateCall[]
+  logs?: LogEntry[]
 }) {
-  const { staged, action, sessionId = "payses_1", captured } = options
+  const {
+    staged,
+    action,
+    sessionId = "payses_1",
+    reason,
+    captured,
+    logs = [],
+  } = options
+  const record = (level: string) => (line: string) => {
+    logs.push({ level, entry: JSON.parse(line) })
+  }
 
   return {
     resolve(key: string) {
@@ -47,7 +75,7 @@ function buildContainer(options: {
         return {
           getWebhookActionAndData: async () => ({
             action,
-            data: sessionId ? { session_id: sessionId } : {},
+            data: sessionId ? { session_id: sessionId, reason } : {},
           }),
         }
       }
@@ -63,7 +91,7 @@ function buildContainer(options: {
       }
 
       if (key === "logger") {
-        return { info: () => {}, warn: () => {} }
+        return { info: () => {}, warn: record("warn"), error: record("error") }
       }
 
       throw new Error(`Unexpected resolve('${key}')`)
@@ -152,5 +180,105 @@ describe("cancelPendingSubscriptionOnPaymentFailure", () => {
     await run({ staged, action: PaymentActions.CANCELED, captured })
 
     expect(captured).toEqual([])
+  })
+
+  describe("a renewal failure whose handling throws", () => {
+    const failRenewal = jest.mocked(failAwaitingRenewalCycle)
+
+    function renewalStaged(): Staged {
+      return {
+        payment_session: [
+          {
+            id: "payses_1",
+            payment_collection_id: "paycol_1",
+            context: { renewal_cycle_id: "rc_1", renewal_attempt_id: "ra_1" },
+          },
+        ],
+      }
+    }
+
+    async function deliverWhileHandlingThrows(error: unknown) {
+      const logs: LogEntry[] = []
+
+      failRenewal.mockReset()
+      failRenewal.mockRejectedValueOnce(error)
+
+      const outcome = await run({
+        staged: renewalStaged(),
+        action: PaymentActions.FAILED,
+        captured: [],
+        logs,
+      }).then(
+        () => "resolved",
+        (rejection: unknown) => (rejection === error ? "rejected" : rejection)
+      )
+
+      return { outcome, logs }
+    }
+
+    it("logs a record that no longer exists once, as a warning, and does not reject", async () => {
+      const { outcome, logs } = await deliverWhileHandlingThrows(
+        new MedusaError(
+          MedusaError.Types.NOT_FOUND,
+          "Subscription with id: sub_1 was not found"
+        )
+      )
+
+      expect(outcome).toEqual("resolved")
+      expect(logs).toEqual([
+        {
+          level: "warn",
+          entry: expect.objectContaining({
+            renewal_cycle_id: "rc_1",
+            payment_session_id: "payses_1",
+            alertable: false,
+          }),
+        },
+      ])
+    })
+
+    it.each([
+      new Error("Failed to acquire lock for key \"renewal:subscription:sub_1\""),
+      new MedusaError(
+        MedusaError.Types.CONFLICT,
+        "Failed to acquire lock for key \"renewal:subscription:sub_1\""
+      ),
+      new Error("\"renewal:subscription:sub_1\" is already locked."),
+      new Error("Timed-out acquiring lock."),
+    ])("rejects after a non-alertable entry when the lock stays taken: '$message'", async (error) => {
+      const { outcome, logs } = await deliverWhileHandlingThrows(error)
+
+      expect(outcome).toEqual("rejected")
+      expect(logs).toEqual([
+        {
+          level: "warn",
+          entry: expect.objectContaining({
+            renewal_cycle_id: "rc_1",
+            alertable: false,
+          }),
+        },
+      ])
+    })
+
+    it.each([
+      new Error("database connection lost"),
+      new Error("payment provider timeout"),
+      new Error("Subscription 'sub_1' was not found"),
+      new MedusaError(MedusaError.Types.CONFLICT, "Subscription 'sub_1' is locked"),
+    ])("rejects after an alertable entry for anything else: '$message'", async (error) => {
+      const { outcome, logs } = await deliverWhileHandlingThrows(error)
+
+      expect(outcome).toEqual("rejected")
+      expect(logs).toEqual([
+        {
+          level: "error",
+          entry: expect.objectContaining({
+            renewal_cycle_id: "rc_1",
+            alertable: true,
+            message: error.message,
+          }),
+        },
+      ])
+    })
   })
 })

@@ -82,6 +82,14 @@ describe("resolveRetryEligibility", () => {
     ).toEqual({ eligible: false, blocked_reason: RetryBlockedReason.RETRY_IN_PROGRESS })
   })
 
+  it("blocks while a submitted charge awaits the provider's answer", () => {
+    expect(
+      resolveRetryEligibility(
+        buildInput({ dunningCase: { status: DunningCaseStatus.AWAITING_PAYMENT } })
+      )
+    ).toEqual({ eligible: false, blocked_reason: "payment_in_progress" })
+  })
+
   it.each([DunningCaseStatus.RECOVERED, DunningCaseStatus.UNRECOVERED])(
     "blocks a closed case (%s)",
     (status) => {

@@ -2,6 +2,7 @@ export enum DunningCaseAdminStatus {
   OPEN = "open",
   RETRY_SCHEDULED = "retry_scheduled",
   RETRYING = "retrying",
+  AWAITING_PAYMENT = "awaiting_payment",
   AWAITING_MANUAL_RESOLUTION = "awaiting_manual_resolution",
   RECOVERED = "recovered",
   UNRECOVERED = "unrecovered",
@@ -33,7 +34,12 @@ export type DunningAdminSubscriptionSummary = {
 
 export type DunningAdminRenewalSummary = {
   renewal_cycle_id: string
-  status: "scheduled" | "processing" | "succeeded" | "failed"
+  status:
+    | "scheduled"
+    | "processing"
+    | "succeeded"
+    | "failed"
+    | "awaiting_payment"
   scheduled_for: string
   generated_order_id: string | null
 }
@@ -66,6 +72,7 @@ export type DunningAttemptAdminRecord = {
 export type DunningRetryBlockedReason =
   | "no_active_case"
   | "retry_in_progress"
+  | "payment_in_progress"
   | "case_closed"
   | "subscription_not_retryable"
   | "no_payment_method"

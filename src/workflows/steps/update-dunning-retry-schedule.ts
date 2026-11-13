@@ -76,7 +76,10 @@ export const updateDunningRetryScheduleStep = createStep(
       throw dunningErrors.alreadyUnrecovered(dunningCase.id)
     }
 
-    if (dunningCase.status === DunningCaseStatus.RETRYING) {
+    if (
+      dunningCase.status === DunningCaseStatus.RETRYING ||
+      dunningCase.status === DunningCaseStatus.AWAITING_PAYMENT
+    ) {
       throw dunningErrors.retryInFlightTransitionBlocked(
         dunningCase.id,
         "update retry schedule"

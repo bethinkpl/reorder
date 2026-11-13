@@ -22,6 +22,7 @@ import { SUBSCRIPTION_MODULE } from "../../modules/subscription"
 import type SubscriptionModuleService from "../../modules/subscription/service"
 import { SubscriptionStatus } from "../../modules/subscription/types"
 import { CancellationSubscriptionDisplayRecord } from "./shared-cancellation-log"
+import { withoutPaymentContext } from "./pause-subscription"
 
 const APPLIABLE_CANCELLATION_CASE_STATUSES = new Set<CancellationCaseStatus>([
   CancellationCaseStatus.EVALUATING_RETENTION,
@@ -380,6 +381,8 @@ export const applyRetentionOfferStep = createStep(
 
     await cancellationModule.deleteRetentionOfferEvents(compensation.created_event_id)
     await cancellationModule.updateCancellationCases(compensation.previous_case as any)
-    await subscriptionModule.updateSubscriptions(compensation.previous_subscription as any)
+    await subscriptionModule.updateSubscriptions(
+      withoutPaymentContext(compensation.previous_subscription) as any
+    )
   }
 )

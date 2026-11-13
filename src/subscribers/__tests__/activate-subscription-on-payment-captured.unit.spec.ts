@@ -40,7 +40,9 @@ const activationCall = { id: "sub_1", status: SubscriptionStatus.ACTIVE }
 
 function defaultStaged(): Staged {
   return {
-    payment: [{ id: "pay_1", payment_collection_id: "paycol_1" }],
+    payment: [
+      { id: "pay_1", payment_collection_id: "paycol_1", payment_session: { context: {} } },
+    ],
     cart_payment_collection: [{ cart_id: "cart_1" }],
     subscription: [
       {
@@ -390,6 +392,7 @@ describe("activateSubscriptionOnPaymentCaptured", () => {
       domain: "subscriptions",
       event: "dunning_recovery_from_capture_failed",
       subscription_id: "sub_1",
+      order_id: "order_1",
       dunning_case_id: "dun_1",
       payment_id: "pay_1",
       alertable: true,

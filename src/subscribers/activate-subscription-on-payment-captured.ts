@@ -15,10 +15,16 @@ import { findSubscriptionAndOrderForPaymentCollection } from "../modules/subscri
 import { refreshSubscriptionPaymentContext } from "../modules/subscription/utils/resolve-captured-payment-method"
 import { ensureNextRenewalCycleWorkflow } from "../workflows/ensure-next-renewal-cycle"
 import { recoverDunningFromCapturedPaymentWorkflow } from "../workflows/recover-dunning-from-captured-payment"
+import {
+  readRenewalSessionMarkers,
+  type RenewalSessionSignal,
+} from "../workflows/utils/renewal-session-marker"
+import { settleAwaitingRenewalCycle } from "../workflows/utils/settle-awaiting-renewal-cycle"
 
 type PaymentRecord = {
   id: string
   payment_collection_id: string | null
+  payment_session: { id: string, context: Record<string, unknown> | null } | null
 }
 
 type SubscriptionRecord = {
@@ -89,17 +95,21 @@ async function runDunningRecovery(
     include_unrecovered?: boolean
   }
 ) {
-  const dunningCase = await findDunningCaseForOrder(
-    container,
-    input.order_id,
-    Boolean(input.include_unrecovered)
-  )
-
-  if (!dunningCase) {
-    return false
-  }
+  let dunningCaseId: string | null = null
 
   try {
+    const dunningCase = await findDunningCaseForOrder(
+      container,
+      input.order_id,
+      Boolean(input.include_unrecovered)
+    )
+
+    if (!dunningCase) {
+      return false
+    }
+
+    dunningCaseId = dunningCase.id
+
     await recoverDunningFromCapturedPaymentWorkflow(container).run({
       input: { dunning_case_id: dunningCase.id, payment_id: input.payment_id },
     })
@@ -109,7 +119,8 @@ async function runDunningRecovery(
         domain: "subscriptions",
         event: "dunning_recovery_from_capture_failed",
         subscription_id: input.subscription_id,
-        dunning_case_id: dunningCase.id,
+        order_id: input.order_id,
+        dunning_case_id: dunningCaseId,
         payment_id: input.payment_id,
         alertable: true,
         message: error instanceof Error ? error.message : String(error),
@@ -117,7 +128,35 @@ async function runDunningRecovery(
     )
   }
 
-  return true
+  return dunningCaseId !== null
+}
+
+async function runAwaitingRenewalSettlement(
+  container: MedusaContainer,
+  input: {
+    renewal_cycle_id: string
+    subscription_id: string
+    payment_id: string
+    signal: RenewalSessionSignal
+  }
+) {
+  try {
+    await settleAwaitingRenewalCycle(container, input.renewal_cycle_id, {
+      processing_signal: input.signal,
+    })
+  } catch (error) {
+    container.resolve("logger").error(
+      JSON.stringify({
+        domain: "subscriptions",
+        event: "renewal_settlement_from_capture_failed",
+        subscription_id: input.subscription_id,
+        renewal_cycle_id: input.renewal_cycle_id,
+        payment_id: input.payment_id,
+        alertable: true,
+        message: error instanceof Error ? error.message : String(error),
+      })
+    )
+  }
 }
 
 export async function activateSubscriptionOnPaymentCaptured(
@@ -128,10 +167,16 @@ export async function activateSubscriptionOnPaymentCaptured(
 
   const { data: payments } = await query.graph({
     entity: "payment",
-    fields: ["id", "payment_collection_id"],
+    fields: [
+      "id",
+      "payment_collection_id",
+      "payment_session.id",
+      "payment_session.context",
+    ],
     filters: { id: paymentId },
   })
-  const paymentCollectionId = (payments as PaymentRecord[])[0]?.payment_collection_id
+  const payment = (payments as PaymentRecord[])[0]
+  const paymentCollectionId = payment?.payment_collection_id
   if (!paymentCollectionId) {
     return
   }
@@ -196,6 +241,20 @@ export async function activateSubscriptionOnPaymentCaptured(
     )
 
     return
+  }
+
+  const markers = readRenewalSessionMarkers(payment.payment_session?.context)
+
+  if (markers.renewal_cycle_id) {
+    await runAwaitingRenewalSettlement(container, {
+      renewal_cycle_id: markers.renewal_cycle_id,
+      subscription_id: subscription.id,
+      payment_id: paymentId,
+      signal: {
+        session_id: payment.payment_session?.id ?? null,
+        attempt_id: markers.renewal_attempt_id,
+      },
+    })
   }
 
   // Runs before the recovery below, and independently of it: the card the customer just paid with

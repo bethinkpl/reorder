@@ -46,6 +46,7 @@ type BuildOptions = {
   appliedPendingUpdateData?: typeof pendingChange | null
   attempts?: { id: string, attempt_no: number }[]
   nextRenewalAt?: Date | null
+  settlementInputs?: Record<string, unknown> | null
 }
 
 function buildContainer(options: BuildOptions = {}) {
@@ -57,6 +58,7 @@ function buildContainer(options: BuildOptions = {}) {
     status: options.cycleStatus ?? RenewalCycleStatus.FAILED,
     generated_order_id: "order_1",
     applied_pending_update_data: options.appliedPendingUpdateData ?? null,
+    settlement_inputs: options.settlementInputs ?? null,
     attempt_count: 2,
     last_error: "card_declined",
   }
@@ -282,6 +284,37 @@ describe("settleRenewalCycleSucceeded", () => {
           sku: "SKU-NEW",
         }),
       })
+    )
+  })
+
+  it("writes the source snapshot the cycle stored when the caller passes none", async () => {
+    const storedSnapshot = {
+      product_id: "prod_1",
+      variant_id: "var_new",
+      title: "Plan - Quarterly",
+      quantity: 1,
+      unit_price: 4999,
+      subtitle: null,
+      sku: "SKU-NEW",
+      is_discountable: true,
+      is_tax_inclusive: false,
+      requires_shipping: true,
+      tax_lines: [],
+      adjustments: [],
+    }
+    const { container, updateSubscriptions } = buildContainer({
+      appliedPendingUpdateData: pendingChange,
+      settlementInputs: {
+        attempt_id: "rat_1",
+        audit: finalizeAudit,
+        source_snapshot: storedSnapshot,
+      },
+    })
+
+    await settleRenewalCycleSucceeded(container, baseInput)
+
+    expect(updateSubscriptions).toHaveBeenCalledWith(
+      expect.objectContaining({ source_snapshot: storedSnapshot })
     )
   })
 

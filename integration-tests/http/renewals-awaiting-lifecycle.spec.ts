@@ -340,12 +340,22 @@ medusaIntegrationTestRunner({
           .sort((first, second) => first.status - second.status)
       }
 
-      it("rejects an unauthenticated request and an invalid body, and answers a conflict that the payment may still arrive for an unpaid cycle under the alert limit, writing nothing", async () => {
+      it("rejects an unauthenticated request, an invalid body and a cycle that is not awaiting its payment, and answers a conflict that the payment may still arrive for an unpaid cycle under the alert limit, writing nothing", async () => {
         const container = getContainer()
         const headers = await createAdminAuthHeaders(container)
         const seeded = await seedAwaitingRenewal(container, { reference: "SUB-AWL-RESOLVE-YOUNG" })
+        const scheduled = await seedAwaitingRenewal(container, {
+          reference: "SUB-AWL-RESOLVE-SCHEDULED",
+          cycle_status: RenewalCycleStatus.SCHEDULED,
+        })
         const url = route(seeded.cycle.id)
         const before = await readRenewalState(container, seeded)
+        const scheduledBefore = await readRenewalState(container, scheduled)
+
+        await expect(api.post(route(scheduled.cycle.id), {}, { headers })).rejects.toMatchObject({
+          response: notAwaiting,
+        })
+        expect(await readRenewalState(container, scheduled)).toEqual(scheduledBefore)
 
         await expect(api.post(url, {})).rejects.toMatchObject({ response: { status: 401 } })
         await expect(api.post(url, { reason: "" }, { headers })).rejects.toMatchObject({

@@ -9,6 +9,8 @@ function dunningCase(status: DunningCaseStatus) {
 describe("store payment status", () => {
   it.each([
     [SubscriptionStatus.ACTIVE, null, "ok"],
+    [SubscriptionStatus.PENDING_PAYMENT, null, "awaiting_payment"],
+    [SubscriptionStatus.PAST_DUE, null, "recovery_failed"],
     [SubscriptionStatus.ACTIVE, dunningCase(DunningCaseStatus.RETRYING), "recovery_required"],
     [SubscriptionStatus.ACTIVE, dunningCase(DunningCaseStatus.AWAITING_PAYMENT), "recovery_required"],
     [SubscriptionStatus.PAYMENT_FAILED, dunningCase(DunningCaseStatus.AWAITING_PAYMENT), "recovery_failed"],

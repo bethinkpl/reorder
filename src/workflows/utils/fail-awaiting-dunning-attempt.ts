@@ -141,8 +141,6 @@ async function failAttemptUnderLock(
   const inFlight =
     latest.status === DunningAttemptStatus.PROCESSING &&
     (onThisSession || latest.payment_reference === null)
-  // A `failed` attempt on this session is a failure whose case write fell over: the redelivered
-  // event finishes it.
   const halfFailed = latest.status === DunningAttemptStatus.FAILED && onThisSession
 
   if (!inFlight && !halfFailed) {

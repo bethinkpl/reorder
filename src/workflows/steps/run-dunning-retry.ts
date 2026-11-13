@@ -1089,8 +1089,6 @@ async function awaitProviderAnswer(
     attempt_counted: true,
   }
 
-  // Written before the attempt row so that the step's catch returns the wait instead of rolling the
-  // case back to a retry that would replace the pending session.
   try {
     await dunningModule.updateDunningCases({
       id: input.dunningCase.id,

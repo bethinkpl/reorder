@@ -64,7 +64,6 @@ function isGone(error: unknown) {
   )
 }
 
-/** Rethrows what a later delivery can still handle, so that the event bus delivers it again. */
 async function reportingFailure(
   container: MedusaContainer,
   context: {

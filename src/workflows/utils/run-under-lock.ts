@@ -11,10 +11,6 @@ const LOCK_WAIT_TIMEOUT_MESSAGES = [
   /^".+" is already locked\.$/,
 ]
 
-/**
- * The errors the locking providers (in-memory, Redis, Postgres) throw while another holder keeps the
- * lock: `execute` once its wait runs out, `acquire` at once.
- */
 export function isLockWaitTimeout(error: unknown): boolean {
   return (
     error instanceof Error &&

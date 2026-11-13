@@ -215,9 +215,6 @@ async function alertOverdueProcessingCycles(
 /**
  * A throwing `payment.captured` subscriber is logged and dropped, and the event is not delivered
  * again, so a paid cycle can stay awaiting until this sweep settles it.
- *
- * Walks every awaiting cycle by id: an unpaid one stays awaiting and would otherwise hold its place
- * at the head of a single batch.
  */
 export async function reconcileAwaitingRenewalCycles(
   container: MedusaContainer

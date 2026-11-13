@@ -39,7 +39,6 @@ export const subscriptionErrors = {
   },
 }
 
-/** What a locking provider throws when another holder keeps the lock for the whole wait. */
 export function isLockAcquisitionFailure(error: unknown) {
   const message =
     typeof error === "object" &&

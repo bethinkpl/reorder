@@ -10,7 +10,10 @@ import {
   createOrderWorkflow,
   createOrUpdateOrderPaymentCollectionWorkflow,
 } from "@medusajs/medusa/core-flows"
-import { createRenewalOrder } from "../process-renewal-cycle"
+import {
+  createRenewalOrder,
+  createRenewalPaymentCollection,
+} from "../process-renewal-cycle"
 
 const cart = {
   id: "cart_1",
@@ -66,7 +69,7 @@ function buildContainer(order: Record<string, unknown>) {
   return { container, updateRenewalCycles, linkCreate }
 }
 
-describe("createRenewalOrder - reused order double-charge guard", () => {
+describe("renewal order and payment collection - reused order double-charge guard", () => {
   beforeEach(() => {
     jest.clearAllMocks()
     ;(
@@ -88,12 +91,11 @@ describe("createRenewalOrder - reused order double-charge guard", () => {
       summary: { pending_difference: 0 },
     })
 
-    const result = await createRenewalOrder(
+    const result = await createRenewalPaymentCollection(
       container,
-      { id: "cyc_1", generated_order_id: "order_1" },
+      { id: "cyc_1" },
       subscription,
-      cart,
-      items
+      "order_1"
     )
 
     expect(result.payment).toBeNull()
@@ -127,12 +129,11 @@ describe("createRenewalOrder - reused order double-charge guard", () => {
       summary: { pending_difference: 40 },
     })
 
-    await createRenewalOrder(
+    await createRenewalPaymentCollection(
       container,
-      { id: "cyc_1", generated_order_id: "order_1" },
+      { id: "cyc_1" },
       subscription,
-      cart,
-      items
+      "order_1"
     )
 
     const run = (
@@ -151,12 +152,11 @@ describe("createRenewalOrder - reused order double-charge guard", () => {
       summary: { pending_difference: 100 },
     })
 
-    await createRenewalOrder(
+    await createRenewalPaymentCollection(
       container,
-      { id: "cyc_1", generated_order_id: null },
+      { id: "cyc_1" },
       subscription,
-      cart,
-      items
+      "order_new"
     )
 
     const run = (
@@ -233,5 +233,83 @@ describe("createRenewalOrder - reused order double-charge guard", () => {
       subscription: { subscription_id: "sub_1" },
       order: { order_id: "order_1" },
     })
+  })
+
+  it("leaves the payment collection to the step after applyRenewalCredits", async () => {
+    const { container } = buildContainer({
+      id: "order_new",
+      total: 100,
+      summary: { pending_difference: 100 },
+    })
+
+    await createRenewalOrder(
+      container,
+      { id: "cyc_1", generated_order_id: null },
+      subscription,
+      cart,
+      items
+    )
+
+    expect(createOrUpdateOrderPaymentCollectionWorkflow).not.toHaveBeenCalled()
+  })
+
+  it("collects only what host credits left on the order", async () => {
+    const { container } = buildContainer({
+      id: "order_new",
+      total: 33.33,
+      summary: { pending_difference: 33.33 },
+    })
+
+    await createRenewalPaymentCollection(
+      container,
+      { id: "cyc_1" },
+      subscription,
+      "order_new"
+    )
+
+    const run = (
+      createOrUpdateOrderPaymentCollectionWorkflow as unknown as jest.Mock
+    ).mock.results[0].value.run
+
+    expect(run).toHaveBeenCalledWith({
+      input: { order_id: "order_new", amount: 33.33 },
+    })
+  })
+
+  it("needs no saved payment method when credits cover the whole order", async () => {
+    const { container } = buildContainer({
+      id: "order_new",
+      total: 0,
+      summary: { pending_difference: 0 },
+    })
+
+    const result = await createRenewalPaymentCollection(
+      container,
+      { id: "cyc_1" },
+      { ...subscription, payment_context: null },
+      "order_new"
+    )
+
+    expect(result.payment).toBeNull()
+    expect(result.payment_collections).toBeNull()
+    expect(createOrUpdateOrderPaymentCollectionWorkflow).not.toHaveBeenCalled()
+  })
+
+  it("still refuses a remainder without a saved payment method", async () => {
+    const { container } = buildContainer({
+      id: "order_new",
+      total: 33.33,
+      summary: { pending_difference: 33.33 },
+    })
+
+    await expect(
+      createRenewalPaymentCollection(
+        container,
+        { id: "cyc_1" },
+        { ...subscription, payment_context: null },
+        "order_new"
+      )
+    ).rejects.toThrow("missing renewal payment context")
+    expect(createOrUpdateOrderPaymentCollectionWorkflow).not.toHaveBeenCalled()
   })
 })

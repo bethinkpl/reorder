@@ -139,8 +139,12 @@ processRenewalCycleWorkflow.hooks.applyRenewalCredits(
 - The handler receives the renewal `order_id` (`null` on a skipped cycle), the
   `renewal_cycle_id`, and the `subscription`.
 - It has no result. The plugin re-reads the order's `summary.pending_difference` afterwards and
-  charges only that; when nothing is left, no payment collection is created, no saved payment
-  method is needed, and the cycle succeeds without a charge.
+  charges only that. When nothing is left, no payment collection is created, no saved payment
+  method is needed, and the cycle succeeds without a charge. When something is left, the
+  subscription's saved payment method is required: without one the cycle fails with
+  `missing renewal payment context`, **no dunning case is opened**, and the cycle is retried
+  daily. The plugin never reverses what the handler applied, so apply partial credit only when
+  `subscription.payment_context.payment_method_id` is set.
 - It also runs when a retry reuses the order a failed attempt created, so the handler must be
   idempotent: skip credits the order already carries.
 - A thrown error fails the renewal before any charge — the workflow reverts and the cycle plus

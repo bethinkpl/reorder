@@ -877,7 +877,7 @@ function readResolvedBillingAddress(
     : null
 }
 
-/** Exported for unit tests: covers the reused-order double-charge guard. */
+/** Exported for unit tests: covers reusing the order an aborted attempt created. */
 export async function createRenewalOrder(
   container: MedusaContainer,
   cycle: { id: string, generated_order_id?: string | null },
@@ -964,17 +964,14 @@ export async function createRenewalOrder(
   return { order }
 }
 
-/**
- * Exported for unit tests. Runs after `applyRenewalCredits`, so the amounts
- * are re-read here rather than carried over from order creation.
- */
+/** Exported for unit tests: covers the reused-order double-charge guard. */
 export async function createRenewalPaymentCollection(
   container: MedusaContainer,
   cycle: { id: string },
   subscription: SubscriptionType,
   orderId: string
 ) {
-  const { total, pending } = await loadOrderAmounts(container, orderId)
+  const { pending } = await loadOrderAmounts(container, orderId)
 
   let paymentCollections: PaymentCollectionDTO[] | null = null
   let payment: RenewalOrderStepResult["payment"] = null
@@ -1024,7 +1021,6 @@ export async function createRenewalPaymentCollection(
   }
 
   return {
-    total,
     payment_collections: paymentCollections,
     payment,
   }
@@ -1635,9 +1631,9 @@ export const authorizeRenewalPaymentStep = createStep(
 
         // Capturing through the module writes no order transaction, which would
         // leave `summary.pending_difference` reporting the full total as still
-        // owed - the exact value `createRenewalOrder` reads to decide whether a
-        // reused order still needs charging. Without this the card gets charged
-        // again on any retry that runs before the provider webhook lands.
+        // owed - the exact value `createRenewalPaymentCollection` reads to decide
+        // whether a reused order still needs charging. Without this the card gets
+        // charged again on any retry that runs before the provider webhook lands.
         //
         // Runs even when the capture call above failed: an auto-capturing
         // provider (status CAPTURED straight out of `authorizePayment`) has

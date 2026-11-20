@@ -47,13 +47,26 @@ Supported dunning case statuses:
 - `open`
 - `retry_scheduled`
 - `retrying`
+- `awaiting_payment`
 - `awaiting_manual_resolution`
 - `recovered`
 - `unrecovered`
 
 Current runtime meaning:
 - `retry_scheduled`: the last retry failed with a retryable payment error and a future `next_retry_at` is scheduled
-- `unrecovered`: the case is terminal and closed, either because the payment failure is treated as permanent or because retries are exhausted
+- `retrying`: a retry run holds the case
+- `awaiting_payment`: the latest retry submitted its charge and the provider has not answered yet (its authorisation
+  returned no payment); the attempt stays `processing` with its payment session as `payment_reference`, and
+  `next_retry_at` is `null`. A `payment.captured` for that session recovers the case; a `failed`/`canceled` payment
+  webhook reschedules it, or closes it as `unrecovered` on its last attempt. Retrying, rescheduling and marking the
+  case recovered or unrecovered are refused until then (the eligibility reason is `payment_in_progress`; the storefront
+  shows such a case as `retrying` with `retry_in_progress`)
+- `awaiting_manual_resolution`: an operator has to decide, for example because a retry left the case `retrying`
+  without a charge to wait on (`park_reason: "indeterminate_provider_response"`)
+- `unrecovered`: the case is terminal and closed, either because the payment failure is treated as permanent, because
+  retries are exhausted, or because the subscription was cancelled (`recovery_reason`
+  `subscription_cancelled_by_customer` for the storefront and the finalised cancellation,
+  `subscription_not_retryable` for the admin cancel route and the sweep)
 
 ### Attempt Status Values
 
@@ -289,6 +302,11 @@ Runs the shared dunning payment retry workflow immediately, ignoring `next_retry
 Current runtime behavior:
 - retryable payment failures keep the case in `retry_scheduled`
 - permanent payment failures close the case as `unrecovered`
+- an authorisation that returns no payment leaves the case `awaiting_payment` until the provider answers
+- a retry that can't tell whether it reached the provider parks the case as `awaiting_manual_resolution`
+
+`runDunningRetryWorkflow` resolves an `outcome` of `recovered`, `retry_scheduled`, `unrecovered`, `awaiting_payment`
+or `awaiting_manual_resolution`.
 
 ### Request Body
 
@@ -314,7 +332,8 @@ Returns the refreshed `dunning_case` detail payload.
 - `404 not_found`
   The case does not exist.
 - `409 conflict`
-  Retry is already processing, the case is terminal, or the transition is otherwise illegal.
+  Retry is already processing, its charge awaits the provider (`payment_in_progress`), the case is terminal, or the
+  transition is otherwise illegal.
 
 ## 4. Mark Recovered
 
@@ -451,7 +470,9 @@ Operator escape hatch for a case whose retry charge was submitted but whose resu
 }
 ```
 
-`reason` is optional; when given it is added to the failed attempt's error message.
+`reason` is optional. It is kept on the failed attempt as `metadata.admin_resolution` (`{ reason, resolved_by }`) and
+in the `dunning.awaiting_payment_resolved` log line; the attempt's error message, which the storefront shows as
+`payment_recovery.last_error_message`, is always "Retry payment never arrived".
 
 ### Success Response
 
@@ -469,7 +490,27 @@ Returns the refreshed `dunning_case` detail payload plus `resolution`: `recovere
 - `409 conflict`
   The case isn't awaiting its retry's payment, its unpaid charge is younger than the minimum age, or another holder has the case's lock.
 
-## 8. Error Mapping
+## 8. Reconciliation Sweep
+
+`reconcile-paid-dunning-cases` runs every 30 minutes under a job lock held for at most 25 minutes. Each pass works a
+page of 200 rows at a time until none are left:
+- applies a payment failure recorded on an attempt (`dunning_attempt.reported_payment_failure`) while the case's lock
+  was busy, as the webhook would have, unless the renewal order has been paid since
+- moves a case left `retrying` for 10 minutes to `awaiting_payment` when its attempt submitted a charge, or parks it
+  for manual resolution otherwise
+- closes an active case of a cancelled subscription as the cancellation would have (`unrecovered`,
+  `subscription_not_retryable`), leaving a submitted charge tracked
+- recovers an idle case (any active status but `retrying`) whose renewal order is already paid
+- raises an alertable log once for a case that has awaited its retry's payment past
+  `RENEWAL_AWAITING_PAYMENT_ALERT_HOURS`, and on every pass for an awaiting charge whose payment session no longer
+  exists with nothing captured on it (`dunning.awaiting_payment_session_missing`)
+- delivers again the capture of a charge still `processing` on a closed case, so it is reported once for a refund,
+  and fails such a charge with no result after `RENEWAL_AWAITING_PAYMENT_RESOLVE_MIN_HOURS` (`no_payment_signal`)
+
+A late failure that arrives when the renewal order has been paid another way is not applied; this sweep recovers
+the case instead.
+
+## 9. Error Mapping
 
 The admin dunning route layer answers a domain error with its own message and a status taken from its
 `MedusaError` type, also when a workflow run rethrows it as a plain object:
@@ -485,7 +526,9 @@ The admin dunning route layer answers a domain error with its own message and a 
 
 A lock another run holds on the case answers `409` with a readable "being updated by a retry or a payment" message,
 whichever way the locking provider reports it. Any other error without a `MedusaError` type is mapped from its
-message: `404` when it reports something not found, `400` for invalid or missing input, `409` otherwise. The renewal
-and cancellation admin routes apply the same rules (`src/api/route-errors.ts`).
+message: `404` when it reports something not found, `400` for invalid or missing input, `409` otherwise. The
+cancellation admin routes apply the same rules. The renewal admin routes map typed errors the same way
+(`src/api/route-errors.ts`), but an untyped error is `404` when it reports something not found and `409` otherwise,
+never `400`.
 
 This keeps the API aligned with the workflow-driven Medusa pattern used by the rest of the plugin.

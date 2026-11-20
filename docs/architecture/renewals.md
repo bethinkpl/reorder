@@ -246,9 +246,10 @@ It is responsible for:
 - recording success or failure
 
 Current implementation detail:
-- the workflow acquires a Medusa workflow lock with key `renewal:${renewal_cycle_id}`
+- the workflow acquires a Medusa workflow lock with key `renewal:subscription:<subscription_id>`
 - the current lock settings are `timeout = 10` seconds and `ttl = 120` seconds
-- this shared lock protects both scheduler execution and manual force execution
+- this shared lock protects scheduler execution, manual force execution, the settlement or failure of a charge
+  that awaits the provider, and the cancellation, pause and resume workflows, which take it themselves
 
 ### Renewal Order Pricing and Discounts
 
@@ -285,7 +286,10 @@ promotions or plan pricing for them by default. The renewal item build works as 
   by the checkout; recurring application is an app-level replay of frozen terms
 - a failure between `prepare-renewal-cycle` and the failure-recording steps (e.g. a hook
   handler throw) reverts the workflow; a compensation handler on `prepare-renewal-cycle`
-  marks the cycle and attempt FAILED so the cycle never strands in PROCESSING
+  marks the cycle and attempt FAILED so the cycle does not strand in PROCESSING. The exception is
+  a run that submitted its charge but could not park the cycle (`park_failed`): the cycle stays
+  PROCESSING with its attempt open, and its capture or, ten minutes on, the awaiting-payment sweep
+  settles it once the order is paid
 - the generated order id is persisted on the cycle as soon as the order exists, and a retry
   **reuses** it instead of creating a duplicate order for the same billing period. Retries
   collect the order's `summary.pending_difference`, not its total — an attempt that captured

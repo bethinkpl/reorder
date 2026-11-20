@@ -89,6 +89,13 @@ Response:
 - payload includes `scheduled_plan_change` when a pending variant or cadence update exists
 - payload includes both `next_renewal_at` and projected `effective_next_renewal_at`
 
+Refusals (shared with resume):
+- `409` with `{ "type": "conflict", "code": "renewal_payment_in_progress", "message": "A payment for this subscription is being processed. Please try again once it has completed." }`
+  while a renewal charge or a dunning retry charge awaits the payment provider's answer
+- `409` with `{ "type": "conflict", "message": "This subscription is already being updated. Please try again in a moment." }`
+  while a renewal run, a dunning retry or a payment holds the subscription's renewal lock or the lock of one of its
+  active dunning cases
+
 ### `POST /store/customers/me/subscriptions/:id/resume`
 
 Resumes the authenticated customer's subscription through the existing resume workflow.
@@ -104,6 +111,7 @@ Request body:
 
 Response:
 - refreshed subscription detail payload
+- refused with the same two `409` answers as pause
 
 ### `POST /store/customers/me/subscriptions/:id/change-frequency`
 
@@ -225,7 +233,7 @@ Cancellation timing:
 - access for the remaining paid window is enforced by the consuming application, which reads `cancel_effective_at`; the plugin only records and exposes it
 
 Side effects:
-- any open payment recovery case is closed as `unrecovered` with `recovery_reason: "subscription_cancelled_by_customer"`, so no further retries run
+- any open payment recovery case is closed as `unrecovered` with `recovery_reason: "subscription_cancelled_by_customer"`, so no further retries run. This includes a case whose retry is in flight: a charge it already submitted stays tracked, and if it is captured later the host app is asked to refund it (`subscription.late_payment_captured`)
 - the upcoming scheduled renewal cycle is removed; any historical `failed` cycle is left in place but can no longer execute, because renewal execution rejects a cancelled subscription
 
 Authentication and ownership:
@@ -235,7 +243,8 @@ Authentication and ownership:
 Response:
 - refreshed subscription detail payload plus a `result` object (`cancelled`, `already_cancelled`, `cancel_effective_at`)
 - cancelling an already-cancelled subscription returns `200` and leaves the original cancellation untouched
-- route returns `409` if a payment retry is in flight, or if the subscription is otherwise not cancellable
+- route returns `409` with "This subscription is already being updated" while a renewal run, a dunning retry or a payment holds the subscription's locks, and "This subscription can't be cancelled right now" when the subscription is otherwise not cancellable
+- other refusals answer generic texts (`404` "This subscription could not be found.", `400` "This cancellation request can't be processed…", `500` otherwise); the workflow's own messages are never returned
 
 ## Auth Model
 

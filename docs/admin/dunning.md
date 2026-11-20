@@ -221,7 +221,8 @@ Purpose:
   `POST /admin/dunning/:id/resolve-awaiting-payment`
 
 Fields:
-- optional `reason`
+- optional `reason`, an internal note kept on the failed attempt (`metadata.admin_resolution`); the customer never
+  sees it
 
 Behavior:
 - the drawer explains the outcome: the case is recovered if its renewal order has been paid; otherwise the retry is

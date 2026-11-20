@@ -352,7 +352,9 @@ Response:
   `processing` with its attempt still open, or a dunning case is `retrying` or `awaiting_payment`. The message names
   the renewal or dunning case; the request succeeds again once that payment has been settled or has failed.
 - `409 conflict`
-  A renewal run or a payment holds the subscription's `renewal:subscription:<id>` lock; try again in a moment.
+  A renewal run or a payment holds the subscription's `renewal:subscription:<id>` lock, or a dunning retry or a
+  payment holds the `dunning:<case_id>` lock of one of its active dunning cases; try again in a moment. The workflow
+  holds every active case's lock until the change is written, so a retry can't charge in between.
 
 ## 4. Resume Subscription
 
@@ -401,7 +403,9 @@ Response:
   `processing` with its attempt still open, or a dunning case is `retrying` or `awaiting_payment`. The message names
   the renewal or dunning case; the request succeeds again once that payment has been settled or has failed.
 - `409 conflict`
-  A renewal run or a payment holds the subscription's `renewal:subscription:<id>` lock; try again in a moment.
+  A renewal run or a payment holds the subscription's `renewal:subscription:<id>` lock, or a dunning retry or a
+  payment holds the `dunning:<case_id>` lock of one of its active dunning cases; try again in a moment. The workflow
+  holds every active case's lock until the change is written, so a retry can't charge in between.
 
 ## 5. Cancel Subscription
 
@@ -413,6 +417,15 @@ Response:
 ### Purpose
 
 Cancels a subscription.
+
+Side effects:
+- every active dunning case of the subscription is closed as `unrecovered` with
+  `recovery_reason: "subscription_not_retryable"`, so no further retries run. A retry charge already submitted to the
+  provider stays tracked: its attempt is left `processing`, a late failure closes it as failed, and a late capture
+  closes it as `succeeded` (`captured_after_close`) and is reported once as `subscription.late_payment_captured` for
+  the host app to refund
+- a renewal cycle awaiting its payment is ended the same way (see the renewals API)
+- a failure part way through leaves the subscription, its dunning cases and its renewal cycles as they were
 
 ### Request Body
 
@@ -445,6 +458,10 @@ Response:
   Subscription does not exist.
 - `409 conflict`
   Subscription cannot be cancelled from its current state.
+- `409 conflict`
+  A renewal run or a payment holds the subscription's `renewal:subscription:<id>` lock, or a dunning retry or a
+  payment holds the `dunning:<case_id>` lock of one of its active dunning cases for more than 10 seconds; the
+  message says it is being updated by a renewal or a payment, and nothing was changed.
 
 ## 6. Schedule Plan Change
 

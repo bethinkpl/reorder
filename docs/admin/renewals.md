@@ -216,7 +216,8 @@ Purpose:
 - end a renewal whose payment result never arrived, through `POST /admin/renewals/:id/resolve-awaiting-payment`
 
 Fields:
-- optional `reason`
+- optional `reason`, an internal note kept on the failed attempt (`metadata.admin_resolution`); the customer never
+  sees it
 
 Behavior:
 - the drawer explains the outcome: the renewal is settled if its order has been paid; otherwise it is failed and

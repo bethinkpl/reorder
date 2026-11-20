@@ -92,7 +92,13 @@ The `dunning_attempt` model stores:
 - `error_code`
 - `error_message`
 - `payment_reference`
+- `reported_payment_failure` (a provider's failure report recorded while the case's lock was busy, applied and
+  cleared by the reconciliation sweep)
 - `metadata`
+
+Case statuses: `open`, `retry_scheduled`, `retrying`, `awaiting_payment` (the latest retry submitted a charge the
+provider has not answered yet), `awaiting_manual_resolution`, `recovered`, `unrecovered`. `retrying` and
+`awaiting_payment` are the charge-in-flight statuses (`CHARGE_IN_FLIGHT_DUNNING_CASE_STATUSES`).
 
 ### Indexing Strategy
 
@@ -114,6 +120,8 @@ The current implementation follows these rules:
 - qualifying renewal failures are currently surfaced from payment-session, authorization, and capture failures after the renewal order exists
 - `start-dunning` marks the subscription as `past_due` when entering recovery
 - `run-dunning-retry` retries payment on the existing renewal order rather than re-running the whole renewal workflow
+- a retry whose authorisation returns no payment leaves the case `awaiting_payment`, the attempt `processing` on its
+  payment session; the session's `payment.captured` recovers the case and a failure webhook reschedules or closes it
 - successful recovery closes the case as `recovered`, restores the subscription to `active`, settles the renewal cycle as `succeeded` and advances `next_renewal_at` from the payment date
 - unrecovered closure leaves the originating renewal cycle as `failed`, moves the subscription to `payment_failed`, clears `next_renewal_at` and records an involuntary-churn cancellation case
 
@@ -137,7 +145,11 @@ Current boundary with `Cancellation & Retention`:
 This means:
 - cancellation workflows may operate while dunning is active
 - but dunning lifecycle state remains owned by `Dunning`
-- the cancellation module does not directly mutate dunning state as part of normal case progression
+- the cancellation module does not directly mutate dunning state as part of normal case progression; the cancelling
+  workflows (customer cancel, admin cancel, finalize) close the subscription's active cases through the dunning
+  step `close-subscription-dunning`, under the renewal lock and then each case's lock, leaving a submitted charge
+  tracked so its late capture is reported for a refund
+- a dunning recovery or a renewal settlement never applies a payment to a cancelled subscription
 
 ## 4. Read Path
 
@@ -245,7 +257,8 @@ It is responsible for:
 - reusing the renewal order payment context
 - creating a new payment session
 - authorizing and capturing payment
-- transitioning the case to `recovered`, `retry_scheduled`, or `unrecovered`
+- transitioning the case to `recovered`, `retry_scheduled`, `unrecovered`, `awaiting_payment` or
+  `awaiting_manual_resolution` (also the workflow's `outcome`)
 - restoring the subscription to `active` on recovery
 
 Current implementation detail:
@@ -281,6 +294,13 @@ The job:
 
 The scheduler does not implement a separate business flow. It reuses the same core retry logic as manual `retry-now`.
 
+`src/jobs/reconcile-paid-dunning-cases.ts` (every 30 minutes) reconciles what no event settles: it applies payment
+failures recorded while a case's lock was busy, moves a case a retry left `retrying` to `awaiting_payment` or parks
+it, closes an active case of a cancelled subscription as the cancellation would have, recovers an idle case whose
+renewal order is paid, alerts on an awaiting charge that is overdue or whose payment session is gone, and delivers
+again a lost capture of a charge still in flight on a closed case (failing one with no result after the minimum age).
+Every pass pages through all matching rows; see the admin dunning API for the details.
+
 ## 8. Concurrency and Operational Hardening
 
 The current implementation hardens both scheduler and manual retry execution.
@@ -288,6 +308,8 @@ The current implementation hardens both scheduler and manual retry execution.
 Protection currently includes:
 - coarse scheduler lock through the Locking Module
 - per-case workflow lock through `acquireLockStep`
+- pause, resume and a retention `pause_offer` hold the renewal lock and every active case's lock until their change
+  is written, so a retry can't charge between their check and their write
 - duplicate-active-case protection on dunning start
 - retry guards for terminal cases, in-flight retries, not-due retries, and max-attempt exhaustion
 - structured logs with correlation IDs

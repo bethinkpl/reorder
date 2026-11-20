@@ -434,7 +434,9 @@ charge submitted. It takes the `renewal:subscription:<subscription_id>` lock and
 ```
 
 Fields:
-- `reason?: string` - trimmed, 1-500 characters; added to the failure message when the cycle is failed
+- `reason?: string` - trimmed, 1-500 characters; kept on the failed attempt as `metadata.admin_resolution`
+  (`{ reason, resolved_by }`) and in the `renewal.awaiting_payment_resolved` log line. The cycle's error and the
+  dunning case it opens always read "Renewal payment never arrived", which is what the storefront shows
 
 ### Success Response
 

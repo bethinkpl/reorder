@@ -256,7 +256,6 @@ describe("reconcilePaidDunningCases", () => {
 
     const orderReads = graph.mock.calls.map(([{ filters }]) => filters.id[0])
 
-    // The open-case pass reads it once; the overdue pass must not read it again.
     expect(orderReads).toEqual(["order_awaiting"])
     expect(warnLogs).toHaveLength(0)
   })

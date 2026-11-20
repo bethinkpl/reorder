@@ -7,8 +7,8 @@ import { isLockBusyError } from "../../common/utils/lock-busy-error"
 const RETRY_INTERVAL_MS = 300
 
 /**
- * In Medusa 2.12 `locking.execute` also uses its wait (`timeout`) as the lock's lifetime, so a short
- * wait lets the lock lapse mid-job; newer versions (2.22) give `execute` its own renewed `expire`.
+ * Not `locking.execute`: in some Medusa versions its wait (`timeout`) is also the lock's lifetime, so a
+ * short wait lets the lock lapse mid-job. Acquire/release with an explicit `expire` avoids that.
  */
 export async function runUnderLock<T>(
   container: MedusaContainer,

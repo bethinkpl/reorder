@@ -633,10 +633,6 @@ export async function listRenewalAttemptsForCycle(
   }))
 }
 
-/**
- * Judges the latest attempt, as `POST /admin/renewals/:id/resolve-awaiting-payment` does, so
- * `can_fail_after` never disagrees with that route's answer.
- */
 function mapAwaitingPayment(
   cycleStatus: RenewalCycleRecord["status"],
   attempts: RenewalAttemptAdminRecord[]

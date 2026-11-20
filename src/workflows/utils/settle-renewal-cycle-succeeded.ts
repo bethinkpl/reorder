@@ -308,9 +308,9 @@ export async function settleRenewalCycleSucceeded(
 
   const storedInputs = readStoredSettlementInputs(cycle.settlement_inputs)
   const sourceSnapshot = input.source_snapshot ?? storedInputs.source_snapshot
-  // A cycle can be settled long after it ran (a charge confirmed later, a dunning recovery), and
-  // the customer may have skipped a delivery or scheduled another plan change since. Only what this
-  // cycle consumed is cleared; inputs stored before the skip was recorded reset it, as they always did.
+  // A cycle can be settled long after it ran (a charge confirmed later, a dunning recovery), after the
+  // customer skipped a delivery or scheduled another plan change. Inputs stored before the skip was
+  // recorded still reset it.
   const consumedSkip =
     input.consumed_skip_next_cycle ?? storedInputs.consumed_skip_next_cycle ?? true
   const consumedPendingChange = Boolean(

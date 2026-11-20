@@ -248,7 +248,6 @@ export default async function processRenewalCyclesJob(
           outcome === RenewalRunOutcome.AWAITING_PAYMENT ||
           outcome === RenewalRunOutcome.PARK_FAILED
         ) {
-          // A charge that could not be parked is still in flight, and its park failure is alerted.
           awaiting += 1
         } else {
           failed += 1

@@ -39,6 +39,22 @@ const CONFLICT_TYPES: readonly string[] = [
   MedusaError.Types.NOT_ALLOWED,
 ]
 
+const UNEXPECTED_ANSWER = {
+  status: 500,
+  message: "Unexpected error while cancelling the subscription",
+}
+
+const CUSTOMER_ANSWERS: Record<string, { status: number, message: string }> = {
+  [MedusaError.Types.NOT_FOUND]: {
+    status: 404,
+    message: "This subscription could not be found.",
+  },
+  [MedusaError.Types.INVALID_DATA]: {
+    status: 400,
+    message: "This cancellation request can't be processed. Please check it and try again.",
+  },
+}
+
 export function mapStoreCancellationError(error: unknown) {
   if (isLockBusyError(error)) {
     return {
@@ -52,37 +68,22 @@ export function mapStoreCancellationError(error: unknown) {
   const medusaError = findMedusaError(error)
 
   if (medusaError) {
-    const typeToStatus: Record<string, number> = {
-      [MedusaError.Types.NOT_FOUND]: 404,
-      [MedusaError.Types.INVALID_DATA]: 400,
-    }
-
     if (CONFLICT_TYPES.includes(medusaError.type)) {
-      const isRetryInFlight = medusaError.message
-        .toLowerCase()
-        .includes("retry is in flight")
-
       return {
         status: 409,
         type: MedusaError.Types.CONFLICT,
-        message: isRetryInFlight
-          ? "A payment recovery attempt is in progress. Please try again in a moment."
-          : "This subscription can't be cancelled right now. Please try again in a moment.",
+        message:
+          "This subscription can't be cancelled right now. Please try again in a moment.",
       }
     }
 
-    return {
-      status: typeToStatus[medusaError.type] ?? 500,
-      type: medusaError.type,
-      message: medusaError.message,
-    }
+    // The workflow's own messages name internal records; the request itself is validated before it.
+    const answer = CUSTOMER_ANSWERS[medusaError.type] ?? UNEXPECTED_ANSWER
+
+    return { ...answer, type: medusaError.type }
   }
 
-  return {
-    status: 500,
-    type: MedusaError.Types.UNEXPECTED_STATE,
-    message: "Unexpected error while cancelling the subscription",
-  }
+  return { ...UNEXPECTED_ANSWER, type: MedusaError.Types.UNEXPECTED_STATE }
 }
 
 export const POST = async (

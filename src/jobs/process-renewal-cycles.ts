@@ -5,7 +5,6 @@ import { setTimeout as delay } from "node:timers/promises"
 import { DateTime } from "luxon"
 import { RENEWAL_MODULE } from "../modules/renewal"
 import type RenewalModuleService from "../modules/renewal/service"
-import { RenewalCycleStatus } from "../modules/renewal/types"
 import {
   isApprovalEligible,
   type DueRenewalCycleRecord,
@@ -18,7 +17,7 @@ import {
   logRenewalEvent,
   type RenewalFailureKind,
 } from "../modules/renewal/utils/observability"
-import { processRenewalCycleWorkflow } from "../workflows"
+import { processRenewalCycleWorkflow, RenewalRunOutcome } from "../workflows"
 
 const JOB_NAME = "process-renewal-cycles"
 const LOCK_KEY = "jobs:renewal-cycles"
@@ -91,18 +90,6 @@ export function isBlockedRenewalOutcome(failureKind: RenewalFailureKind) {
   )
 }
 
-async function isAwaitingPayment(
-  container: MedusaContainer,
-  renewalCycleId: string
-) {
-  const renewalModule = container.resolve<RenewalModuleService>(RENEWAL_MODULE)
-  const cycle = await renewalModule.retrieveRenewalCycle(renewalCycleId, {
-    select: ["status"],
-  })
-
-  return cycle.status === RenewalCycleStatus.AWAITING_PAYMENT
-}
-
 async function processCycle(
   container: MedusaContainer,
   logger: Logger,
@@ -120,12 +107,9 @@ async function processCycle(
         correlation_id: cycleCorrelationId,
       },
     })
-    const outcome =
-      !result && (await isAwaitingPayment(container, cycle.id))
-        ? ("awaiting_payment" as const)
-        : ("succeeded" as const)
+    const { outcome } = result
 
-    logRenewalEvent(logger, "info", {
+    logRenewalEvent(logger, outcome === RenewalRunOutcome.FAILED ? "warn" : "info", {
       event: "renewal.job.cycle",
       job_name: JOB_NAME,
       outcome,
@@ -134,8 +118,8 @@ async function processCycle(
       subscription_id: cycle.subscription_id,
       trigger_type: "scheduler",
       duration_ms: Date.now() - startedAt,
-      success_count: outcome === "succeeded" ? 1 : 0,
-      failure_count: 0,
+      success_count: outcome === RenewalRunOutcome.SUCCEEDED ? 1 : 0,
+      failure_count: outcome === RenewalRunOutcome.FAILED ? 1 : 0,
     })
 
     return outcome
@@ -261,11 +245,15 @@ export default async function processRenewalCyclesJob(
       for (const result of results) {
         const outcome = result.status === "fulfilled" ? result.value : "failed"
 
-        if (outcome === "succeeded") {
+        if (outcome === RenewalRunOutcome.SUCCEEDED) {
           succeeded += 1
         } else if (outcome === "blocked") {
           blocked += 1
-        } else if (outcome === "awaiting_payment") {
+        } else if (
+          outcome === RenewalRunOutcome.AWAITING_PAYMENT ||
+          outcome === RenewalRunOutcome.PARK_FAILED
+        ) {
+          // A charge that could not be parked is still in flight, and its park failure is alerted.
           awaiting += 1
         } else {
           failed += 1

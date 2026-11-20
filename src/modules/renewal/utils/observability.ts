@@ -45,6 +45,7 @@ type RenewalLogPayload = {
     | "blocked"
     | "completed"
     | "awaiting_payment"
+    | "park_failed"
   failure_kind?: RenewalFailureKind
   alertable?: boolean
   message?: string

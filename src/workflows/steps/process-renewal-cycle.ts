@@ -1641,12 +1641,30 @@ export const createRenewalPaymentCollectionStep = createStep(
   }
 )
 
+export const RenewalRunOutcome = {
+  SUCCEEDED: "succeeded",
+  AWAITING_PAYMENT: "awaiting_payment",
+  /** The charge was submitted but the cycle could not be parked: it is still `processing`. */
+  PARK_FAILED: "park_failed",
+  FAILED: "failed",
+} as const
+
+export type RenewalRunOutcome = (typeof RenewalRunOutcome)[keyof typeof RenewalRunOutcome]
+
+type RenewalCycleDTO = Awaited<ReturnType<RenewalModuleService["retrieveRenewalCycle"]>>
+
+export type SubmittedRenewalCharge = {
+  outcome: RenewalRunOutcome
+  /** `null` when the cycle could not be parked. */
+  renewal_cycle: RenewalCycleDTO | null
+}
+
 async function parkRenewalCycleAwaitingPayment(
   container: MedusaContainer,
   context: RenewalExecutionContext,
   orderResult: RenewalOrderStepResult,
   paymentSessionId: string
-) {
+): Promise<SubmittedRenewalCharge> {
   const renewalModule = container.resolve<RenewalModuleService>(RENEWAL_MODULE)
   const orderId = orderResult.generated_order_id
   const cycle = await renewalModule.retrieveRenewalCycle(context.renewal_cycle_id)
@@ -1660,7 +1678,7 @@ async function parkRenewalCycleAwaitingPayment(
       order_id: orderId,
     })
 
-    return
+    return { outcome: RenewalRunOutcome.SUCCEEDED, renewal_cycle: cycle }
   }
 
   if (cycle.status === RenewalCycleStatus.FAILED) {
@@ -1682,7 +1700,7 @@ async function parkRenewalCycleAwaitingPayment(
       },
     })
 
-    return
+    return { outcome: RenewalRunOutcome.FAILED, renewal_cycle: cycle }
   }
 
   await renewalModule.updateRenewalAttempts({
@@ -1691,7 +1709,7 @@ async function parkRenewalCycleAwaitingPayment(
     order_id: orderId,
   })
 
-  await renewalModule.updateRenewalCycles({
+  const parked = await renewalModule.updateRenewalCycles({
     id: context.renewal_cycle_id,
     status: RenewalCycleStatus.AWAITING_PAYMENT,
     settlement_inputs: buildRenewalSettlementInputs(
@@ -1715,6 +1733,8 @@ async function parkRenewalCycleAwaitingPayment(
       payment_session_id: paymentSessionId,
     },
   })
+
+  return { outcome: RenewalRunOutcome.AWAITING_PAYMENT, renewal_cycle: parked }
 }
 
 async function parkOrReportRenewalCycle(
@@ -1722,9 +1742,9 @@ async function parkOrReportRenewalCycle(
   context: RenewalExecutionContext,
   orderResult: RenewalOrderStepResult,
   paymentSessionId: string
-) {
+): Promise<SubmittedRenewalCharge> {
   try {
-    await parkRenewalCycleAwaitingPayment(
+    return await parkRenewalCycleAwaitingPayment(
       container,
       context,
       orderResult,
@@ -1748,8 +1768,14 @@ async function parkOrReportRenewalCycle(
         generated_order_id: orderResult.generated_order_id,
       },
     })
+
+    return { outcome: RenewalRunOutcome.PARK_FAILED, renewal_cycle: null }
   }
 }
+
+export type AuthorizeRenewalPaymentStepOutput =
+  | ({ charge_submitted: true } & SubmittedRenewalCharge)
+  | { charge_submitted: false }
 
 export const authorizeRenewalPaymentStep = createStep(
   "authorize-renewal-payment",
@@ -1764,7 +1790,7 @@ export const authorizeRenewalPaymentStep = createStep(
     const { context, order_result, payment_session_data } = input
 
     if (!order_result.payment) {
-      return new StepResponse({ charge_submitted: false })
+      return new StepResponse<AuthorizeRenewalPaymentStepOutput>({ charge_submitted: false })
     }
 
     const orderId = order_result.order?.id as string
@@ -1864,21 +1890,24 @@ export const authorizeRenewalPaymentStep = createStep(
           )
         }
       } else {
-        await parkOrReportRenewalCycle(
+        const submitted = await parkOrReportRenewalCycle(
           container,
           context,
           order_result,
           paymentSessionResult.result.id
         )
 
-        return new StepResponse({ charge_submitted: true })
+        return new StepResponse<AuthorizeRenewalPaymentStepOutput>({
+          charge_submitted: true,
+          ...submitted,
+        })
       }
     } catch (error) {
       await recordRenewalFailure(container, context, error)
       throw error
     }
 
-    return new StepResponse({ charge_submitted: false })
+    return new StepResponse<AuthorizeRenewalPaymentStepOutput>({ charge_submitted: false })
   }
 )
 

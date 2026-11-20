@@ -12,6 +12,7 @@ import {
   pauseSubscriptionWorkflow,
   processRenewalCycleWorkflow,
   rejectRenewalChangesWorkflow,
+  RenewalRunOutcome,
   resumeSubscriptionWorkflow,
   scheduleSubscriptionPlanChangeWorkflow,
 } from "../../src/workflows"
@@ -197,7 +198,10 @@ medusaIntegrationTestRunner({
           renewal_cycle_id: cycle.id,
         } as any)
 
-        expect(result?.renewal_cycle.status).toEqual(RenewalCycleStatus.SUCCEEDED)
+        expect(result).toMatchObject({
+          outcome: RenewalRunOutcome.SUCCEEDED,
+          renewal_cycle: { status: RenewalCycleStatus.SUCCEEDED },
+        })
         expect(updatedCycle.status).toEqual(RenewalCycleStatus.SUCCEEDED)
         expect(updatedCycle.generated_order_id).toBeNull()
         expect(updatedSubscription.skip_next_cycle).toBe(false)

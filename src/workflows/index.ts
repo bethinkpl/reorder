@@ -38,6 +38,7 @@ export {
   processRenewalCycleWorkflow,
   default as processRenewalCycleWorkflowDefault,
 } from "./process-renewal-cycle"
+export { RenewalRunOutcome } from "./steps/process-renewal-cycle"
 export {
   ensureNextRenewalCycleWorkflow,
   default as ensureNextRenewalCycleWorkflowDefault,

@@ -18,6 +18,7 @@ import {
   finalizeRenewalCycleStep,
   prepareRenewalCycleStep,
   ProcessRenewalCycleStepInput,
+  RenewalRunOutcome,
 } from "./steps/process-renewal-cycle"
 import { labelSubscriptionOrderAdjustmentsStep } from "./steps/label-subscription-order-adjustments"
 import { buildAnalyticsIncrementalRebuildInput } from "./utils/analytics-incremental"
@@ -164,9 +165,24 @@ export const processRenewalCycleWorkflow = createWorkflow(
       return result
     })
 
-    const result = transform({ finalized }, function ({ finalized }) {
-      return finalized ?? null
-    })
+    const result = transform(
+      { finalized, authorization, context, orderResult },
+      function ({ finalized, authorization, context, orderResult }) {
+        if (finalized) {
+          return { outcome: RenewalRunOutcome.SUCCEEDED, ...finalized }
+        }
+
+        return {
+          outcome: authorization.charge_submitted
+            ? authorization.outcome
+            : RenewalRunOutcome.FAILED,
+          renewal_cycle: authorization.charge_submitted ? authorization.renewal_cycle : null,
+          subscription_id: context.subscription_id,
+          attempt_id: context.attempt_id,
+          generated_order_id: orderResult.generated_order_id,
+        }
+      }
+    )
 
     const incrementalAnalyticsInput = transform({ input }, function ({ input }) {
       return buildAnalyticsIncrementalRebuildInput({

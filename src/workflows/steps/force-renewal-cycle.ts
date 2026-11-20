@@ -22,7 +22,10 @@ import {
 } from "../../modules/activity-log/types"
 import { processRenewalCycleWorkflow } from "../process-renewal-cycle"
 import { persistSubscriptionLogEvent } from "./create-subscription-log-event"
-import { assertNoDunningOwnsFailedCycle } from "./process-renewal-cycle"
+import {
+  assertNoDunningOwnsFailedCycle,
+  RenewalRunOutcome,
+} from "./process-renewal-cycle"
 
 export type ForceRenewalCycleStepInput = {
   renewal_cycle_id: string
@@ -75,7 +78,7 @@ export const forceRenewalCycleStep = createStep(
       triggered_by: input.triggered_by ?? null,
     })
 
-    let cycleStatus: RenewalCycleStatus = RenewalCycleStatus.SUCCEEDED
+    let outcome: RenewalRunOutcome
 
     try {
       if (cycle.status === RenewalCycleStatus.PROCESSING) {
@@ -148,11 +151,7 @@ export const forceRenewalCycleStep = createStep(
         },
       })
 
-      if (!result) {
-        cycleStatus = (
-          await renewalModule.retrieveRenewalCycle(cycle.id, { select: ["status"] })
-        ).status
-      }
+      outcome = result.outcome
     } catch (error) {
       const failureKind = classifyRenewalFailure(error)
       const blocked =
@@ -177,14 +176,7 @@ export const forceRenewalCycleStep = createStep(
       throw error
     }
 
-    const outcome =
-      cycleStatus === RenewalCycleStatus.SUCCEEDED
-        ? "succeeded"
-        : cycleStatus === RenewalCycleStatus.FAILED
-          ? "failed"
-          : "awaiting_payment"
-
-    logRenewalEvent(logger, outcome === "failed" ? "warn" : "info", {
+    logRenewalEvent(logger, outcome === RenewalRunOutcome.FAILED ? "warn" : "info", {
       event: "renewal.force",
       outcome,
       correlation_id: correlationId,
@@ -192,8 +184,8 @@ export const forceRenewalCycleStep = createStep(
       subscription_id: cycle.subscription_id,
       trigger_type: "manual",
       triggered_by: input.triggered_by ?? null,
-      success_count: outcome === "succeeded" ? 1 : 0,
-      failure_count: outcome === "failed" ? 1 : 0,
+      success_count: outcome === RenewalRunOutcome.SUCCEEDED ? 1 : 0,
+      failure_count: outcome === RenewalRunOutcome.FAILED ? 1 : 0,
     })
 
     return new StepResponse(cycle.id)

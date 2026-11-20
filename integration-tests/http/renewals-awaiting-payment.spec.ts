@@ -23,7 +23,11 @@ import { renewalErrors } from "../../src/modules/renewal/utils/errors"
 import { SUBSCRIPTION_MODULE } from "../../src/modules/subscription"
 import type SubscriptionModuleService from "../../src/modules/subscription/service"
 import { type SubscriptionSourceSnapshot, SubscriptionStatus } from "../../src/modules/subscription/types"
-import { forceRenewalCycleWorkflow, processRenewalCycleWorkflow } from "../../src/workflows"
+import {
+  forceRenewalCycleWorkflow,
+  processRenewalCycleWorkflow,
+  RenewalRunOutcome,
+} from "../../src/workflows"
 import { loadOrderAmounts } from "../../src/workflows/steps/run-dunning-retry"
 import { recordOrderCaptureTransactions } from "../../src/workflows/utils/record-order-capture-transactions"
 import {
@@ -183,9 +187,14 @@ medusaIntegrationTestRunner({
         answerAuthorizationWithNull(getContainer())
         const logEntries = watchLogs(getContainer())
 
-        await runRenewal(getContainer(), seeded.cycle.id, "corr-awaiting-park")
+        const result = await runRenewal(getContainer(), seeded.cycle.id, "corr-awaiting-park")
 
         const state = await readRenewalState(getContainer(), seeded)
+
+        expect(result).toMatchObject({
+          outcome: RenewalRunOutcome.AWAITING_PAYMENT,
+          renewal_cycle: { id: seeded.cycle.id, status: RenewalCycleStatus.AWAITING_PAYMENT },
+        })
 
         expect(seeded.sessionIds).toHaveLength(1)
         expect(state.cycle).toMatchObject({
@@ -368,7 +377,9 @@ medusaIntegrationTestRunner({
           return null as never
         })
 
-        await runRenewal(getContainer(), seeded.cycle.id)
+        expect(await runRenewal(getContainer(), seeded.cycle.id)).toMatchObject({
+          outcome: RenewalRunOutcome.SUCCEEDED,
+        })
 
         const state = await readRenewalState(getContainer(), seeded)
 
@@ -389,7 +400,10 @@ medusaIntegrationTestRunner({
         const orderId = "ord_sync_settled"
         const seeded = await seedDueRenewal({ dueAt, orderId })
 
-        await runRenewal(getContainer(), seeded.cycle.id)
+        expect(await runRenewal(getContainer(), seeded.cycle.id)).toMatchObject({
+          outcome: RenewalRunOutcome.SUCCEEDED,
+          renewal_cycle: { id: seeded.cycle.id, status: RenewalCycleStatus.SUCCEEDED },
+        })
 
         const state = await readRenewalState(getContainer(), seeded)
 

@@ -41,6 +41,7 @@ import {
   cancelSubscriptionWorkflow,
   ensureNextRenewalCycleWorkflow,
   forceRenewalCycleWorkflow,
+  RenewalRunOutcome,
   runDunningRetryWorkflow,
 } from "../../src/workflows"
 import {
@@ -366,7 +367,10 @@ medusaIntegrationTestRunner({
           })
         const alerts = watchAlerts(container)
 
-        await expect(runRenewal(container, seeded.cycle.id)).resolves.toBeNull()
+        await expect(runRenewal(container, seeded.cycle.id)).resolves.toMatchObject({
+          outcome: RenewalRunOutcome.FAILED,
+          renewal_cycle: { status: RenewalCycleStatus.FAILED },
+        })
 
         await expectFailedIntoDunning(seeded, { payment_reference: seeded.sessionIds[0] })
         expect(alerts(seeded.cycle.id, seeded.sessionIds[0])).toHaveLength(1)
@@ -413,7 +417,10 @@ medusaIntegrationTestRunner({
           failWrite()
           const alerts = watchAlerts(container)
 
-          await expect(runRenewal(container, seeded.cycle.id)).resolves.toBeNull()
+          await expect(runRenewal(container, seeded.cycle.id)).resolves.toMatchObject({
+            outcome: RenewalRunOutcome.PARK_FAILED,
+            renewal_cycle: null,
+          })
 
           const [sessionId] = seeded.sessionIds
           const inFlight = await readRenewalState(container, seeded)
@@ -984,13 +991,19 @@ medusaIntegrationTestRunner({
     })
 
     it.each([
-      { name: "parked", failWrite: () => undefined, leftAs: RenewalCycleStatus.AWAITING_PAYMENT },
+      {
+        name: "parked",
+        failWrite: () => undefined,
+        leftAs: RenewalCycleStatus.AWAITING_PAYMENT,
+        outcome: RenewalRunOutcome.AWAITING_PAYMENT,
+      },
       {
         name: "could not record its wait",
         failWrite: () => failCycleWriteOnce(RenewalCycleStatus.AWAITING_PAYMENT),
         leftAs: RenewalCycleStatus.PROCESSING,
+        outcome: RenewalRunOutcome.PARK_FAILED,
       },
-    ])("logs a forced run that $name as awaiting its payment, counting it neither succeeded nor failed", async ({ failWrite, leftAs }) => {
+    ])("logs a forced run that $name as $outcome, counting it neither succeeded nor failed", async ({ failWrite, leftAs, outcome }) => {
       const container = getContainer()
       const { cycle } = await seedDueCharge("SUB-FORCED-RUN-PARKED")
 
@@ -1011,7 +1024,29 @@ medusaIntegrationTestRunner({
             entry.outcome !== "started"
         )
       ).toEqual([
-        expect.objectContaining({ outcome: "awaiting_payment", success_count: 0, failure_count: 0 }),
+        expect.objectContaining({ outcome, success_count: 0, failure_count: 0 }),
+      ])
+    })
+
+    it("counts a scheduled run that could not record its wait as awaiting in the job, logging it as park_failed", async () => {
+      const container = getContainer()
+      const { cycle } = await seedDueCharge("SUB-JOB-RUN-PARK-FAILED")
+
+      answerAuthorizationWithNull(container)
+      failCycleWriteOnce(RenewalCycleStatus.AWAITING_PAYMENT)
+      const logs = watchLogs(container)
+
+      await processRenewalCyclesJob(container)
+
+      expect(logs({ event: "renewal.job.cycle", renewal_cycle_id: cycle.id })).toEqual([
+        expect.objectContaining({
+          outcome: RenewalRunOutcome.PARK_FAILED,
+          success_count: 0,
+          failure_count: 0,
+        }),
+      ])
+      expect(logs({ event: "renewal.job", outcome: "completed" })).toEqual([
+        expect.objectContaining({ success_count: 0, failure_count: 0, awaiting_count: 1 }),
       ])
     })
 

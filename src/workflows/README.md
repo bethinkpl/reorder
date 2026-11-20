@@ -78,6 +78,19 @@ export async function GET(
 }
 ```
 
+## `processRenewalCycleWorkflow` result
+
+A run that does not throw resolves `{ outcome, renewal_cycle, subscription_id, attempt_id,
+generated_order_id }`. `outcome` is one of `RenewalRunOutcome` (exported from
+`@bethinkpl/reorder/workflows`), decided while the run still holds the renewal lock:
+
+- `succeeded` — the cycle is settled; `renewal_cycle` is the settled cycle.
+- `awaiting_payment` — the provider answers later; `renewal_cycle` is the parked cycle.
+- `park_failed` — the charge was submitted but the cycle could not be parked, so it stays
+  `processing` (an alertable log says so); `renewal_cycle` is `null`.
+- `failed` — the charge's failure was reported while the run was still waiting on it, and the
+  cycle had already failed; `renewal_cycle` is that cycle.
+
 ## Extensibility Hooks
 
 ### `processRenewalCycleWorkflow` — `setPaymentSessionData`

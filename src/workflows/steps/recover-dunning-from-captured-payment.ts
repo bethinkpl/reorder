@@ -23,7 +23,10 @@ import { SubscriptionStatus } from "../../modules/subscription/types"
 import { subscriptionErrors } from "../../modules/subscription/utils/errors"
 import { ensureNextRenewalCycleWorkflow } from "../ensure-next-renewal-cycle"
 import { settleDunningCaseRecovered } from "../utils/settle-dunning-recovery"
-import { settleRenewalCycleSucceeded } from "../utils/settle-renewal-cycle-succeeded"
+import {
+  settleRenewalCycleSucceeded,
+  SUBSCRIPTION_CANCELLED_REFUSAL,
+} from "../utils/settle-renewal-cycle-succeeded"
 import { loadOrderAmounts } from "./run-dunning-retry"
 
 type DunningCaseRecord = {
@@ -205,7 +208,7 @@ export async function recoverDunningFromCapturedPayment(
   // A capture on a cancelled subscription is reconciled as a late payment, which asks the host for
   // a refund once; recovering here would reopen billing on it instead.
   if (subscription.status === SubscriptionStatus.CANCELLED) {
-    return answer(false, "subscription_cancelled")
+    return answer(false, SUBSCRIPTION_CANCELLED_REFUSAL)
   }
 
   if (!dunningCase.renewal_order_id) {
@@ -242,7 +245,7 @@ export async function recoverDunningFromCapturedPayment(
 
       // Also after a supersession: an earlier settlement of this cycle may have moved the dates
       // and failed before it scheduled the next cycle.
-      if (settlement.reason === "subscription_cancelled") {
+      if (settlement.reason === SUBSCRIPTION_CANCELLED_REFUSAL) {
         return
       }
 

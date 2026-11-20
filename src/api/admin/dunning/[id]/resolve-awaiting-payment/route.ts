@@ -4,6 +4,7 @@ import type {
 } from "@medusajs/framework/http"
 import type { MedusaContainer } from "@medusajs/framework/types"
 import { DunningAwaitingPaymentAdminResolution } from "../../../../../admin/types/dunning"
+import { ADMIN_RESOLUTION_METADATA_KEY } from "../../../../../common/types/admin-resolution"
 import { PaymentAttemptErrorCode } from "../../../../../common/types/payment-attempt-error-code"
 import { DUNNING_MODULE } from "../../../../../modules/dunning"
 import { DunningEvents } from "../../../../../modules/dunning/events"
@@ -38,6 +39,8 @@ import { dunningCaseLockKey } from "../../../../../modules/dunning/utils/lock-ke
 import { runUnderLock } from "../../../../../workflows/utils/run-under-lock"
 
 const DUNNING_LOCK_TIMEOUT_SECONDS = 30
+/** The storefront shows it as the retry's error, so the admin's reason never goes into it. */
+const RESOLVED_UNPAID_MESSAGE = "Retry payment never arrived"
 const DUNNING_LOCK_HOLD_SECONDS = 120
 
 type ResolveAwaitingPaymentInput = {
@@ -126,8 +129,7 @@ async function failUnpaidUnderLock(
     session_id: latest.payment_reference,
     action: PaymentAttemptErrorCode.RESOLVED_UNPAID,
     reason: null,
-    // Shown to the customer as the retry's error; the admin's reason stays on the attempt's metadata.
-    message: "Retry payment never arrived",
+    message: RESOLVED_UNPAID_MESSAGE,
   })
 
   if (!output) {
@@ -136,7 +138,9 @@ async function failUnpaidUnderLock(
 
   await dunningModule.updateDunningAttempts({
     id: latest.id,
-    metadata: { admin_resolution: { reason: input.reason, resolved_by: input.triggered_by } },
+    metadata: {
+      [ADMIN_RESOLUTION_METADATA_KEY]: { reason: input.reason, resolved_by: input.triggered_by },
+    },
   })
 
   await emitDunningAttemptOutcomeEvents(container, output)

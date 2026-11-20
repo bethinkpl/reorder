@@ -4,6 +4,7 @@ import type {
 } from "@medusajs/framework/http"
 import type { MedusaContainer } from "@medusajs/framework/types"
 import { RenewalAwaitingPaymentAdminResolution } from "../../../../../admin/types/renewal"
+import { ADMIN_RESOLUTION_METADATA_KEY } from "../../../../../common/types/admin-resolution"
 import { PaymentAttemptErrorCode } from "../../../../../common/types/payment-attempt-error-code"
 import { RENEWAL_MODULE } from "../../../../../modules/renewal"
 import type RenewalModuleService from "../../../../../modules/renewal/service"
@@ -32,6 +33,8 @@ import { renewalSubscriptionLockKey } from "../../../../../modules/renewal/utils
 import { runUnderLock } from "../../../../../workflows/utils/run-under-lock"
 
 const RENEWAL_LOCK_TIMEOUT_SECONDS = 30
+/** The storefront shows it through the dunning case it opens, so the admin's reason never goes into it. */
+const RESOLVED_UNPAID_MESSAGE = "Renewal payment never arrived"
 const RENEWAL_LOCK_HOLD_SECONDS = 120
 
 type LatestRenewalAttempt = Awaited<
@@ -83,9 +86,7 @@ async function failUnpaidUnderLock(
     attempt_id: attempt.id,
     action: PaymentAttemptErrorCode.RESOLVED_UNPAID,
     reason: null,
-    // Reaches the customer through the dunning case it opens; the admin's reason stays on the
-    // attempt's metadata.
-    message: "Renewal payment never arrived",
+    message: RESOLVED_UNPAID_MESSAGE,
   })
 
   if (!failed) {
@@ -94,7 +95,9 @@ async function failUnpaidUnderLock(
 
   await container.resolve<RenewalModuleService>(RENEWAL_MODULE).updateRenewalAttempts({
     id: attempt.id,
-    metadata: { admin_resolution: { reason: input.reason, resolved_by: input.triggered_by } },
+    metadata: {
+      [ADMIN_RESOLUTION_METADATA_KEY]: { reason: input.reason, resolved_by: input.triggered_by },
+    },
   })
 
   return RenewalAwaitingPaymentAdminResolution.FAILED

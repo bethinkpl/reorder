@@ -160,10 +160,16 @@ export type SettleRenewalCycleSucceededInput = {
   audit?: RenewalSettlementAudit
 }
 
+export const SUBSCRIPTION_CANCELLED_REFUSAL = "subscription_cancelled"
+
 export type SettleRenewalCycleSucceededResult = {
   settled: boolean
   /** Why nothing was written; `null` on the settling run. */
-  reason: "already_succeeded" | "cycle_superseded" | "subscription_cancelled" | null
+  reason:
+    | "already_succeeded"
+    | "cycle_superseded"
+    | typeof SUBSCRIPTION_CANCELLED_REFUSAL
+    | null
   renewal_cycle: RenewalCycleRecord
   applied_pending_changes: RenewalAppliedPendingUpdateData | null
 }
@@ -239,7 +245,7 @@ export async function settleRenewalCycleSucceeded(
   if (subscription.status === SubscriptionStatus.CANCELLED) {
     return {
       settled: false,
-      reason: "subscription_cancelled",
+      reason: SUBSCRIPTION_CANCELLED_REFUSAL,
       renewal_cycle: cycle,
       applied_pending_changes: appliedPendingChanges,
     }

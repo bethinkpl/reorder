@@ -10,6 +10,7 @@ jest.mock("../../ensure-next-renewal-cycle", () => ({
 }))
 
 jest.mock("../../utils/settle-renewal-cycle-succeeded", () => ({
+  ...jest.requireActual("../../utils/settle-renewal-cycle-succeeded"),
   settleRenewalCycleSucceeded: jest.fn(async () => ({
     settled: true,
     reason: null,

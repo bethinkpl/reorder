@@ -26,6 +26,7 @@ import { runUnderLock, tryUnderLock } from "./run-under-lock"
 import {
   readStoredSettlementInputs,
   settleRenewalCycleSucceeded,
+  SUBSCRIPTION_CANCELLED_REFUSAL,
   type StoredRenewalSettlementInputs,
 } from "./settle-renewal-cycle-succeeded"
 import { renewalSubscriptionLockKey } from "../../modules/renewal/utils/lock-key"
@@ -178,7 +179,7 @@ export async function settleAwaitingRenewalCycleUnderLock(
     return "not_awaiting"
   }
 
-  if (settlement.reason === "subscription_cancelled") {
+  if (settlement.reason === SUBSCRIPTION_CANCELLED_REFUSAL) {
     return "subscription_terminal"
   }
 

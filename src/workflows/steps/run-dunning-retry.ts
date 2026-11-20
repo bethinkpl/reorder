@@ -46,7 +46,10 @@ import {
 import { recordOrderCaptureTransactions } from "../utils/record-order-capture-transactions"
 import { resolvePaymentCollection } from "../utils/resolve-payment-collection"
 import { settleDunningCaseRecovered } from "../utils/settle-dunning-recovery"
-import { settleRenewalCycleSucceeded } from "../utils/settle-renewal-cycle-succeeded"
+import {
+  settleRenewalCycleSucceeded,
+  SUBSCRIPTION_CANCELLED_REFUSAL,
+} from "../utils/settle-renewal-cycle-succeeded"
 import { settleSubscriptionPaymentFailure } from "../utils/settle-subscription-payment-failure"
 import { SUBSCRIPTION_MODULE } from "../../modules/subscription"
 import type SubscriptionModuleService from "../../modules/subscription/service"
@@ -1213,7 +1216,7 @@ async function finalizeRecoveredRenewal(
 
     // Also after a supersession: an earlier settlement of this cycle may have moved the dates and
     // failed before it scheduled the next cycle.
-    if (settlement.reason === "subscription_cancelled") {
+    if (settlement.reason === SUBSCRIPTION_CANCELLED_REFUSAL) {
       return
     }
 

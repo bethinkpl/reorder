@@ -26,7 +26,10 @@ import { SubscriptionStatus } from "../../src/modules/subscription/types"
 import { cancelSubscriptionByCustomerWorkflow } from "../../src/workflows/cancel-subscription-by-customer"
 import { startDunningWorkflow } from "../../src/workflows/start-dunning"
 import { failAwaitingDunningAttempt } from "../../src/workflows/utils/fail-awaiting-dunning-attempt"
-import { CAPTURED_AFTER_CLOSE_ERROR_CODE } from "../../src/workflows/utils/late-payment-capture"
+import {
+  CAPTURED_AFTER_CLOSE_ERROR_CODE,
+  NO_PAYMENT_SIGNAL_ERROR_CODE,
+} from "../../src/workflows/utils/late-payment-capture"
 import {
   type SeededDunningCase,
   createRetrySessionRouter,
@@ -653,6 +656,65 @@ medusaIntegrationTestRunner({
             dunning_case_id: caseId,
             dunning_attempt_id: attempt.id,
             reason: LatePaymentCapturedReason.CASE_CLOSED,
+          }),
+        ])
+      })
+
+      it("fails the charge of a case the customer cancelled once it is past the minimum age with no signal, and leaves a younger one alone", async () => {
+        const container = getContainer()
+        const seeded = await seedDunningCase(container, "SUB-DUN-CANCEL-STALE")
+        const submittedAt = new Date(seeded.attempts[0].attempt.started_at).getTime()
+
+        await cancelByCustomer(container, seeded)
+
+        const logs = watchLogs(container)
+        const sweepAt = (offsetMs: number) =>
+          atTime(submittedAt + offsetMs, () => reconcilePaidDunningCases(container))
+
+        expect(await sweepAt((DEFAULT_AWAITING_PAYMENT_ALERT_HOURS - 1) * HOUR_MS)).toMatchObject({
+          stale_attempts_closed: 0,
+        })
+        expect(await sweepAt((DEFAULT_AWAITING_PAYMENT_ALERT_HOURS + 1) * HOUR_MS)).toMatchObject({
+          stale_attempts_closed: 1,
+        })
+        expect(await sweepAt((DEFAULT_AWAITING_PAYMENT_ALERT_HOURS + 2) * HOUR_MS)).toMatchObject({
+          stale_attempts_closed: 0,
+        })
+
+        expect((await readDunningState(container, seeded.dunningCase.id)).attempts).toEqual([
+          expect.objectContaining({
+            status: DunningAttemptStatus.FAILED,
+            error_code: NO_PAYMENT_SIGNAL_ERROR_CODE,
+          }),
+        ])
+        expect(logs({ event: "dunning.stale_attempt_closed" })).toEqual([
+          expect.objectContaining({ dunning_case_id: seeded.dunningCase.id, alertable: false }),
+        ])
+      })
+
+      it("delivers again the lost capture of a charge a customer's cancellation left in flight, reporting it once for a refund", async () => {
+        const container = getContainer()
+        const seeded = await seedDunningCase(container, "SUB-DUN-CANCEL-SWEPT-CAPTURE")
+        const [{ session }] = seeded.attempts
+
+        await cancelByCustomer(container, seeded)
+
+        const payment = await captureOnOrder(container, seeded.order.id, session.id)
+        const events = watchEvents(container)
+
+        expect(await reconcilePaidDunningCases(container)).toMatchObject({ late_captures: 1 })
+        expect(await reconcilePaidDunningCases(container)).toMatchObject({ late_captures: 0 })
+
+        expect((await readDunningState(container, seeded.dunningCase.id)).attempts).toEqual([
+          expect.objectContaining({
+            status: DunningAttemptStatus.SUCCEEDED,
+            error_code: CAPTURED_AFTER_CLOSE_ERROR_CODE,
+          }),
+        ])
+        expect(events(SubscriptionEvents.LATE_PAYMENT_CAPTURED).map((message) => message.data)).toEqual([
+          expect.objectContaining({
+            payment_id: payment.id,
+            reason: LatePaymentCapturedReason.SUBSCRIPTION_TERMINAL,
           }),
         ])
       })

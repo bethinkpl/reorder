@@ -46,8 +46,10 @@ export type EndAwaitingRenewalCyclesOnCancellationInput = {
   subscription: CancellationSubscriptionDisplayRecord
   cancelled_at: Date | string
   actor_id: string | null
+  actor_type?: ActivityLogActorType
   reason: string | null
-  source: CancellationLogSource
+  /** `scheduler` when a sweep ends a cycle a failed cancellation left behind. */
+  source: CancellationLogSource | "scheduler"
 }
 
 function toDateOrNull(value: string | null) {
@@ -141,7 +143,7 @@ async function endCycle(
       subscription_id: subscription.id,
       customer_id: subscription.customer_id,
       event_type: ActivityLogEventType.RENEWAL_FAILED,
-      actor_type: ActivityLogActorType.USER,
+      actor_type: input.actor_type ?? ActivityLogActorType.USER,
       actor_id: input.actor_id,
       display: {
         subscription_reference: subscription.reference,

@@ -2,18 +2,29 @@ import { MedusaContainer } from "@medusajs/framework/types"
 import { Modules } from "@medusajs/framework/utils"
 import { DUNNING_MODULE } from "../modules/dunning"
 import type DunningModuleService from "../modules/dunning/service"
-import { DunningCaseStatus } from "../modules/dunning/types"
+import {
+  CLOSED_DUNNING_CASE_STATUSES,
+  DunningAttemptStatus,
+  DunningCaseStatus,
+} from "../modules/dunning/types"
 import {
   createDunningCorrelationId,
   logDunningEvent,
 } from "../modules/dunning/utils/observability"
 import {
+  isAwaitingPaymentOverdue,
   isOverdueAlertDue,
   resolveAwaitingPaymentAlertHours,
+  resolveAwaitingPaymentResolveMinHours,
   withOverdueAlertMarker,
 } from "../modules/renewal/utils/awaiting-payment-age"
+import { activateSubscriptionOnPaymentCaptured } from "../subscribers/activate-subscription-on-payment-captured"
 import { recoverDunningFromCapturedPaymentWorkflow } from "../workflows/recover-dunning-from-captured-payment"
 import { loadOrderAmounts } from "../workflows/steps/run-dunning-retry"
+import {
+  findCapturedPaymentId,
+  NO_PAYMENT_SIGNAL_ERROR_CODE,
+} from "../workflows/utils/late-payment-capture"
 
 const JOB_NAME = "reconcile-paid-dunning-cases"
 const JOB_LOCK_KEY = "jobs:reconcile-paid-dunning-cases"
@@ -47,6 +58,8 @@ export type ReconcilePaidDunningCasesResult = {
   recovered: number
   unpaid: number
   failed: number
+  late_captures: number
+  stale_attempts_closed: number
 }
 
 function getErrorMessage(error: unknown) {
@@ -216,6 +229,129 @@ async function alertOverdueAwaitingCases(
   }
 }
 
+async function failStaleAttemptUnderLock(
+  container: MedusaContainer,
+  attemptId: string,
+  input: OverdueAlertInput & { minHours: number }
+): Promise<boolean> {
+  const dunningModule = container.resolve<DunningModuleService>(DUNNING_MODULE)
+  const [attempt] = await dunningModule.listDunningAttempts({
+    id: attemptId,
+    status: DunningAttemptStatus.PROCESSING,
+  })
+  const [dunningCase] = attempt
+    ? await dunningModule.listDunningCases({ id: attempt.dunning_case_id })
+    : []
+
+  if (!attempt || !dunningCase || !CLOSED_DUNNING_CASE_STATUSES.includes(dunningCase.status)) {
+    return false
+  }
+
+  const message = `No payment result arrived for this retry within ${input.minHours} hours of its submission, after its dunning case had closed`
+
+  await dunningModule.updateDunningAttempts({
+    id: attempt.id,
+    status: DunningAttemptStatus.FAILED,
+    finished_at: input.now,
+    error_code: NO_PAYMENT_SIGNAL_ERROR_CODE,
+    error_message: message,
+  })
+
+  logDunningEvent(container.resolve("logger"), "warn", {
+    event: "dunning.stale_attempt_closed",
+    outcome: "failed",
+    correlation_id: input.correlationId,
+    dunning_case_id: dunningCase.id,
+    subscription_id: dunningCase.subscription_id,
+    attempt_no: attempt.attempt_no,
+    job_name: JOB_NAME,
+    alertable: false,
+    message,
+    metadata: { attempt_id: attempt.id, payment_session_id: attempt.payment_reference },
+  })
+
+  return true
+}
+
+/**
+ * A retry attempt a customer's cancellation left processing on its closed case: a captured
+ * payment whose event was lost is delivered again, and an attempt with no result past the minimum
+ * age is failed.
+ */
+async function reconcileAttemptsOfClosedCases(
+  container: MedusaContainer,
+  input: OverdueAlertInput,
+  result: ReconcilePaidDunningCasesResult
+): Promise<void> {
+  const dunningModule = container.resolve<DunningModuleService>(DUNNING_MODULE)
+  const minHours = resolveAwaitingPaymentResolveMinHours()
+  let cursor: string | null = null
+
+  while (true) {
+    const attempts = await dunningModule.listDunningAttempts(
+      {
+        status: DunningAttemptStatus.PROCESSING,
+        ...(cursor ? { id: { $gt: cursor } } : {}),
+      },
+      { take: BATCH_SIZE, order: { id: "ASC" } }
+    )
+    const cases = attempts.length
+      ? await dunningModule.listDunningCases({
+          id: attempts.map((attempt) => attempt.dunning_case_id),
+        })
+      : []
+    const casesById = new Map(cases.map((dunningCase) => [dunningCase.id, dunningCase]))
+
+    for (const attempt of attempts) {
+      const dunningCase = casesById.get(attempt.dunning_case_id)
+
+      if (!dunningCase || !CLOSED_DUNNING_CASE_STATUSES.includes(dunningCase.status)) {
+        continue
+      }
+
+      try {
+        const capturedPaymentId = attempt.payment_reference
+          ? await findCapturedPaymentId(container, attempt.payment_reference)
+          : null
+
+        if (capturedPaymentId) {
+          await activateSubscriptionOnPaymentCaptured(container, capturedPaymentId)
+          result.late_captures += 1
+
+          continue
+        }
+
+        if (!isAwaitingPaymentOverdue(attempt.started_at, input.now, minHours)) {
+          continue
+        }
+
+        const closed = await container.resolve(Modules.LOCKING).execute(
+          `dunning:${dunningCase.id}`,
+          () => failStaleAttemptUnderLock(container, attempt.id, { ...input, minHours }),
+          { timeout: ALERT_LOCK_TIMEOUT_SECONDS }
+        )
+
+        if (closed) {
+          result.stale_attempts_closed += 1
+        }
+      } catch (error) {
+        if (isLockTimeout(getErrorMessage(error))) {
+          continue
+        }
+
+        result.failed += 1
+        reportCaseFailure(container, dunningCase, error)
+      }
+    }
+
+    if (attempts.length < BATCH_SIZE) {
+      return
+    }
+
+    cursor = attempts[attempts.length - 1].id
+  }
+}
+
 /**
  * Closes dunning cases whose renewal order is already paid in full.
  *
@@ -240,6 +376,8 @@ export async function reconcilePaidDunningCases(
     recovered: 0,
     unpaid: 0,
     failed: 0,
+    late_captures: 0,
+    stale_attempts_closed: 0,
   }
   const alertInput: OverdueAlertInput = {
     now: new Date(Date.now()),
@@ -276,6 +414,7 @@ export async function reconcilePaidDunningCases(
   }
 
   await alertOverdueAwaitingCases(container, alertInput, result)
+  await reconcileAttemptsOfClosedCases(container, alertInput, result)
 
   return result
 }
@@ -294,7 +433,7 @@ export default async function reconcilePaidDunningCasesJob(
         const result = await reconcilePaidDunningCases(container)
 
         logger.info(
-          `[${JOB_NAME}] scanned ${result.scanned} open dunning case(s), recovered ${result.recovered}, still unpaid ${result.unpaid}, failed ${result.failed} (batch ${BATCH_SIZE}) in ${Date.now() - startedAt}ms`
+          `[${JOB_NAME}] scanned ${result.scanned} open dunning case(s), recovered ${result.recovered}, still unpaid ${result.unpaid}, late captures redelivered ${result.late_captures}, stale attempts closed ${result.stale_attempts_closed}, failed ${result.failed} (batch ${BATCH_SIZE}) in ${Date.now() - startedAt}ms`
         )
       },
       {

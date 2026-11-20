@@ -1,18 +1,34 @@
 import type { MedusaContainer } from "@medusajs/framework/types"
 import { Modules } from "@medusajs/framework/utils"
+import { ActivityLogActorType } from "../modules/activity-log/types"
 import { RENEWAL_MODULE } from "../modules/renewal"
 import type RenewalModuleService from "../modules/renewal/service"
-import { RenewalCycleStatus } from "../modules/renewal/types"
+import {
+  CLOSED_RENEWAL_CYCLE_STATUSES,
+  RenewalAttemptStatus,
+  RenewalCycleStatus,
+} from "../modules/renewal/types"
 import {
   AWAITING_PAYMENT_OVERDUE_EVENT,
+  isAwaitingPaymentOverdue,
   isOverdueAlertDue,
   resolveAwaitingPaymentAlertHours,
+  resolveAwaitingPaymentResolveMinHours,
   withOverdueAlertMarker,
 } from "../modules/renewal/utils/awaiting-payment-age"
 import {
   createRenewalCorrelationId,
   logRenewalEvent,
 } from "../modules/renewal/utils/observability"
+import { SUBSCRIPTION_MODULE } from "../modules/subscription"
+import type SubscriptionModuleService from "../modules/subscription/service"
+import { SubscriptionStatus } from "../modules/subscription/types"
+import { activateSubscriptionOnPaymentCaptured } from "../subscribers/activate-subscription-on-payment-captured"
+import { endAwaitingRenewalCyclesOnCancellation } from "../workflows/utils/end-awaiting-renewal-cycle-on-cancellation"
+import {
+  findCapturedPaymentId,
+  NO_PAYMENT_SIGNAL_ERROR_CODE,
+} from "../workflows/utils/late-payment-capture"
 import { isLockWaitTimeout } from "../workflows/utils/run-under-lock"
 import {
   settleAwaitingRenewalCycle,
@@ -23,6 +39,7 @@ const JOB_NAME = "reconcile-awaiting-renewal-cycles"
 const JOB_LOCK_KEY = "jobs:reconcile-awaiting-renewal-cycles"
 const BATCH_SIZE = 200
 const ALERT_LOCK_TIMEOUT_SECONDS = 5
+const RENEWAL_LOCK_TIMEOUT_SECONDS = 5
 
 type OverdueStatus = RenewalCycleStatus.AWAITING_PAYMENT | RenewalCycleStatus.PROCESSING
 
@@ -37,7 +54,10 @@ export type ReconcileAwaitingRenewalCyclesResult = Record<
   | "scanned"
   | "failed"
   | "overdue"
-  | "processing_overdue",
+  | "processing_overdue"
+  | "ended_cancelled"
+  | "late_captures"
+  | "stale_attempts_closed",
   number
 >
 
@@ -160,6 +180,179 @@ function reportCycleFailure(
   )
 }
 
+async function underRenewalLock<T>(
+  container: MedusaContainer,
+  subscriptionId: string,
+  job: () => Promise<T>,
+  whenBusy: T
+): Promise<T> {
+  try {
+    return await container
+      .resolve(Modules.LOCKING)
+      .execute(`renewal:subscription:${subscriptionId}`, job, {
+        timeout: RENEWAL_LOCK_TIMEOUT_SECONDS,
+      })
+  } catch (error) {
+    if (isLockWaitTimeout(error)) {
+      return whenBusy
+    }
+
+    throw error
+  }
+}
+
+/**
+ * An awaiting cycle whose subscription is already cancelled was left by a cancellation that failed
+ * part way: it is ended as the cancellation would have ended it, instead of being reported forever.
+ */
+async function endCycleOfCancelledSubscription(
+  container: MedusaContainer,
+  cycle: { id: string, subscription_id: string }
+): Promise<boolean> {
+  const subscriptionModule =
+    container.resolve<SubscriptionModuleService>(SUBSCRIPTION_MODULE)
+  const isCancelled = async () =>
+    (await subscriptionModule.retrieveSubscription(cycle.subscription_id)).status ===
+    SubscriptionStatus.CANCELLED
+
+  if (!(await isCancelled())) {
+    return false
+  }
+
+  return await underRenewalLock(
+    container,
+    cycle.subscription_id,
+    async () => {
+      if (!(await isCancelled())) {
+        return false
+      }
+
+      const ended = await endAwaitingRenewalCyclesOnCancellation(container, {
+        subscription: await subscriptionModule.retrieveSubscription(cycle.subscription_id),
+        cancelled_at: new Date(),
+        actor_id: null,
+        actor_type: ActivityLogActorType.SYSTEM,
+        reason: null,
+        source: "scheduler",
+      })
+
+      return ended.some((entry) => entry.cycle.id === cycle.id)
+    },
+    false
+  )
+}
+
+async function failStaleAttemptUnderLock(
+  container: MedusaContainer,
+  attemptId: string,
+  input: OverdueAlertInput & { minHours: number }
+): Promise<boolean> {
+  const renewalModule = container.resolve<RenewalModuleService>(RENEWAL_MODULE)
+  const [attempt] = await renewalModule.listRenewalAttempts({
+    id: attemptId,
+    status: RenewalAttemptStatus.PROCESSING,
+  })
+  const [cycle] = attempt
+    ? await renewalModule.listRenewalCycles({ id: attempt.renewal_cycle_id })
+    : []
+
+  if (!attempt || !cycle || !CLOSED_RENEWAL_CYCLE_STATUSES.includes(cycle.status)) {
+    return false
+  }
+
+  const message = `No payment result arrived for this attempt within ${input.minHours} hours of its submission, after its renewal had closed`
+
+  await renewalModule.updateRenewalAttempts({
+    id: attempt.id,
+    status: RenewalAttemptStatus.FAILED,
+    finished_at: input.now,
+    error_code: NO_PAYMENT_SIGNAL_ERROR_CODE,
+    error_message: message,
+  })
+
+  logRenewalEvent(container.resolve("logger"), "warn", {
+    event: "renewal.stale_attempt_closed",
+    outcome: "failed",
+    correlation_id: input.correlationId,
+    renewal_cycle_id: cycle.id,
+    subscription_id: cycle.subscription_id,
+    job_name: JOB_NAME,
+    alertable: false,
+    message,
+    metadata: { attempt_id: attempt.id, payment_session_id: attempt.payment_reference },
+  })
+
+  return true
+}
+
+/**
+ * An attempt a cancellation left processing on its closed cycle: a captured payment whose event
+ * was lost is delivered again, and an attempt with no result past the minimum age is failed.
+ */
+async function reconcileAttemptsOfClosedCycles(
+  container: MedusaContainer,
+  input: OverdueAlertInput,
+  result: ReconcileAwaitingRenewalCyclesResult
+): Promise<void> {
+  const renewalModule = container.resolve<RenewalModuleService>(RENEWAL_MODULE)
+  const minHours = resolveAwaitingPaymentResolveMinHours()
+  let cursor: string | null = null
+
+  while (true) {
+    const attempts = await renewalModule.listRenewalAttempts(
+      {
+        status: RenewalAttemptStatus.PROCESSING,
+        ...(cursor ? { id: { $gt: cursor } } : {}),
+      },
+      { take: BATCH_SIZE, order: { id: "ASC" } }
+    )
+    const cycles = attempts.length
+      ? await renewalModule.listRenewalCycles({
+          id: attempts.map((attempt) => attempt.renewal_cycle_id),
+        })
+      : []
+    const cyclesById = new Map(cycles.map((cycle) => [cycle.id, cycle]))
+
+    for (const attempt of attempts) {
+      const cycle = cyclesById.get(attempt.renewal_cycle_id)
+
+      if (!cycle || !CLOSED_RENEWAL_CYCLE_STATUSES.includes(cycle.status)) {
+        continue
+      }
+
+      try {
+        const capturedPaymentId = attempt.payment_reference
+          ? await findCapturedPaymentId(container, attempt.payment_reference)
+          : null
+
+        if (capturedPaymentId) {
+          await activateSubscriptionOnPaymentCaptured(container, capturedPaymentId)
+          result.late_captures += 1
+        } else if (
+          isAwaitingPaymentOverdue(attempt.started_at, input.now, minHours) &&
+          (await underRenewalLock(
+            container,
+            cycle.subscription_id,
+            () => failStaleAttemptUnderLock(container, attempt.id, { ...input, minHours }),
+            false
+          ))
+        ) {
+          result.stale_attempts_closed += 1
+        }
+      } catch (error) {
+        result.failed += 1
+        reportCycleFailure(container, cycle.id, error)
+      }
+    }
+
+    if (attempts.length < BATCH_SIZE) {
+      return
+    }
+
+    cursor = attempts[attempts.length - 1].id
+  }
+}
+
 async function alertOverdueProcessingCycles(
   container: MedusaContainer,
   input: OverdueAlertInput,
@@ -230,6 +423,9 @@ export async function reconcileAwaitingRenewalCycles(
     failed: 0,
     overdue: 0,
     processing_overdue: 0,
+    ended_cancelled: 0,
+    late_captures: 0,
+    stale_attempts_closed: 0,
   }
   let cursor: string | null = null
 
@@ -250,6 +446,12 @@ export async function reconcileAwaitingRenewalCycles(
       result.scanned += 1
 
       try {
+        if (await endCycleOfCancelledSubscription(container, cycle)) {
+          result.ended_cancelled += 1
+
+          continue
+        }
+
         const outcome = await settleAwaitingRenewalCycle(container, cycle.id)
 
         result[outcome] += 1
@@ -279,6 +481,7 @@ export async function reconcileAwaitingRenewalCycles(
   }
 
   await alertOverdueProcessingCycles(container, alertInput, result)
+  await reconcileAttemptsOfClosedCycles(container, alertInput, result)
 
   return result
 }
@@ -297,7 +500,7 @@ export default async function reconcileAwaitingRenewalCyclesJob(
         const result = await reconcileAwaitingRenewalCycles(container)
 
         logger.info(
-          `[${JOB_NAME}] scanned ${result.scanned} awaiting renewal cycle(s), settled ${result.settled}, closed without moving dates ${result.closed_superseded}, still unpaid ${result.order_unpaid} (overdue ${result.overdue}), submitted charges overdue while processing ${result.processing_overdue}, terminal subscription ${result.subscription_terminal}, no longer awaiting ${result.not_awaiting}, failed ${result.failed} in ${Date.now() - startedAt}ms`
+          `[${JOB_NAME}] scanned ${result.scanned} awaiting renewal cycle(s), settled ${result.settled}, closed without moving dates ${result.closed_superseded}, still unpaid ${result.order_unpaid} (overdue ${result.overdue}), submitted charges overdue while processing ${result.processing_overdue}, terminal subscription ${result.subscription_terminal}, ended for a cancelled subscription ${result.ended_cancelled}, late captures redelivered ${result.late_captures}, stale attempts closed ${result.stale_attempts_closed}, no longer awaiting ${result.not_awaiting}, failed ${result.failed} in ${Date.now() - startedAt}ms`
         )
       },
       {

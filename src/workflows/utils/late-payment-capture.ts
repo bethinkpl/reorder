@@ -36,6 +36,8 @@ const LOCK_HOLD_SECONDS = 120
 
 export const CAPTURED_AFTER_CLOSE_ERROR_CODE = "captured_after_close"
 
+export const NO_PAYMENT_SIGNAL_ERROR_CODE = "no_payment_signal"
+
 /** Where an attempt records the capture it has been reconciled with, so a redelivery does nothing. */
 const LATE_CAPTURE_METADATA_KEY = "late_payment_captured"
 
@@ -116,6 +118,18 @@ export function readTrackedCharge(
   }
 
   return null
+}
+
+/** The captured payment of a session, which a lost `payment.captured` never reported. */
+export async function findCapturedPaymentId(
+  container: MedusaContainer,
+  sessionId: string
+): Promise<string | null> {
+  const payments = await container
+    .resolve<IPaymentModuleService>(Modules.PAYMENT)
+    .listPayments({ payment_session_id: sessionId })
+
+  return payments.find((payment) => payment.captured_at)?.id ?? null
 }
 
 function readMarker(attempt: AttemptRecord | null): LateCaptureMarker | null {

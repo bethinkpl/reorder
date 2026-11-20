@@ -7,7 +7,7 @@ import processRenewalCyclesJob from "../../src/jobs/process-renewal-cycles"
 import { reconcileAwaitingRenewalCycles } from "../../src/jobs/reconcile-awaiting-renewal-cycles"
 import { ACTIVITY_LOG_MODULE } from "../../src/modules/activity-log"
 import type ActivityLogModuleService from "../../src/modules/activity-log/service"
-import { ActivityLogEventType } from "../../src/modules/activity-log/types"
+import { ActivityLogActorType, ActivityLogEventType } from "../../src/modules/activity-log/types"
 import { CANCELLATION_MODULE } from "../../src/modules/cancellation"
 import type CancellationModuleService from "../../src/modules/cancellation/service"
 import { CancellationCaseStatus } from "../../src/modules/cancellation/types"
@@ -52,7 +52,10 @@ import {
 } from "../helpers/renewal-fixtures"
 import { atTime, watchEvents, watchLogs } from "../helpers/spy-fixtures"
 import { createStoreCustomerHeaders } from "../helpers/subscription-fixtures"
-import { CAPTURED_AFTER_CLOSE_ERROR_CODE } from "../../src/workflows/utils/late-payment-capture"
+import {
+  CAPTURED_AFTER_CLOSE_ERROR_CODE,
+  NO_PAYMENT_SIGNAL_ERROR_CODE,
+} from "../../src/workflows/utils/late-payment-capture"
 
 jest.setTimeout(120 * 1000)
 
@@ -507,6 +510,96 @@ medusaIntegrationTestRunner({
           expect(await readRenewalState(container, seeded)).toEqual(before)
         }
       )
+    })
+
+    describe("the awaiting-payment sweep after a cancellation", () => {
+      it("ends an awaiting cycle a failed cancellation left on a cancelled subscription, instead of reporting it", async () => {
+        const container = getContainer()
+        const seeded = await seedAwaitingRenewal(container, {
+          reference: "SUB-AWL-SWEEP-CANCELLED",
+          subscription_status: SubscriptionStatus.CANCELLED,
+        })
+        const entries = watchLogs(container)
+
+        const result = await reconcileAwaitingRenewalCycles(container)
+        const state = await readRenewalState(container, seeded)
+
+        expect(result).toMatchObject({ ended_cancelled: 1, order_unpaid: 0, subscription_terminal: 0, failed: 0 })
+        expect(state.cycle).toMatchObject({
+          status: RenewalCycleStatus.FAILED,
+          last_error: expect.stringMatching(/cancel/i),
+        })
+        expect(state.attempts).toEqual([
+          expect.objectContaining({ id: seeded.attempt.id, status: RenewalAttemptStatus.PROCESSING }),
+        ])
+        expect(state.failedLogs).toEqual([expect.objectContaining({ actor_type: ActivityLogActorType.SYSTEM })])
+        expect(state.cases).toHaveLength(0)
+        expect(entries({ event: AWAITING_PAYMENT_OVERDUE_EVENT })).toHaveLength(0)
+      })
+
+      it("fails a charge left in flight on a closed cycle once it is past the minimum age with no signal, and leaves a younger one alone", async () => {
+        const container = getContainer()
+        const seeded = await seedAwaitingRenewal(container, { reference: "SUB-AWL-SWEEP-STALE" })
+
+        await cancelSubscriptionWorkflow(container).run({ input: { id: seeded.subscription.id } })
+
+        const submittedAt = new Date(seeded.attempt.started_at).getTime()
+        const entries = watchLogs(container)
+        const sweep = (offsetMs: number) =>
+          atTime(submittedAt + offsetMs, () => reconcileAwaitingRenewalCycles(getContainer()))
+
+        expect(await sweep((DEFAULT_AWAITING_PAYMENT_ALERT_HOURS - 1) * HOUR_MS)).toMatchObject({
+          stale_attempts_closed: 0,
+          late_captures: 0,
+        })
+        expect((await readRenewalState(container, seeded)).attempts).toEqual([
+          expect.objectContaining({ status: RenewalAttemptStatus.PROCESSING }),
+        ])
+
+        expect(await sweep((DEFAULT_AWAITING_PAYMENT_ALERT_HOURS + 1) * HOUR_MS)).toMatchObject({
+          stale_attempts_closed: 1,
+        })
+        expect(await sweep((DEFAULT_AWAITING_PAYMENT_ALERT_HOURS + 2) * HOUR_MS)).toMatchObject({
+          stale_attempts_closed: 0,
+        })
+
+        expect((await readRenewalState(container, seeded)).attempts).toEqual([
+          expect.objectContaining({
+            status: RenewalAttemptStatus.FAILED,
+            error_code: NO_PAYMENT_SIGNAL_ERROR_CODE,
+          }),
+        ])
+        expect(entries({ event: "renewal.stale_attempt_closed" })).toEqual([
+          expect.objectContaining({ renewal_cycle_id: seeded.cycle.id, alertable: false }),
+        ])
+        expect(emitted(SubscriptionEvents.LATE_PAYMENT_CAPTURED)).toHaveLength(0)
+      })
+
+      it("delivers again the lost capture of a charge left in flight on a closed cycle, reporting it once for a refund", async () => {
+        const container = getContainer()
+        const seeded = await seedAwaitingRenewal(container, { reference: "SUB-AWL-SWEEP-CAPTURED" })
+
+        await cancelSubscriptionWorkflow(container).run({ input: { id: seeded.subscription.id } })
+
+        const payment = await captureOnOrder(container, seeded.order.id, seeded.session.id)
+
+        expect(await reconcileAwaitingRenewalCycles(container)).toMatchObject({ late_captures: 1 })
+        expect(await reconcileAwaitingRenewalCycles(container)).toMatchObject({ late_captures: 0 })
+
+        expect((await readRenewalState(container, seeded)).attempts).toEqual([
+          expect.objectContaining({
+            status: RenewalAttemptStatus.SUCCEEDED,
+            error_code: CAPTURED_AFTER_CLOSE_ERROR_CODE,
+          }),
+        ])
+        expect(emitted(SubscriptionEvents.LATE_PAYMENT_CAPTURED).map((message) => message.data)).toEqual([
+          expect.objectContaining({
+            payment_id: payment.id,
+            renewal_cycle_id: seeded.cycle.id,
+            reason: LatePaymentCapturedReason.SUBSCRIPTION_TERMINAL,
+          }),
+        ])
+      })
     })
 
     describe("awaiting cycles older than the alert limit", () => {

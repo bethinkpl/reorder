@@ -19,6 +19,10 @@ import {
   readRenewalSessionMarkers,
   type RenewalSessionSignal,
 } from "../workflows/utils/renewal-session-marker"
+import {
+  readTrackedCharge,
+  reconcileTrackedCapture,
+} from "../workflows/utils/late-payment-capture"
 import { settleAwaitingRenewalCycle } from "../workflows/utils/settle-awaiting-renewal-cycle"
 
 type PaymentRecord = {
@@ -201,6 +205,19 @@ export async function activateSubscriptionOnPaymentCaptured(
   }
 
   const subscriptionModule = container.resolve<SubscriptionModuleService>(SUBSCRIPTION_MODULE)
+  const charge = readTrackedCharge(payment.payment_session)
+  const reconcileCharge = async (keptForChurnReversal: boolean) => {
+    if (charge) {
+      await reconcileTrackedCapture(container, {
+        charge,
+        payment_id: paymentId,
+        payment_collection_id: paymentCollectionId,
+        subscription_id: subscription.id,
+        order_id: orderId ?? null,
+        kept_for_churn_reversal: keptForChurnReversal,
+      })
+    }
+  }
 
   if (subscription.status === SubscriptionStatus.PENDING_PAYMENT) {
     await subscriptionModule.updateSubscriptions({
@@ -216,29 +233,30 @@ export async function activateSubscriptionOnPaymentCaptured(
   if (TERMINAL_SUBSCRIPTION_STATUSES.includes(subscription.status)) {
     // An involuntary churn the customer has just paid off: the case on that order names the
     // remedy (`reverseInvoluntaryChurnWorkflow`), which the generic line below cannot.
-    if (
-      subscription.status === SubscriptionStatus.PAYMENT_FAILED &&
-      orderId &&
-      (await runDunningRecovery(container, {
-        order_id: orderId,
-        subscription_id: subscription.id,
-        payment_id: paymentId,
-        include_unrecovered: true,
-      }))
-    ) {
-      return
+    const churnPaidOff =
+      subscription.status === SubscriptionStatus.PAYMENT_FAILED && orderId
+        ? await runDunningRecovery(container, {
+            order_id: orderId,
+            subscription_id: subscription.id,
+            payment_id: paymentId,
+            include_unrecovered: true,
+          })
+        : false
+
+    if (!churnPaidOff) {
+      container.resolve("logger").error(
+        JSON.stringify({
+          domain: "subscriptions",
+          event: "payment_captured_on_terminal_subscription",
+          subscription_id: subscription.id,
+          payment_id: paymentId,
+          status: subscription.status,
+          alertable: true,
+        })
+      )
     }
 
-    container.resolve("logger").error(
-      JSON.stringify({
-        domain: "subscriptions",
-        event: "payment_captured_on_terminal_subscription",
-        subscription_id: subscription.id,
-        payment_id: paymentId,
-        status: subscription.status,
-        alertable: true,
-      })
-    )
+    await reconcileCharge(churnPaidOff)
 
     return
   }
@@ -261,13 +279,13 @@ export async function activateSubscriptionOnPaymentCaptured(
   // has to land on the subscription even if closing the dunning case throws.
   await refreshSubscriptionPaymentContext(container, subscription)
 
-  if (!orderId) {
-    return
+  if (orderId) {
+    await runDunningRecovery(container, {
+      order_id: orderId,
+      subscription_id: subscription.id,
+      payment_id: paymentId,
+    })
   }
 
-  await runDunningRecovery(container, {
-    order_id: orderId,
-    subscription_id: subscription.id,
-    payment_id: paymentId,
-  })
+  await reconcileCharge(false)
 }

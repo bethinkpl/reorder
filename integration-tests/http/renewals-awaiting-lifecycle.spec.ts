@@ -22,6 +22,10 @@ import {
   DEFAULT_AWAITING_PAYMENT_ALERT_HOURS,
 } from "../../src/modules/renewal/utils/awaiting-payment-age"
 import { renewalErrors } from "../../src/modules/renewal/utils/errors"
+import {
+  LatePaymentCapturedReason,
+  SubscriptionEvents,
+} from "../../src/modules/subscription/events"
 import { SubscriptionStatus } from "../../src/modules/subscription/types"
 import {
   cancelSubscriptionByCustomerWorkflow,
@@ -38,7 +42,7 @@ import {
 } from "../helpers/awaiting-renewal-fixtures"
 import { createCancellationCaseSeed } from "../helpers/cancellation-fixtures"
 import { createDunningCaseSeed } from "../helpers/dunning-fixtures"
-import { captureOnOrder, deliverCapture } from "../helpers/payment-fixtures"
+import { captureOnOrder, deliverCapture, deliverFailure } from "../helpers/payment-fixtures"
 import { answerAuthorizationWithNull, createRenewalChargeStub } from "../helpers/renewal-charge-fixtures"
 import {
   createAdminAuthHeaders,
@@ -48,6 +52,7 @@ import {
 } from "../helpers/renewal-fixtures"
 import { atTime, watchEvents, watchLogs } from "../helpers/spy-fixtures"
 import { createStoreCustomerHeaders } from "../helpers/subscription-fixtures"
+import { CAPTURED_AFTER_CLOSE_ERROR_CODE } from "../../src/workflows/utils/late-payment-capture"
 
 jest.setTimeout(120 * 1000)
 
@@ -190,7 +195,7 @@ medusaIntegrationTestRunner({
         { name: "cancellation", finalize: false },
         { name: "finalised cancellation", finalize: true },
       ])(
-        "refuses an admin $name with a conflict and writes nothing while a renewal holds the lock, then ends the cycle and attempt without dunning and ignores a capture that arrives afterwards",
+        "refuses an admin $name with a conflict and writes nothing while a renewal holds the lock, then ends the cycle without dunning, keeps its charge in flight, and reports a capture that arrives afterwards once for a refund",
         async ({ finalize }) => {
           const container = getContainer()
           const headers = await createAdminAuthHeaders(container)
@@ -224,7 +229,7 @@ medusaIntegrationTestRunner({
               generated_order_id: seeded.order.id,
             },
             attempts: [
-              { id: seeded.attempt.id, status: RenewalAttemptStatus.FAILED, finished_at: expect.any(Date) },
+              { id: seeded.attempt.id, status: RenewalAttemptStatus.PROCESSING, finished_at: null },
             ],
           })
           expect(cancelled.failedLogs).toHaveLength(1)
@@ -233,11 +238,77 @@ medusaIntegrationTestRunner({
 
           const payment = await captureOnOrder(container, seeded.order.id, seeded.session.id)
           await deliverCapture(container, payment.id)
+          await deliverCapture(container, payment.id)
 
-          expect(await readRenewalState(container, seeded)).toEqual(cancelled)
+          expect(await readRenewalState(container, seeded)).toEqual({
+            ...cancelled,
+            attempts: [
+              {
+                ...cancelled.attempts[0],
+                status: RenewalAttemptStatus.SUCCEEDED,
+                error_code: CAPTURED_AFTER_CLOSE_ERROR_CODE,
+                error_message: expect.stringContaining(payment.id),
+                finished_at: expect.any(Date),
+                updated_at: expect.any(Date),
+                metadata: {
+                  late_payment_captured: expect.objectContaining({
+                    payment_id: payment.id,
+                    reason: LatePaymentCapturedReason.SUBSCRIPTION_TERMINAL,
+                  }),
+                },
+              },
+            ],
+          })
+          expect(emitted(SubscriptionEvents.LATE_PAYMENT_CAPTURED).map((message) => message.data)).toEqual([
+            {
+              subscription_id: seeded.subscription.id,
+              payment_id: payment.id,
+              order_id: seeded.order.id,
+              payment_collection_id: seeded.session.payment_collection_id,
+              renewal_cycle_id: seeded.cycle.id,
+              reason: LatePaymentCapturedReason.SUBSCRIPTION_TERMINAL,
+            },
+          ])
           expect(emitted(DunningEvents.STARTED)).toHaveLength(0)
         }
       )
+
+      it("closes the in-flight attempt as failed, with no dunning and no event, when the charge of a renewal the customer cancelled fails afterwards", async () => {
+        const container = getContainer()
+        const seeded = await seedAwaitingRenewal(container, { reference: "SUB-AWL-CUSTOMER-LATE-FAIL" })
+
+        await cancelSubscriptionByCustomerWorkflow(container).run({
+          input: { subscription_id: seeded.subscription.id, reason: "moving abroad" },
+        })
+
+        const cancelled = await readRenewalState(container, seeded)
+
+        await deliverFailure(container, seeded.session.id, { reason: "insufficient_funds" })
+        await deliverFailure(container, seeded.session.id, { reason: "insufficient_funds" })
+
+        const after = await readRenewalState(container, seeded)
+
+        expect(cancelled.attempts).toEqual([
+          expect.objectContaining({ id: seeded.attempt.id, status: RenewalAttemptStatus.PROCESSING }),
+        ])
+        expect(after).toEqual({
+          ...cancelled,
+          attempts: [
+            {
+              ...cancelled.attempts[0],
+              status: RenewalAttemptStatus.FAILED,
+              error_code: "insufficient_funds",
+              error_message: expect.stringMatching(/after the renewal had closed/),
+              finished_at: expect.any(Date),
+              updated_at: expect.any(Date),
+            },
+          ],
+        })
+        expect(after.subscription.status).toEqual(SubscriptionStatus.CANCELLED)
+        expect(after.cases).toHaveLength(0)
+        expect(emitted(DunningEvents.STARTED)).toHaveLength(0)
+        expect(emitted(SubscriptionEvents.LATE_PAYMENT_CAPTURED)).toHaveLength(0)
+      })
 
       it.each(STEPS_THEN_FAIL)(
         "the $name workflow restores the awaiting cycle and attempt when a later step fails",

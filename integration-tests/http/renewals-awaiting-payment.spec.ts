@@ -691,7 +691,7 @@ medusaIntegrationTestRunner({
         expect(emitted(DunningEvents.STARTED)).toHaveLength(0)
       })
 
-      it("ignores a failure for a session whose cycle already succeeded, leaving the subscription's processing cycle alone", async () => {
+      it("only closes the in-flight attempt of a cycle that already succeeded when its session fails, leaving the subscription's processing cycle alone", async () => {
         const container = getContainer()
         const settled = await seedAwaitingRenewal(container, {
           reference: "SUB-FAIL-STALE",
@@ -719,7 +719,22 @@ medusaIntegrationTestRunner({
 
         const after = [await readRenewalState(container, settled), await readRenewalState(container, current)]
 
-        expect(after).toEqual(before)
+        expect(after).toEqual([
+          {
+            ...before[0],
+            attempts: [
+              {
+                ...before[0].attempts[0],
+                status: RenewalAttemptStatus.FAILED,
+                error_code: "declined",
+                error_message: expect.stringMatching(/after the renewal had closed/),
+                finished_at: expect.any(Date),
+                updated_at: expect.any(Date),
+              },
+            ],
+          },
+          before[1],
+        ])
         expect(after[1].cycle.status).toEqual(RenewalCycleStatus.PROCESSING)
         expect(after[0].subscription.status).toEqual(SubscriptionStatus.ACTIVE)
         expect(after[0].cases).toHaveLength(0)

@@ -31,6 +31,10 @@ import {
 } from "../../src/modules/renewal/utils/awaiting-payment-age"
 import { SUBSCRIPTION_MODULE } from "../../src/modules/subscription"
 import type SubscriptionModuleService from "../../src/modules/subscription/service"
+import {
+  LatePaymentCapturedReason,
+  SubscriptionEvents,
+} from "../../src/modules/subscription/events"
 import { SubscriptionStatus } from "../../src/modules/subscription/types"
 import {
   cancelSubscriptionWorkflow,
@@ -60,6 +64,7 @@ import {
   deliverFailure,
 } from "../helpers/payment-fixtures"
 import {
+  RENEWAL_AMOUNT,
   answerAuthorizationWithNull,
   createRenewalChargeStub,
   createUnpaidOrder,
@@ -850,6 +855,83 @@ medusaIntegrationTestRunner({
       ).toEqual([
         expect.objectContaining({ outcome: "awaiting_payment", success_count: 0, failure_count: 0 }),
       ])
+    })
+
+    describe("a renewal order paid more than once", () => {
+      it("settles the cycle and reports the renewal charge once as over-payment when the customer paid the order while the charge was in flight", async () => {
+        const container = getContainer()
+        const seeded = await seedAwaitingRenewal(container, { reference: "SUB-OVERPAID-RENEWAL" })
+        const customer = await createPaymentSessionFixture(container, { amount: AWAITING_ORDER_TOTAL })
+        const customerPayment = await captureOnOrder(container, seeded.order.id, customer.session.id, {
+          linkCollection: true,
+        })
+
+        await deliverCapture(container, customerPayment.id)
+
+        const renewalPayment = await captureOnOrder(container, seeded.order.id, seeded.session.id)
+        const emitted = watchEvents(container)
+
+        await deliverCapture(container, renewalPayment.id)
+        await deliverCapture(container, renewalPayment.id)
+
+        const state = await readRenewalState(container, seeded)
+
+        expect(state.cycle.status).toEqual(RenewalCycleStatus.SUCCEEDED)
+        expect(state.attempts).toEqual([
+          expect.objectContaining({ id: seeded.attempt.id, status: RenewalAttemptStatus.SUCCEEDED }),
+        ])
+        expect(emitted(SubscriptionEvents.LATE_PAYMENT_CAPTURED).map((message) => message.data)).toEqual([
+          {
+            subscription_id: seeded.subscription.id,
+            payment_id: renewalPayment.id,
+            order_id: seeded.order.id,
+            payment_collection_id: seeded.session.payment_collection_id,
+            renewal_cycle_id: seeded.cycle.id,
+            reason: LatePaymentCapturedReason.ORDER_OVERPAID,
+          },
+        ])
+      })
+
+      it("reports one of two tracked captures landing together on one order as the surplus, never both", async () => {
+        const container = getContainer()
+        const seeded = await seedDunningCase(container, "SUB-OVERPAID-TWICE-TRACKED")
+        const renewalSession = await createPaymentSessionFixture(container, {
+          amount: RENEWAL_AMOUNT,
+          context: { renewal_cycle_id: seeded.cycle.id },
+        })
+
+        await createRenewalAttemptSeed(container, {
+          renewal_cycle_id: seeded.cycle.id,
+          status: RenewalAttemptStatus.FAILED,
+          error_code: "resolved_unpaid",
+          payment_reference: renewalSession.session.id,
+          order_id: seeded.order.id,
+        })
+
+        const retryPayment = await captureOnOrder(container, seeded.order.id, seeded.attempts[0].session.id)
+        const renewalPayment = await captureOnOrder(container, seeded.order.id, renewalSession.session.id, {
+          linkCollection: true,
+        })
+        const emitted = watchEvents(container)
+        const deliverBoth = () =>
+          Promise.all([deliverCapture(container, retryPayment.id), deliverCapture(container, renewalPayment.id)])
+
+        await deliverBoth()
+        await deliverBoth()
+
+        const reported = emitted(SubscriptionEvents.LATE_PAYMENT_CAPTURED).map((message) => message.data)
+
+        expect(reported).toEqual([
+          expect.objectContaining({
+            subscription_id: seeded.subscription.id,
+            order_id: seeded.order.id,
+            payment_id: expect.stringMatching(new RegExp(`^(${retryPayment.id}|${renewalPayment.id})$`)),
+          }),
+        ])
+        expect((await readDunningState(container, seeded.dunningCase.id)).dunningCase.status).toEqual(
+          DunningCaseStatus.RECOVERED
+        )
+      })
     })
   },
 })

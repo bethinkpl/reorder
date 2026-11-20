@@ -8,6 +8,11 @@ export enum DunningCaseStatus {
   UNRECOVERED = "unrecovered",
 }
 
+export const CLOSED_DUNNING_CASE_STATUSES: readonly DunningCaseStatus[] = [
+  DunningCaseStatus.RECOVERED,
+  DunningCaseStatus.UNRECOVERED,
+]
+
 /** A case in one of these has a retry charge the provider may still settle. */
 export const CHARGE_IN_FLIGHT_DUNNING_CASE_STATUSES: readonly DunningCaseStatus[] = [
   DunningCaseStatus.RETRYING,

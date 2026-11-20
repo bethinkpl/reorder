@@ -7,6 +7,7 @@ import { normalizeActivityLogEvent } from "../../modules/activity-log/utils/norm
 import { RENEWAL_MODULE } from "../../modules/renewal"
 import type RenewalModuleService from "../../modules/renewal/service"
 import {
+  CLOSED_RENEWAL_CYCLE_STATUSES,
   type RenewalAppliedPendingUpdateData,
   RenewalAttemptStatus,
   RenewalCycleStatus,
@@ -150,16 +151,88 @@ export async function failAwaitingRenewalCycle(
 
   const cycle = await loadCycle(renewalModule, input.renewal_cycle_id)
 
-  if (!cycle || !LOCK_WORTHY_STATUSES.includes(cycle.status)) {
+  if (!cycle) {
+    return
+  }
+
+  const lockKey = `renewal:subscription:${cycle.subscription_id}`
+  const lockOptions = { wait_seconds: RUN_LOCK_WAIT_SECONDS, hold_seconds: LOCK_HOLD_SECONDS }
+
+  if (CLOSED_RENEWAL_CYCLE_STATUSES.includes(cycle.status)) {
+    await runUnderLock(
+      container,
+      lockKey,
+      () => failAttemptOfClosedCycleUnderLock(container, input),
+      lockOptions
+    )
+
+    return
+  }
+
+  if (!LOCK_WORTHY_STATUSES.includes(cycle.status)) {
     return
   }
 
   await runUnderLock(
     container,
-    `renewal:subscription:${cycle.subscription_id}`,
+    lockKey,
     () => failAwaitingRenewalCycleUnderLock(container, input),
-    { wait_seconds: RUN_LOCK_WAIT_SECONDS, hold_seconds: LOCK_HOLD_SECONDS }
+    lockOptions
   )
+}
+
+/**
+ * The failure of a charge whose cycle was closed while it was in flight (a cancellation ends the
+ * cycle but leaves its attempt processing): closes the attempt only, with no dunning and no event.
+ */
+async function failAttemptOfClosedCycleUnderLock(
+  container: MedusaContainer,
+  input: FailAwaitingRenewalCycleInput
+): Promise<void> {
+  const renewalModule = container.resolve<RenewalModuleService>(RENEWAL_MODULE)
+  const cycle = await loadCycle(renewalModule, input.renewal_cycle_id)
+
+  if (!cycle || !CLOSED_RENEWAL_CYCLE_STATUSES.includes(cycle.status)) {
+    return
+  }
+
+  const attempts = await renewalModule.listRenewalAttempts({
+    renewal_cycle_id: cycle.id,
+    status: RenewalAttemptStatus.PROCESSING,
+  })
+  const attempt = attempts.find((candidate) =>
+    signalNamesAttempt(candidate, {
+      session_id: input.session_id,
+      attempt_id: input.attempt_id,
+    })
+  )
+
+  if (!attempt) {
+    return
+  }
+
+  const message = input.reason
+    ? `Payment provider reported the renewal payment as '${input.action}' (${input.reason}) after the renewal had closed`
+    : `Payment provider reported the renewal payment as '${input.action}' after the renewal had closed`
+
+  await renewalModule.updateRenewalAttempts({
+    id: attempt.id,
+    status: RenewalAttemptStatus.FAILED,
+    finished_at: new Date(),
+    error_code: input.reason ?? input.action,
+    error_message: message,
+  })
+
+  logRenewalEvent(container.resolve("logger"), "info", {
+    event: "renewal.late_payment_failure",
+    outcome: "failed",
+    correlation_id: createRenewalCorrelationId("renewal-late-payment-failure"),
+    renewal_cycle_id: cycle.id,
+    subscription_id: cycle.subscription_id,
+    alertable: false,
+    message,
+    metadata: { attempt_id: attempt.id, payment_session_id: input.session_id },
+  })
 }
 
 export async function failAwaitingRenewalCycleUnderLock(

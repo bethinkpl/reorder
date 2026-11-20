@@ -108,7 +108,9 @@ async function endCycle(
     status: RenewalAttemptStatus.PROCESSING,
   })
 
-  for (const attempt of attempts) {
+  // An attempt that submitted its charge stays processing: the provider may still settle it, and
+  // its late signal finds it through the session it is recorded on.
+  for (const attempt of attempts.filter(({ payment_reference }) => !payment_reference)) {
     entry.attempts.push({
       id: attempt.id,
       status: attempt.status,

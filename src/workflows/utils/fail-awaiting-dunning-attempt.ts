@@ -5,9 +5,14 @@ import { DunningEvents } from "../../modules/dunning/events"
 import type DunningModuleService from "../../modules/dunning/service"
 import {
   CHARGE_IN_FLIGHT_DUNNING_CASE_STATUSES,
+  CLOSED_DUNNING_CASE_STATUSES,
   DunningAttemptStatus,
+  type DunningCaseStatus,
 } from "../../modules/dunning/types"
-import { createDunningCorrelationId } from "../../modules/dunning/utils/observability"
+import {
+  createDunningCorrelationId,
+  logDunningEvent,
+} from "../../modules/dunning/utils/observability"
 import { SUBSCRIPTION_MODULE } from "../../modules/subscription"
 import type SubscriptionModuleService from "../../modules/subscription/service"
 import { emitDunningEvent } from "../steps/emit-dunning-event"
@@ -66,15 +71,70 @@ async function readRetryMarkers(
   return { dunning_case_id: caseId, dunning_attempt_id: attemptId }
 }
 
-async function isWorthWaitingFor(
+async function loadCaseStatus(
   dunningModule: DunningModuleService,
   caseId: string
-) {
+): Promise<DunningCaseStatus | null> {
   const [dunningCase] = await dunningModule.listDunningCases({ id: caseId })
 
-  return Boolean(
-    dunningCase && CHARGE_IN_FLIGHT_DUNNING_CASE_STATUSES.includes(dunningCase.status)
-  )
+  return dunningCase?.status ?? null
+}
+
+/**
+ * The failure of a retry charge whose case was closed while it was in flight (a customer's
+ * cancellation closes the case but leaves its attempt processing): closes the attempt only, with
+ * no reschedule and no event.
+ */
+async function failAttemptOfClosedCaseUnderLock(
+  container: MedusaContainer,
+  input: FailAwaitingDunningAttemptInput & RetryMarkers
+): Promise<void> {
+  const dunningModule = container.resolve<DunningModuleService>(DUNNING_MODULE)
+  const status = await loadCaseStatus(dunningModule, input.dunning_case_id)
+
+  if (!status || !CLOSED_DUNNING_CASE_STATUSES.includes(status)) {
+    return
+  }
+
+  const [attempt] = await dunningModule.listDunningAttempts({
+    id: input.dunning_attempt_id,
+    dunning_case_id: input.dunning_case_id,
+    status: DunningAttemptStatus.PROCESSING,
+  })
+
+  if (
+    !attempt ||
+    (attempt.payment_reference !== null && attempt.payment_reference !== input.session_id)
+  ) {
+    return
+  }
+
+  const outcome = classifyReportedPaymentFailure({
+    action: input.action,
+    reason: input.reason,
+    payment_reference: input.session_id,
+  })
+  const message = `${outcome.error_message} after its dunning case had closed`
+
+  await dunningModule.updateDunningAttempts({
+    id: attempt.id,
+    status: DunningAttemptStatus.FAILED,
+    finished_at: new Date(),
+    error_code: outcome.error_code,
+    error_message: message,
+    payment_reference: input.session_id,
+  })
+
+  logDunningEvent(container.resolve("logger"), "info", {
+    event: "dunning.late_payment_failure",
+    outcome: "failed",
+    correlation_id: createDunningCorrelationId("dunning-late-payment-failure"),
+    dunning_case_id: input.dunning_case_id,
+    attempt_no: attempt.attempt_no,
+    alertable: false,
+    message,
+    metadata: { attempt_id: attempt.id, payment_session_id: input.session_id },
+  })
 }
 
 export async function failAwaitingDunningAttempt(
@@ -88,20 +148,34 @@ export async function failAwaitingDunningAttempt(
   }
 
   const dunningModule = container.resolve<DunningModuleService>(DUNNING_MODULE)
+  const status = await loadCaseStatus(dunningModule, markers.dunning_case_id)
+  const lockKey = `dunning:${markers.dunning_case_id}`
+  const lockOptions = { wait_seconds: RUN_LOCK_WAIT_SECONDS, hold_seconds: LOCK_HOLD_SECONDS }
 
-  if (!(await isWorthWaitingFor(dunningModule, markers.dunning_case_id))) {
+  if (status && CLOSED_DUNNING_CASE_STATUSES.includes(status)) {
+    await runUnderLock(
+      container,
+      lockKey,
+      () => failAttemptOfClosedCaseUnderLock(container, { ...input, ...markers }),
+      lockOptions
+    )
+
+    return
+  }
+
+  if (!status || !CHARGE_IN_FLIGHT_DUNNING_CASE_STATUSES.includes(status)) {
     return
   }
 
   const output = await runUnderLock(
     container,
-    `dunning:${markers.dunning_case_id}`,
+    lockKey,
     () =>
       failAwaitingDunningAttemptUnderLock(container, {
         ...input,
         ...markers,
       }),
-    { wait_seconds: RUN_LOCK_WAIT_SECONDS, hold_seconds: LOCK_HOLD_SECONDS }
+    lockOptions
   )
 
   if (output) {

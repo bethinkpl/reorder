@@ -6,3 +6,10 @@ export const SUBSCRIPTION_MODULE = "subscription"
 export default Module(SUBSCRIPTION_MODULE, {
   service: SubscriptionModuleService,
 })
+
+export {
+  LatePaymentCapturedReason,
+  type LatePaymentCapturedEventData,
+  SubscriptionEvents,
+  type SubscriptionEventName,
+} from "./events"

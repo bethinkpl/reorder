@@ -8,6 +8,12 @@ export enum RenewalCycleStatus {
   AWAITING_PAYMENT = "awaiting_payment",
 }
 
+/** A cycle in one of these no longer waits on a charge it submitted. */
+export const CLOSED_RENEWAL_CYCLE_STATUSES: readonly RenewalCycleStatus[] = [
+  RenewalCycleStatus.SUCCEEDED,
+  RenewalCycleStatus.FAILED,
+]
+
 export enum RenewalAttemptStatus {
   PROCESSING = "processing",
   SUCCEEDED = "succeeded",

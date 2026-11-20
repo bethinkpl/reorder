@@ -26,7 +26,8 @@ const MAPPERS = [
     notFound: renewalErrors.notFound("RenewalCycle", "re_missing"),
     invalidData: renewalErrors.invalidData("Source cart 'cart_1' is missing 'region_id'"),
     conflict: renewalErrors.conflict("Renewal 're_1' is unpaid, but its payment may still arrive"),
-    busyLockMessage: "Timed-out acquiring lock.",
+    busyLockMessage:
+      "This renewal's subscription is being updated by a renewal run or a payment right now; try again in a moment",
   },
   {
     name: "mapCancellationAdminRouteError",

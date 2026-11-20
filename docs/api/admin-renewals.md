@@ -476,9 +476,10 @@ This means the payloads already include:
 
 Mutation routes answer a domain error with its own message and a status taken from its `MedusaError` type, also
 when a workflow run rethrows it as a plain object: `not_found` is `404`, `invalid_data` is `400`, `conflict` and
-`not_allowed` are `409` (so is a payment the provider refused during a forced run), any other type is `500`. An
-error without a `MedusaError` type, such as a lock held by another run, is `404` when its message reports something
-not found and `409` otherwise (`src/api/route-errors.ts`).
+`not_allowed` are `409` (so is a payment the provider refused during a forced run), any other type is `500`. A
+renewal lock another run holds answers `409` with a readable "being updated" message. Any other error without a
+`MedusaError` type is `404` when its message reports something not found and `409` otherwise
+(`src/api/route-errors.ts`).
 
 ### Operational Notes
 

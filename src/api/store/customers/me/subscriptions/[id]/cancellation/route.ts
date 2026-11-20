@@ -22,26 +22,37 @@ function getNestedMessage(value: unknown): string | null {
     return value
   }
 
-  if (value instanceof Error) {
-    const causeMessage = getNestedMessage(
-      (value as Error & { cause?: unknown }).cause
-    )
+  if (typeof value === "object") {
+    const { message, cause } = value as { message?: unknown, cause?: unknown }
 
-    return value.message || causeMessage || null
+    return (typeof message === "string" && message) || getNestedMessage(cause)
+  }
+
+  return null
+}
+
+/** A workflow rethrows its step's error as a serialised plain object, which keeps the flag. */
+function findMedusaError(error: unknown): Pick<MedusaError, "type" | "message"> | null {
+  const cause =
+    typeof error === "object" && error !== null
+      ? (error as { cause?: unknown }).cause
+      : null
+
+  for (const candidate of [error, cause]) {
+    if (
+      typeof candidate === "object" &&
+      candidate !== null &&
+      MedusaError.isMedusaError(candidate)
+    ) {
+      return candidate as Pick<MedusaError, "type" | "message">
+    }
   }
 
   return null
 }
 
 export function mapStoreCancellationError(error: unknown) {
-  const errorCause =
-    error instanceof Error ? (error as Error & { cause?: unknown }).cause : null
-  const medusaError =
-    error instanceof MedusaError
-      ? error
-      : errorCause instanceof MedusaError
-        ? errorCause
-        : null
+  const medusaError = findMedusaError(error)
 
   if (medusaError) {
     const typeToStatus: Record<string, number> = {

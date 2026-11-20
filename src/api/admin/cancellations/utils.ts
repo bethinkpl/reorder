@@ -6,6 +6,7 @@ import {
   listAdminCancellationCases,
   type ListAdminCancellationCasesInput,
 } from "../../../modules/cancellation/utils/admin-query"
+import { isLockAcquisitionFailure } from "../../../modules/subscription/utils/errors"
 
 export function normalizeAdminCancellationsListQuery(
   query: GetAdminCancellationsSchemaType
@@ -96,6 +97,15 @@ function getNestedMessage(value: unknown): string | null {
 }
 
 export function mapCancellationAdminRouteError(error: unknown) {
+  if (isLockAcquisitionFailure(error)) {
+    return {
+      status: 409,
+      type: MedusaError.Types.CONFLICT,
+      message:
+        "The subscription is being updated by a renewal or a payment right now; try again in a moment",
+    }
+  }
+
   const errorCause =
     error instanceof Error ? (error as Error & { cause?: unknown }).cause : null
   const medusaError =

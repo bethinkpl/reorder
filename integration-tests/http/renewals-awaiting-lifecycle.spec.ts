@@ -47,6 +47,7 @@ import {
   createSubscriptionSeed,
 } from "../helpers/renewal-fixtures"
 import { atTime, watchEvents, watchLogs } from "../helpers/spy-fixtures"
+import { createStoreCustomerHeaders } from "../helpers/subscription-fixtures"
 
 jest.setTimeout(120 * 1000)
 
@@ -205,7 +206,10 @@ medusaIntegrationTestRunner({
             response?: unknown
           }
 
-          expect(refusal.response).toMatchObject({ status: 409, data: { type: "conflict" } })
+          expect(refusal.response).toMatchObject({
+            status: 409,
+            data: { type: "conflict", message: expect.stringMatching(/being updated by a renewal or a payment/) },
+          })
           expect(await readRenewalState(container, seeded)).toEqual(before)
 
           const response = await cancel()
@@ -281,6 +285,29 @@ medusaIntegrationTestRunner({
         expect(afterCancel.cycle).toEqual(before.cycle)
         expect(afterCancel.attempts).toEqual(before.attempts)
         expect(afterCancel.failedLogs).toHaveLength(0)
+      })
+
+      it("answers a customer's cancellation with a readable conflict while a renewal holds the lock, writing nothing", async () => {
+        const container = getContainer()
+        const seeded = await seedAwaitingRenewal(container, { reference: "SUB-AWL-STORE-LOCKED" })
+        const headers = await createStoreCustomerHeaders(container, seeded.subscription.customer_id)
+        const before = await readRenewalState(container, seeded)
+
+        const refusal = await whileRenewalLockHeld(container, seeded.subscription.id, () =>
+          api
+            .post(
+              `/store/customers/me/subscriptions/${seeded.subscription.id}/cancellation`,
+              { reason: "too expensive" },
+              { headers }
+            )
+            .catch((error: { response?: unknown }) => error.response)
+        )
+
+        expect(refusal).toMatchObject({
+          status: 409,
+          data: { type: "conflict", message: expect.stringMatching(/already being updated/) },
+        })
+        expect(await readRenewalState(container, seeded)).toEqual(before)
       })
 
       describe("when a write inside the cancellation fails", () => {

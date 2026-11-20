@@ -77,6 +77,29 @@ describe("mapStoreCancellationError", () => {
     expect(mapped.type).toEqual(MedusaError.Types.CONFLICT)
   })
 
+  it.each([
+    {
+      name: "an in-flight retry",
+      error: {
+        __isMedusaError: true,
+        type: MedusaError.Types.CONFLICT,
+        message: "DunningCase 'dc_123' can't be closed for subscription cancellation while retry is in flight",
+      },
+      message: /payment recovery/,
+    },
+    {
+      name: "a lock acquisition failure",
+      error: { name: "Error", message: "Failed to acquire lock for key \"renewal:subscription:sub_123\"" },
+      message: /already being updated/,
+    },
+  ])("reads $name that a workflow rethrew as a serialised plain object", ({ error, message }) => {
+    const mapped = mapStoreCancellationError(error)
+
+    expect(mapped.status).toEqual(409)
+    expect(mapped.type).toEqual(MedusaError.Types.CONFLICT)
+    expect(mapped.message).toMatch(message)
+  })
+
   it("falls back to a generic failure for an unrecognised error", () => {
     const mapped = mapStoreCancellationError(new Error("kaboom"))
 

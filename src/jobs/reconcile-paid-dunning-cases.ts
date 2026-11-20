@@ -36,11 +36,13 @@ import {
   findCapturedPaymentId,
   NO_PAYMENT_SIGNAL_ERROR_CODE,
 } from "../workflows/utils/late-payment-capture"
+import { tryUnderLock } from "../workflows/utils/run-under-lock"
 
 const JOB_NAME = "reconcile-paid-dunning-cases"
 const JOB_LOCK_KEY = "jobs:reconcile-paid-dunning-cases"
 const BATCH_SIZE = 200
 const ALERT_LOCK_TIMEOUT_SECONDS = 5
+const CASE_LOCK_HOLD_SECONDS = 120
 /** Well past the 120 s a retry run holds its case's lock, so a run still in progress is never touched. */
 const STALE_RETRY_MINUTES = 10
 
@@ -279,6 +281,20 @@ async function failStaleAttemptUnderLock(
   return true
 }
 
+/** Answers `null` when another holder keeps the case's lock: the next run tries again. */
+async function underCaseLock<T>(
+  container: MedusaContainer,
+  caseId: string,
+  job: () => Promise<T | null>
+): Promise<T | null> {
+  const run = await tryUnderLock(container, `dunning:${caseId}`, job, {
+    wait_seconds: ALERT_LOCK_TIMEOUT_SECONDS,
+    hold_seconds: CASE_LOCK_HOLD_SECONDS,
+  })
+
+  return run.acquired ? run.result : null
+}
+
 type StaleRetryOutcome =
   | { kind: "reparked" }
   | {
@@ -422,10 +438,10 @@ async function settleStaleRetries(
           continue
         }
 
-        const outcome = await container.resolve(Modules.LOCKING).execute(
-          `dunning:${dunningCase.id}`,
-          () => settleStaleRetryUnderLock(container, dunningCase.id, input),
-          { timeout: ALERT_LOCK_TIMEOUT_SECONDS }
+        const outcome = await underCaseLock(
+          container,
+          dunningCase.id,
+          () => settleStaleRetryUnderLock(container, dunningCase.id, input)
         )
 
         if (outcome?.kind === "reparked") {
@@ -447,10 +463,6 @@ async function settleStaleRetries(
           })
         }
       } catch (error) {
-        if (isLockBusyError(error)) {
-          continue
-        }
-
         result.failed += 1
         reportCaseFailure(container, dunningCase, error)
       }
@@ -487,10 +499,10 @@ async function applyRecordedPaymentFailures(
 
     for (const attempt of attempts) {
       try {
-        const applied = await container.resolve(Modules.LOCKING).execute(
-          `dunning:${attempt.dunning_case_id}`,
-          () => applyRecordedDunningPaymentFailureUnderLock(container, attempt.id),
-          { timeout: ALERT_LOCK_TIMEOUT_SECONDS }
+        const applied = await underCaseLock(
+          container,
+          attempt.dunning_case_id,
+          () => applyRecordedDunningPaymentFailureUnderLock(container, attempt.id)
         )
 
         if (!applied) {
@@ -520,10 +532,6 @@ async function applyRecordedPaymentFailures(
           metadata: { attempt_id: attempt.id },
         })
       } catch (error) {
-        if (isLockBusyError(error)) {
-          continue
-        }
-
         result.failed += 1
         reportCaseFailure(
           container,

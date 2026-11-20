@@ -27,6 +27,7 @@ import { SubscriptionStatus } from "../modules/subscription/types"
 import { activateSubscriptionOnPaymentCaptured } from "../subscribers/activate-subscription-on-payment-captured"
 import { loadOrderAmounts } from "../workflows/steps/run-dunning-retry"
 import { endAwaitingRenewalCyclesOnCancellation } from "../workflows/utils/end-awaiting-renewal-cycle-on-cancellation"
+import { tryUnderLock } from "../workflows/utils/run-under-lock"
 import { applyRecordedRenewalPaymentFailureUnderLock } from "../workflows/utils/fail-awaiting-renewal-cycle"
 import {
   findCapturedPaymentId,
@@ -44,6 +45,7 @@ const JOB_LOCK_KEY = "jobs:reconcile-awaiting-renewal-cycles"
 const BATCH_SIZE = 200
 const ALERT_LOCK_TIMEOUT_SECONDS = 5
 const RENEWAL_LOCK_TIMEOUT_SECONDS = 5
+const RENEWAL_LOCK_HOLD_SECONDS = 120
 /** Well past the 120 s a renewal run holds its lock, so a run still in progress is never touched. */
 const STALE_PROCESSING_MINUTES = 10
 
@@ -190,19 +192,12 @@ async function underRenewalLock<T>(
   job: () => Promise<T>,
   whenBusy: T
 ): Promise<T> {
-  try {
-    return await container
-      .resolve(Modules.LOCKING)
-      .execute(`renewal:subscription:${subscriptionId}`, job, {
-        timeout: RENEWAL_LOCK_TIMEOUT_SECONDS,
-      })
-  } catch (error) {
-    if (isLockBusyError(error)) {
-      return whenBusy
-    }
+  const run = await tryUnderLock(container, `renewal:subscription:${subscriptionId}`, job, {
+    wait_seconds: RENEWAL_LOCK_TIMEOUT_SECONDS,
+    hold_seconds: RENEWAL_LOCK_HOLD_SECONDS,
+  })
 
-    throw error
-  }
+  return run.acquired ? run.result : whenBusy
 }
 
 /**

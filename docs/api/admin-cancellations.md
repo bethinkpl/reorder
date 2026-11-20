@@ -361,6 +361,11 @@ Shape:
   Case is terminal or cannot accept a new offer.
 - `409 offer_out_of_policy`
   Offer payload violates retention policy rules.
+- `409 conflict`
+  A `pause_offer` while a renewal charge is waiting for the payment provider's answer (see
+  `POST /admin/subscriptions/:id/pause`); nothing is recorded. Other offers are not affected.
+- `409 conflict`
+  A renewal run or a payment holds the subscription's `renewal:subscription:<id>` lock; try again in a moment.
 
 ## 4. Finalize Cancellation
 

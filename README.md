@@ -24,6 +24,7 @@ Customized fork of [@reorder/reorderjs](https://github.com/reorder-js/reorder).
 - a failed renewal cycle is no longer re-run daily while its subscription has an active dunning case; dunning alone retries the charge
 - cancellation workflows take the `renewal:subscription:<id>` lock themselves (a host app must not hold it when calling them) and end a renewal cycle that is awaiting its payment
 - renewal payment sessions carry `context.renewal_attempt_id` next to `renewal_cycle_id`
+- pausing (admin, storefront, or a retention `pause_offer`) and resuming a subscription are refused with a `409` while a renewal charge or a dunning retry charge waits for the payment provider's answer (the storefront answer carries `code: "renewal_payment_in_progress"`), so a late settlement can no longer move the billing dates of a paused subscription or overlap a charge with the cycle a resume creates. `pauseSubscriptionWorkflow`, `resumeSubscriptionWorkflow` and `applyRetentionOfferWorkflow` take the `renewal:subscription:<id>` lock themselves (a host app must not hold it when calling them)
 - a renewal settled after its run (a charge the provider confirms later, a dunning recovery) clears `pending_update_data` only while it is still the plan change the cycle applied, so a plan change scheduled in the meantime stays pending; a cycle whose charge awaited the provider also keeps a delivery skip (`skip_next_cycle`) requested in the meantime
 - workflow compensations no longer restore `payment_context`, so a payment method saved in the meantime is kept
 ### QoL

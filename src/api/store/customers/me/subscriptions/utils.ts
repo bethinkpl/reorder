@@ -18,6 +18,11 @@ import {
 } from "../../../../../modules/subscription/types"
 import { getEffectiveNextRenewalAt } from "../../../../../modules/subscription/utils/effective-next-renewal"
 import {
+  isLockAcquisitionFailure,
+  isRenewalPaymentInProgress,
+  RENEWAL_PAYMENT_IN_PROGRESS,
+} from "../../../../../modules/subscription/utils/errors"
+import {
   computeSubscriptionDiscountAmount,
   roundCurrency,
 } from "../../../../../workflows/utils/subscription-discount"
@@ -947,4 +952,30 @@ export async function getStoreProductSubscriptionOfferResponse(
 
 export function sendStoreJson(res: MedusaResponse, body: unknown, status = 200) {
   return res.status(status).json(body)
+}
+
+/**
+ * The refusals of a pause or resume the storefront can act on. Medusa's error handler would answer
+ * both with its generic conflict text (and an unexpected error for the lock), so the routes answer
+ * them in the shape of its 409 instead.
+ */
+export function mapStoreSubscriptionChangeConflict(error: unknown) {
+  if (isRenewalPaymentInProgress(error)) {
+    return {
+      type: MedusaError.Types.CONFLICT,
+      code: RENEWAL_PAYMENT_IN_PROGRESS,
+      message:
+        "A payment for this subscription is being processed. Please try again once it has completed.",
+    }
+  }
+
+  if (isLockAcquisitionFailure(error)) {
+    return {
+      type: MedusaError.Types.CONFLICT,
+      message:
+        "This subscription is already being updated. Please try again in a moment.",
+    }
+  }
+
+  return null
 }

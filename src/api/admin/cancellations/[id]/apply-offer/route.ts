@@ -2,12 +2,14 @@ import type {
   AuthenticatedMedusaRequest,
   MedusaResponse,
 } from "@medusajs/framework/http"
+import { MedusaError } from "@medusajs/framework/utils"
 import type { PostAdminApplyRetentionOfferSchemaType } from "../../validators"
 import {
   getAdminCancellationDetailResponse,
   mapCancellationAdminRouteError,
 } from "../../utils"
 import { applyRetentionOfferWorkflow } from "../../../../../workflows"
+import { isLockAcquisitionFailure } from "../../../../../modules/subscription/utils/errors"
 
 export const POST = async (
   req: AuthenticatedMedusaRequest<PostAdminApplyRetentionOfferSchemaType>,
@@ -25,6 +27,13 @@ export const POST = async (
       },
     })
   } catch (error) {
+    if (isLockAcquisitionFailure(error)) {
+      return res.status(409).json({
+        type: MedusaError.Types.CONFLICT,
+        message: `The subscription of cancellation case '${req.params.id}' is being updated by a renewal or a payment right now; try again in a moment`,
+      })
+    }
+
     const mapped = mapCancellationAdminRouteError(error)
 
     return res.status(mapped.status).json({

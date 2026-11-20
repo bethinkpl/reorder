@@ -1,5 +1,8 @@
 import { MedusaError } from "@medusajs/framework/utils"
 
+/** `code` of the refusal to pause or resume while a renewal charge awaits the provider's answer. */
+export const RENEWAL_PAYMENT_IN_PROGRESS = "renewal_payment_in_progress"
+
 export const subscriptionErrors = {
   notFound(entity: string, id: string) {
     return new MedusaError(
@@ -37,6 +40,27 @@ export const subscriptionErrors = {
   conflict(message: string) {
     return new MedusaError(MedusaError.Types.CONFLICT, message)
   },
+  renewalPaymentInProgress(id: string, action: string, charge: string) {
+    return new MedusaError(
+      MedusaError.Types.CONFLICT,
+      `Subscription '${id}' can't ${action} while ${charge}; try again once the payment has been settled or has failed`,
+      RENEWAL_PAYMENT_IN_PROGRESS
+    )
+  },
+}
+
+/** Matches the error itself and the plain object a workflow run rethrows in its place. */
+export function isRenewalPaymentInProgress(
+  error: unknown
+): error is { message: string } {
+  return (
+    typeof error === "object" &&
+    error !== null &&
+    "code" in error &&
+    error.code === RENEWAL_PAYMENT_IN_PROGRESS &&
+    "message" in error &&
+    typeof error.message === "string"
+  )
 }
 
 export function isLockAcquisitionFailure(error: unknown) {

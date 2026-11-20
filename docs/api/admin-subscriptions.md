@@ -347,6 +347,12 @@ Response:
   Subscription does not exist.
 - `409 conflict`
   Subscription cannot be paused from its current state.
+- `409 conflict`
+  A renewal charge is waiting for the payment provider's answer: a renewal cycle is `awaiting_payment`, or
+  `processing` with its attempt still open, or a dunning case is `retrying` or `awaiting_payment`. The message names
+  the renewal or dunning case; the request succeeds again once that payment has been settled or has failed.
+- `409 conflict`
+  A renewal run or a payment holds the subscription's `renewal:subscription:<id>` lock; try again in a moment.
 
 ## 4. Resume Subscription
 
@@ -390,6 +396,12 @@ Response:
   Subscription does not exist.
 - `409 conflict`
   Subscription cannot be resumed from its current state.
+- `409 conflict`
+  A renewal charge is waiting for the payment provider's answer: a renewal cycle is `awaiting_payment`, or
+  `processing` with its attempt still open, or a dunning case is `retrying` or `awaiting_payment`. The message names
+  the renewal or dunning case; the request succeeds again once that payment has been settled or has failed.
+- `409 conflict`
+  A renewal run or a payment holds the subscription's `renewal:subscription:<id>` lock; try again in a moment.
 
 ## 5. Cancel Subscription
 

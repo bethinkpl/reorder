@@ -81,11 +81,12 @@ const offerTypeOptions: Array<{ label: string, value: OfferType }> = [
   { label: "Bonus offer", value: "bonus_offer" },
 ]
 
-const activeDunningStatuses = new Set([
-  "open",
-  "retry_scheduled",
-  "retrying",
-  "awaiting_manual_resolution",
+const activeDunningStatuses = new Set<string>([
+  DunningCaseAdminStatus.OPEN,
+  DunningCaseAdminStatus.RETRY_SCHEDULED,
+  DunningCaseAdminStatus.RETRYING,
+  DunningCaseAdminStatus.AWAITING_PAYMENT,
+  DunningCaseAdminStatus.AWAITING_MANUAL_RESOLUTION,
 ])
 
 const effectiveAtOptions = [

@@ -2,6 +2,7 @@ import { MedusaError, serializeError } from "@medusajs/framework/utils"
 import { mapCancellationAdminRouteError } from "../cancellations/utils"
 import { mapDunningAdminRouteError } from "../dunning/utils"
 import { mapRenewalAdminRouteError } from "../renewals/utils"
+import { mapSubscriptionSettingsAdminRouteError } from "../subscription-settings/utils"
 import { cancellationErrors } from "../../../modules/cancellation/utils/errors"
 import { dunningErrors } from "../../../modules/dunning/utils/errors"
 import { renewalErrors } from "../../../modules/renewal/utils/errors"
@@ -102,5 +103,17 @@ describe.each(MAPPERS)("$name", ({ map, notFound, invalidData, conflict, busyLoc
       status: 409,
       message: "Your card was declined",
     })
+  })
+})
+
+describe("mapSubscriptionSettingsAdminRouteError", () => {
+  it.each([
+    [MedusaError.Types.CONFLICT, "SubscriptionSettings version conflict: expected 0, current 1", 409],
+    [MedusaError.Types.INVALID_DATA, "'max_dunning_attempts' must match the number of 'dunning_retry_intervals'", 400],
+    [MedusaError.Types.NOT_FOUND, "SubscriptionSettings 'global' was not found", 404],
+  ])("answers a %s error the settings workflow rethrew as a plain object by its type, with its own message", (type, message, status) => {
+    expect(
+      mapSubscriptionSettingsAdminRouteError(asWorkflowError(new MedusaError(type, message)))
+    ).toEqual({ status, type, message })
   })
 })

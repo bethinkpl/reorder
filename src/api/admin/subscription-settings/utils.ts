@@ -7,6 +7,7 @@ import {
   type SubscriptionRenewalBehavior,
 } from "../../../modules/settings/types"
 import { updateSubscriptionSettingsWorkflow } from "../../../workflows"
+import { type RouteError, mapMedusaErrorByType } from "../../route-errors"
 
 export type PostAdminSubscriptionSettingsBody = {
   default_trial_days?: number | null
@@ -105,22 +106,14 @@ export async function updateAdminSubscriptionSettingsResponse(
   }
 }
 
-export function mapSubscriptionSettingsAdminRouteError(error: unknown) {
-  if (error instanceof MedusaError) {
-    const typeToStatus: Record<string, number> = {
-      [MedusaError.Types.NOT_FOUND]: 404,
-      [MedusaError.Types.INVALID_DATA]: 400,
-      [MedusaError.Types.CONFLICT]: 409,
-    }
+export function mapSubscriptionSettingsAdminRouteError(error: unknown): RouteError {
+  const message = getNestedSettingsErrorMessage(error)
+  const byType = mapMedusaErrorByType(error, message)
 
-    return {
-      status: typeToStatus[error.type] ?? 500,
-      type: error.type,
-      message: error.message,
-    }
+  if (byType) {
+    return byType
   }
 
-  const message = getNestedSettingsErrorMessage(error)
   const normalized = message.toLowerCase()
 
   if (

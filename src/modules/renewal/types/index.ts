@@ -35,6 +35,8 @@ export type RenewalAppliedPendingUpdateData = {
   frequency_interval: FrequencyInterval
   frequency_value: number
   effective_at: string | null
+  /** The applied request's `requested_at`; absent on cycles written before it was recorded. */
+  requested_at?: string | null
 }
 
 export type RenewalCycleData = RenewalApprovalSummary & {

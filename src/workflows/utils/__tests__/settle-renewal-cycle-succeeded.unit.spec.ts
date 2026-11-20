@@ -38,12 +38,23 @@ const pendingChange = {
   effective_at: null,
 }
 
+const requestedAt = "2026-02-20T09:00:00.000Z"
+const laterRequestedAt = "2026-03-01T18:30:00.000Z"
+
+/** The subscription's own copy of `pendingChange`, as scheduling it wrote it. */
+const scheduledChange = {
+  ...pendingChange,
+  requested_at: requestedAt,
+  requested_by: "cus_1",
+}
+
 const scheduledFor = new Date("2026-03-01T00:00:00.000Z")
 const finishedAt = new Date("2026-03-02T12:00:00.000Z")
 
 type BuildOptions = {
   cycleStatus?: RenewalCycleStatus
-  appliedPendingUpdateData?: typeof pendingChange | null
+  appliedPendingUpdateData?: typeof pendingChange & { requested_at?: string } | null
+  pendingUpdateData?: Record<string, unknown> | null
   attempts?: { id: string, attempt_no: number }[]
   nextRenewalAt?: Date | null
   settlementInputs?: Record<string, unknown> | null
@@ -82,10 +93,14 @@ function buildContainer(options: BuildOptions = {}) {
       sku: "SKU-OLD",
     },
     pricing_snapshot: { discount_type: "percentage", discount_value: 5, label: "5% off" },
-    pending_update_data: { variant_id: "var_new" },
+    pending_update_data:
+      options.pendingUpdateData === undefined ? scheduledChange : options.pendingUpdateData,
+    skip_next_cycle: true,
   }
 
-  const updateSubscriptions = jest.fn(async () => undefined)
+  const updateSubscriptions = jest.fn(
+    async (_payload: Record<string, unknown>) => undefined
+  )
   const updateRenewalCycles = jest.fn(async (payload: Record<string, unknown>) => ({
     ...cycle,
     ...payload,
@@ -316,6 +331,106 @@ describe("settleRenewalCycleSucceeded", () => {
     expect(updateSubscriptions).toHaveBeenCalledWith(
       expect.objectContaining({ source_snapshot: storedSnapshot })
     )
+  })
+
+  describe("a plan change scheduled while the cycle waited to be settled", () => {
+    it.each([
+      {
+        name: "clears the request the cycle applied",
+        applied: { ...pendingChange, requested_at: requestedAt },
+        current: scheduledChange,
+        cleared: true,
+      },
+      {
+        name: "keeps a newer request for another plan",
+        applied: { ...pendingChange, requested_at: requestedAt },
+        current: {
+          ...scheduledChange,
+          variant_id: "var_other",
+          frequency_value: 6,
+          requested_at: laterRequestedAt,
+        },
+        cleared: false,
+      },
+      {
+        name: "keeps a newer request for the same plan",
+        applied: { ...pendingChange, requested_at: requestedAt },
+        current: { ...scheduledChange, requested_at: laterRequestedAt },
+        cleared: false,
+      },
+      {
+        name: "clears an identical request for a cycle that recorded no request time",
+        applied: pendingChange,
+        current: { ...scheduledChange, effective_at: undefined },
+        cleared: true,
+      },
+      {
+        name: "keeps a different request for a cycle that recorded no request time",
+        applied: pendingChange,
+        current: { ...scheduledChange, frequency_value: 6 },
+        cleared: false,
+      },
+    ])("$name, still applying the cycle's own change", async ({ applied, current, cleared }) => {
+      const { container, updateSubscriptions } = buildContainer({
+        appliedPendingUpdateData: applied,
+        pendingUpdateData: current,
+      })
+
+      await settleRenewalCycleSucceeded(container, baseInput)
+
+      const [written] = updateSubscriptions.mock.calls[0]
+
+      expect(written).toMatchObject({ variant_id: "var_new", frequency_value: 3 })
+
+      if (cleared) {
+        expect(written.pending_update_data).toBeNull()
+      } else {
+        expect(written).not.toHaveProperty("pending_update_data")
+      }
+    })
+
+    it("leaves the subscription's pending change alone when the cycle applied none", async () => {
+      const { container, updateSubscriptions } = buildContainer()
+
+      await settleRenewalCycleSucceeded(container, baseInput)
+
+      expect(updateSubscriptions.mock.calls[0][0]).not.toHaveProperty("pending_update_data")
+    })
+  })
+
+  describe("a skip requested while the cycle waited to be settled", () => {
+    it.each([
+      { name: "resets the skip the caller says the run consumed", consumed: true, stored: undefined, reset: true },
+      { name: "keeps a skip the caller says the run did not consume", consumed: false, stored: undefined, reset: false },
+      { name: "keeps a skip the cycle's stored inputs say the run did not consume", consumed: undefined, stored: false, reset: false },
+      { name: "resets the skip the cycle's stored inputs say the run consumed", consumed: undefined, stored: true, reset: true },
+      { name: "resets the skip when the stored inputs predate the record", consumed: undefined, stored: null, reset: true },
+    ])("$name", async ({ consumed, stored, reset }) => {
+      const { container, updateSubscriptions } = buildContainer({
+        settlementInputs:
+          stored === undefined
+            ? null
+            : {
+                attempt_id: "rat_1",
+                audit: finalizeAudit,
+                source_snapshot: null,
+                ...(stored === null ? {} : { consumed_skip_next_cycle: stored }),
+              },
+      })
+
+      await settleRenewalCycleSucceeded(container, {
+        ...baseInput,
+        ...(consumed === undefined ? {} : { consumed_skip_next_cycle: consumed }),
+      })
+
+      const [written] = updateSubscriptions.mock.calls[0]
+
+      if (reset) {
+        expect(written.skip_next_cycle).toBe(false)
+      } else {
+        expect(written).not.toHaveProperty("skip_next_cycle")
+      }
+    })
   })
 
   it("closes the caller's own attempt when it owns one", async () => {

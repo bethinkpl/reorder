@@ -116,6 +116,7 @@ export async function seedAwaitingRenewal(
         },
       },
       source_snapshot: null,
+      consumed_skip_next_cycle: false,
     },
   })
 

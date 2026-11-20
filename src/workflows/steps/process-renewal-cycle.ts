@@ -244,6 +244,7 @@ export type RenewalSettlementInputs = {
   attempt_id: string
   audit: RenewalSettlementAudit
   source_snapshot: SubscriptionSourceSnapshot | null
+  consumed_skip_next_cycle: boolean
 }
 
 function buildRenewalSettlementAudit(
@@ -268,6 +269,7 @@ function buildRenewalSettlementInputs(
     attempt_id: context.attempt_id,
     audit: buildRenewalSettlementAudit(context),
     source_snapshot: sourceSnapshot,
+    consumed_skip_next_cycle: context.subscription.skip_next_cycle,
   }
 }
 
@@ -507,6 +509,7 @@ async function resolveAppliedPendingChanges(
     frequency_interval: pending.frequency_interval,
     frequency_value: pending.frequency_value,
     effective_at: pending.effective_at,
+    requested_at: pending.requested_at ?? null,
   }
 }
 
@@ -1904,6 +1907,7 @@ export const finalizeRenewalCycleStep = createStep(
           finished_at: new Date(),
           attempt_id: context.attempt_id,
           source_snapshot: order_result.resolved_source_snapshot,
+          consumed_skip_next_cycle: context.subscription.skip_next_cycle,
           source: "renewal",
           audit: buildRenewalSettlementAudit(context),
         }

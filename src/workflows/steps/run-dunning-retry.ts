@@ -1717,10 +1717,8 @@ export async function runDunningRetry(
       },
     })
 
-    // A parked case is already in a safe state, and rolling it back would hand it straight back to
-    // the scheduler. The park is the step's answer, so it is returned rather than thrown: failing
-    // the workflow here would also swallow the `dunning_parked` event the park has to raise. Its
-    // attempt row may be left processing, which the admin can see.
+    // Returned rather than thrown: rolling the park back would hand the case straight back to the
+    // scheduler, and failing the workflow would swallow the `dunning_parked` event the park raises.
     if (parked.output) {
       logDunningEvent(logger, "error", {
         event: DunningLogEvents.RETRY,

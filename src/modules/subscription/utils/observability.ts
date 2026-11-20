@@ -1,4 +1,3 @@
-/** The `event` of each `subscriptions` log line the payment subscribers and sweeps raise. */
 export const SubscriptionLogEvents = {
   PAYMENT_CAPTURED_ON_TERMINAL_SUBSCRIPTION: "payment_captured_on_terminal_subscription",
   DUNNING_RECOVERY_FROM_CAPTURE_FAILED: "dunning_recovery_from_capture_failed",

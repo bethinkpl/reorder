@@ -43,7 +43,6 @@ const pendingChange = {
 const requestedAt = "2026-02-20T09:00:00.000Z"
 const laterRequestedAt = "2026-03-01T18:30:00.000Z"
 
-/** The subscription's own copy of `pendingChange`, as scheduling it wrote it. */
 const scheduledChange = {
   ...pendingChange,
   requested_at: requestedAt,

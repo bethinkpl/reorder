@@ -376,7 +376,6 @@ describe("activateSubscriptionOnPaymentCaptured", () => {
 
   it.each([
     { name: "an error", rejection: new Error("lock timeout") },
-    // What a workflow rejects with: its step's error, serialised.
     { name: "a workflow's plain object", rejection: { name: "Error", message: "lock timeout" } },
   ])("logs one alertable line naming the cause and keeps going when the recovery workflow throws $name", async ({ rejection }) => {
     // A throwing subscriber is logged and dropped by both event buses, so this must not raise.

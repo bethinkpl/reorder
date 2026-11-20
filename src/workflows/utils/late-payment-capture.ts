@@ -38,7 +38,6 @@ import { SubscriptionLogEvents } from "../../modules/subscription/utils/observab
 const LOCK_WAIT_SECONDS = 30
 const LOCK_HOLD_SECONDS = 120
 
-/** Where an attempt records the capture it has been reconciled with, so a redelivery does nothing. */
 const LATE_CAPTURE_METADATA_KEY = "late_payment_captured"
 
 export type TrackedCharge =
@@ -61,7 +60,6 @@ export type TrackedCaptureInput = {
   payment_collection_id: string
   subscription_id: string
   order_id: string | null
-  /** An involuntary churn the capture pays off: the operator may reverse it and keep the money. */
   kept_for_churn_reversal: boolean
 }
 
@@ -74,7 +72,6 @@ type AttemptRecord = {
 type LateCaptureMarker = {
   payment_id: string
   reason: LatePaymentCapturedReason | null
-  /** What the reported event asked the host to refund. */
   refund_amount?: number | null
   at: string
 }
@@ -87,9 +84,7 @@ type PaymentBalance = {
 
 type TrackedState = {
   attempt: AttemptRecord | null
-  /** Still in flight: nothing has closed the attempt yet. */
   attempt_open: boolean
-  /** Closed without having taken money, so this capture is not accounted for anywhere. */
   attempt_unapplied: boolean
   parent_closed: boolean
   renewal_cycle_id: string | undefined
@@ -128,7 +123,6 @@ export function readTrackedCharge(
   return null
 }
 
-/** The captured payment of a session, which a lost `payment.captured` never reported. */
 export async function findCapturedPaymentId(
   container: MedusaContainer,
   sessionId: string
@@ -217,8 +211,8 @@ function unrefunded(balance: PaymentBalance, of: number = balance.captured): num
 }
 
 /**
- * The renewal order's over-payment not yet claimed by a capture this plugin already asked the host
- * to refund. Without it two late captures on one order would both be reported as the surplus.
+ * Without subtracting earlier claims, two late captures on one order would both be reported as the
+ * surplus.
  */
 async function unclaimedOverpayment(
   container: MedusaContainer,
@@ -409,7 +403,6 @@ async function reconcileUnderLock(
   }
 }
 
-/** The whole unrefunded capture, except that an over-paid order only gives back its surplus. */
 async function refundFor(
   container: MedusaContainer,
   paymentId: string,
@@ -469,14 +462,9 @@ async function emitLatePaymentCaptured(
 }
 
 /**
- * Reconciles a captured payment of a session this plugin created with the attempt that submitted
- * it, once the normal settlement has run: an attempt whose cycle, case or subscription closed
- * while the charge was in flight is closed as captured, and a capture the plugin will not apply
- * is reported once as `subscription.late_payment_captured` for the host app to refund.
- *
- * Runs under the subscription's renewal lock, which serialises every tracked capture of the order,
- * and the case's lock for a dunning retry. Never throws: it runs off a delivered event, and the
- * awaiting-payment sweeps deliver the capture again while its attempt is still processing.
+ * The subscription's renewal lock serialises every tracked capture of the order. Never throws: it
+ * runs off a delivered event, and the awaiting-payment sweeps deliver the capture again while its
+ * attempt is still processing.
  */
 export async function reconcileTrackedCapture(
   container: MedusaContainer,

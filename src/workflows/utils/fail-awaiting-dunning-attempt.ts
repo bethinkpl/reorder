@@ -90,11 +90,6 @@ async function loadCaseStatus(
   return dunningCase?.status ?? null
 }
 
-/**
- * The failure of a retry charge whose case was closed while it was in flight (a customer's
- * cancellation closes the case but leaves its attempt processing): closes the attempt only, with
- * no reschedule and no event.
- */
 async function failAttemptOfClosedCaseUnderLock(
   container: MedusaContainer,
   input: FailAwaitingDunningAttemptInput & RetryMarkers
@@ -150,10 +145,9 @@ async function failAttemptOfClosedCaseUnderLock(
 }
 
 /**
- * Applies a provider's failure report for a retry charge under the case's lock. When another
- * holder keeps the lock for the whole wait, the report is recorded on the attempt instead, for the
- * dunning sweep to apply: the bus would only redeliver it within seconds, and nothing else keeps a
- * failure.
+ * When another holder keeps the lock for the whole wait, the report is recorded on the attempt for
+ * the dunning sweep to apply: the bus would only redeliver it within seconds, and nothing else
+ * keeps a failure.
  */
 export async function failAwaitingDunningAttempt(
   container: MedusaContainer,
@@ -243,14 +237,10 @@ async function recordDunningPaymentFailure(
 
 export type DunningPaymentFailureApplication = {
   applied: boolean
-  /** The outcome whose events the caller emits once it has let go of the lock. */
   output: RunDunningRetryStepOutput | null
 }
 
-/**
- * Applies a failure report to the attempt it names: a closed case only has the attempt closed, an
- * open one is rescheduled or settled. The caller holds `dunning:<case_id>`.
- */
+/** The caller holds `dunning:<case_id>`. */
 export async function applyDunningPaymentFailureUnderLock(
   container: MedusaContainer,
   input: FailAwaitingDunningAttemptInput & RetryMarkers
@@ -269,11 +259,7 @@ export async function applyDunningPaymentFailureUnderLock(
   return { applied: output !== null, output }
 }
 
-/**
- * Applies the failure recorded on an attempt while its case's lock was busy, unless the renewal
- * order has been paid since (a capture wins), and clears it either way. The caller holds
- * `dunning:<case_id>` and emits the returned outcome's events.
- */
+/** The caller holds `dunning:<case_id>` and emits the returned outcome's events. */
 export async function applyRecordedDunningPaymentFailureUnderLock(
   container: MedusaContainer,
   attemptId: string
@@ -322,9 +308,8 @@ export type FailAwaitingDunningAttemptUnderLockInput = RetryMarkers & {
 }
 
 /**
- * Fails the case's in-flight attempt as a reported decline: reschedules the case, or closes it as
- * unrecovered on its last attempt. The caller holds `dunning:<case_id>` and emits the outcome's
- * events with `emitDunningAttemptOutcomeEvents`.
+ * The caller holds `dunning:<case_id>` and emits the outcome's events with
+ * `emitDunningAttemptOutcomeEvents`.
  */
 export async function failAwaitingDunningAttemptUnderLock(
   container: MedusaContainer,

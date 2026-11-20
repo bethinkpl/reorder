@@ -47,7 +47,7 @@ const CASE_LOCK_HOLD_SECONDS = 120
 /** Well past the 120 s a retry run holds its case's lock, so a run still in progress is never touched. */
 const STALE_RETRY_MINUTES = 10
 
-/** Active cases no retry run is working on: a running retry finds the paid order itself. */
+/** A running retry finds the paid order itself. */
 const IDLE_DUNNING_CASE_STATUSES = ACTIVE_DUNNING_CASE_STATUSES.filter(
   (status) => status !== DunningCaseStatus.RETRYING
 )
@@ -277,7 +277,6 @@ async function failStaleAttemptUnderLock(
   return true
 }
 
-/** Answers `null` when another holder keeps the case's lock: the next run tries again. */
 async function underCaseLock<T>(
   container: MedusaContainer,
   caseId: string,
@@ -399,12 +398,6 @@ async function settleStaleRetryUnderLock(
   }
 }
 
-/**
- * A case a retry left `retrying`: its run could not park it as awaiting the charge it submitted,
- * or stopped before writing its outcome. Nothing else revisits such a case. With a submitted charge
- * it is parked as awaiting that payment, so its capture, its failure, the overdue alert and the
- * resolve route apply; without one it is handed to an operator.
- */
 async function settleStaleRetries(
   container: MedusaContainer,
   input: OverdueAlertInput,
@@ -472,10 +465,6 @@ async function settleStaleRetries(
   }
 }
 
-/**
- * Failure reports the payment-failure subscriber recorded on retry attempts because the case's
- * lock stayed taken when they arrived.
- */
 async function applyRecordedPaymentFailures(
   container: MedusaContainer,
   input: OverdueAlertInput,
@@ -545,11 +534,6 @@ async function applyRecordedPaymentFailures(
   }
 }
 
-/**
- * A retry attempt a customer's cancellation left processing on its closed case: a captured
- * payment whose event was lost is delivered again, and an attempt with no result past the minimum
- * age is failed.
- */
 async function reconcileAttemptsOfClosedCases(
   container: MedusaContainer,
   input: OverdueAlertInput,
@@ -591,7 +575,6 @@ async function reconcileAttemptsOfClosedCases(
 
           const [redelivered] = await dunningModule.listDunningAttempts({ id: attempt.id })
 
-          // Left processing, it would otherwise be delivered again on every run.
           if (redelivered?.status === DunningAttemptStatus.PROCESSING) {
             throw new Error(
               `Captured payment '${capturedPaymentId}' of attempt '${attempt.id}' was delivered again, but the attempt is still processing`

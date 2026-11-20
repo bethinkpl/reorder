@@ -177,8 +177,8 @@ function nthLockRequest(container: MedusaContainer, key: string, nth: number) {
 }
 
 /**
- * Frees `holder`'s lock on the key as soon as anything else asks for it: a request that waits for
- * the lock then gets it, a request that does not wait has already been refused.
+ * Releases `holder` only once another request was made: one that waits for the lock then gets it,
+ * one that does not wait has already been refused.
  */
 function releaseOnFirstRequest(container: MedusaContainer, key: string, holder: string) {
   const locking = container.resolve(Modules.LOCKING)

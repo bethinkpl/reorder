@@ -7,7 +7,6 @@ import { cancellationErrors } from "../../../modules/cancellation/utils/errors"
 import { dunningErrors } from "../../../modules/dunning/utils/errors"
 import { renewalErrors } from "../../../modules/renewal/utils/errors"
 
-/** What a workflow run rethrows in place of the error its step raised. */
 const asWorkflowError = (error: Error) => serializeError(error)
 
 const MAPPERS = [

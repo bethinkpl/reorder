@@ -9,7 +9,6 @@ const LOCK_BUSY_MESSAGES = [
   /^".+" is already locked\.$/,
 ]
 
-/** Also reads the serialised plain object a workflow rethrows in place of its step's error. */
 export function isLockBusyError(error: unknown): boolean {
   const message =
     typeof error === "object" &&

@@ -198,10 +198,6 @@ async function underRenewalLock<T>(
   return run.acquired ? run.result : whenBusy
 }
 
-/**
- * An awaiting cycle whose subscription is already cancelled was left by a cancellation that failed
- * part way: it is ended as the cancellation would have ended it, instead of being reported forever.
- */
 async function endCycleOfCancelledSubscription(
   container: MedusaContainer,
   cycle: { id: string, subscription_id: string }
@@ -282,7 +278,6 @@ async function failStaleAttemptUnderLock(
   return true
 }
 
-/** A redelivery that left the attempt processing would otherwise be redelivered every run. */
 async function assertAttemptClosed(
   renewalModule: RenewalModuleService,
   attemptId: string,
@@ -297,10 +292,6 @@ async function assertAttemptClosed(
   }
 }
 
-/**
- * Failure reports the payment-failure subscriber recorded on their attempts because the renewal
- * lock stayed taken when they arrived.
- */
 async function applyRecordedPaymentFailures(
   container: MedusaContainer,
   input: OverdueAlertInput,
@@ -377,10 +368,6 @@ async function applyRecordedPaymentFailures(
   }
 }
 
-/**
- * An attempt a cancellation left processing on its closed cycle: a captured payment whose event
- * was lost is delivered again, and an attempt with no result past the minimum age is failed.
- */
 async function reconcileAttemptsOfClosedCycles(
   container: MedusaContainer,
   input: OverdueAlertInput,
@@ -446,10 +433,6 @@ async function reconcileAttemptsOfClosedCycles(
   }
 }
 
-/**
- * The charge a processing cycle's newest attempt submitted, once that attempt is old enough that
- * no run can still be holding it and its renewal order has been paid.
- */
 async function findPaidStaleCharge(
   container: MedusaContainer,
   cycleId: string,
@@ -481,9 +464,9 @@ async function findPaidStaleCharge(
 }
 
 /**
- * Settles a processing cycle whose charge was paid when nothing else will: its run could not park
- * it, and a capture that met the run's lock, or never arrived, is not delivered again. The paid
- * order is what decides; the attempt's session may be missing when the run could not record it.
+ * Nothing else settles it: a capture that met the run's lock, or never arrived, is not delivered
+ * again. The paid order decides, since the attempt's session may be missing when the run could
+ * not record it.
  */
 async function settlePaidProcessingCycle(
   container: MedusaContainer,

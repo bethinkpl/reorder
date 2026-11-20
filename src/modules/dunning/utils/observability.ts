@@ -9,7 +9,6 @@ type LoggerLike = {
 
 type LogLevel = "info" | "warn" | "error"
 
-/** The `event` of each dunning log line. */
 export const DunningLogEvents = {
   RETRY: "dunning.retry",
   JOB: "dunning.job",

@@ -81,7 +81,6 @@ const CONCURRENT_RENEWAL_BATCH_SIZE = positiveIntFromEnv(
 // Gap between consecutive concurrent chunks, in ms.
 const RENEWAL_SEPARATION_DELAY = 1000
 
-/** Exported for unit tests. */
 export function isBlockedRenewalOutcome(failureKind: RenewalFailureKind) {
   return BLOCKED_RENEWAL_FAILURE_KINDS.includes(failureKind)
 }

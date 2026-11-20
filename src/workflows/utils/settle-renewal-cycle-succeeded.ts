@@ -33,7 +33,6 @@ import { persistSubscriptionLogEvent } from "../steps/create-subscription-log-ev
 import { buildPricingSnapshot } from "../steps/validate-subscription-cart"
 import { toISOStringOrNull } from "./date-output"
 
-/** Kept importable from here, where it was declared before it became an enum. */
 export { RenewalSettlementSource }
 
 type RenewalCycleRecord = {
@@ -80,7 +79,6 @@ export type StoredRenewalSettlementInputs = {
   attempt_id: string | null
   audit: RenewalSettlementAudit | null
   source_snapshot: SubscriptionSourceSnapshot | null
-  /** Whether the run had `skip_next_cycle` set; `null` on inputs stored before it was recorded. */
   consumed_skip_next_cycle: boolean | null
 }
 
@@ -155,7 +153,6 @@ export type SettleRenewalCycleSucceededInput = {
   /** The attempt the caller owns. Without it the settlement records one of its own. */
   attempt_id?: string | null
   source_snapshot?: SubscriptionSourceSnapshot | null
-  /** Whether the run had `skip_next_cycle` set. Defaults to what the cycle's settlement inputs recorded. */
   consumed_skip_next_cycle?: boolean
   /** Defaults to the scheduled dunning retry: the one caller that settles without saying so. */
   source?: RenewalSettlementSource

@@ -13,14 +13,12 @@ import { subscriptionErrors } from "../../modules/subscription/utils/errors"
 
 export type AssertNoRenewalPaymentInProgressStepInput = {
   subscription_id: string
-  /** Completes "Subscription '<id>' can't …", e.g. "be paused". */
   action: string
 }
 
 /**
- * Describes the subscription's renewal charge that is still waiting for the provider's answer, or
- * returns `null`. A cycle left processing with its attempt still open counts: its charge may have
- * been submitted before the run could record that it was waiting.
+ * A cycle left processing with its attempt still open counts: its charge may have been submitted
+ * before the run could record that it was waiting.
  */
 async function describeRenewalPaymentInProgress(
   container: MedusaContainer,
@@ -63,10 +61,8 @@ async function describeRenewalPaymentInProgress(
 }
 
 /**
- * Refuses a change the late answer to a renewal charge would undo or contradict: settling it moves
- * the billing dates of whatever the subscription has become by then. Run it under the
- * `renewal:subscription:<id>` lock, so no renewal run can submit a charge between the check and the
- * change.
+ * Run under the `renewal:subscription:<id>` lock, so no renewal run can submit a charge between the
+ * check and the change.
  */
 export const assertNoRenewalPaymentInProgressStep = createStep(
   "assert-no-renewal-payment-in-progress",

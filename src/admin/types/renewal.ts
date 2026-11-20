@@ -76,10 +76,6 @@ export type RenewalCycleAdminListItem = {
   updated_at: string
 }
 
-/**
- * The charge of a cycle awaiting its payment (or left processing with its attempt open): when it was
- * submitted, and the moment after which an unpaid one can be resolved as failed.
- */
 export type RenewalAwaitingPaymentAdminSummary = {
   submitted_at: string
   can_fail_after: string

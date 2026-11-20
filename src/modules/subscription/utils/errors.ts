@@ -1,6 +1,5 @@
 import { MedusaError } from "@medusajs/framework/utils"
 
-/** `code` of the refusal to pause or resume while a renewal charge awaits the provider's answer. */
 export const RENEWAL_PAYMENT_IN_PROGRESS = "renewal_payment_in_progress"
 
 export const subscriptionErrors = {
@@ -49,7 +48,6 @@ export const subscriptionErrors = {
   },
 }
 
-/** Matches the error itself and the plain object a workflow run rethrows in its place. */
 export function isRenewalPaymentInProgress(
   error: unknown
 ): error is { message: string } {

@@ -9,7 +9,6 @@ export enum RenewalCycleStatus {
   AWAITING_PAYMENT = "awaiting_payment",
 }
 
-/** A cycle in one of these no longer waits on a charge it submitted. */
 export const CLOSED_RENEWAL_CYCLE_STATUSES: readonly RenewalCycleStatus[] = [
   RenewalCycleStatus.SUCCEEDED,
   RenewalCycleStatus.FAILED,
@@ -19,7 +18,6 @@ export type ChargeInFlightRenewalCycleStatus =
   | RenewalCycleStatus.AWAITING_PAYMENT
   | RenewalCycleStatus.PROCESSING
 
-/** A cycle in one of these may have a charge the provider has yet to settle. */
 export const CHARGE_IN_FLIGHT_RENEWAL_CYCLE_STATUSES: readonly RenewalCycleStatus[] = [
   RenewalCycleStatus.AWAITING_PAYMENT,
   RenewalCycleStatus.PROCESSING,
@@ -30,7 +28,6 @@ export enum RenewalTriggerType {
   MANUAL = "manual",
 }
 
-/** Who paid for a cycle settled as succeeded; recorded on the settlement's audit entry. */
 export enum RenewalSettlementSource {
   RENEWAL = "renewal",
   DUNNING_RETRY = "dunning_retry",
@@ -64,7 +61,6 @@ export type RenewalAppliedPendingUpdateData = {
   frequency_interval: FrequencyInterval
   frequency_value: number
   effective_at: string | null
-  /** The applied request's `requested_at`; absent on cycles written before it was recorded. */
   requested_at?: string | null
 }
 

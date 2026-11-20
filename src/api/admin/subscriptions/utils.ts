@@ -59,8 +59,8 @@ export async function getAdminSubscriptionsListResponse(
 }
 
 /**
- * The refusals of a subscription change an admin can act on. Medusa's error handler would replace
- * the message of both (and answer the lock with an unexpected error), so the routes answer them.
+ * Medusa's error handler would replace both messages (and answer the lock with an unexpected
+ * error), so the routes answer them.
  */
 export function mapAdminSubscriptionChangeConflict(
   error: unknown,

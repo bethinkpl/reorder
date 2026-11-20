@@ -121,10 +121,9 @@ async function findAttemptForSession(
 }
 
 /**
- * Applies a provider's failure report under the subscription's renewal lock. When another holder
- * keeps the lock for the whole wait, the report is recorded on the attempt it names instead, for
- * the awaiting-payment sweep to apply: the bus would only redeliver it within seconds, and nothing
- * else keeps a failure.
+ * When another holder keeps the lock for the whole wait, the report is recorded on the attempt it
+ * names for the awaiting-payment sweep to apply: the bus would only redeliver it within seconds,
+ * and nothing else keeps a failure.
  */
 export async function failAwaitingRenewalCycle(
   container: MedusaContainer,
@@ -207,10 +206,7 @@ async function recordRenewalPaymentFailure(
   return true
 }
 
-/**
- * Applies a failure report to the cycle it names. The caller holds the subscription's renewal
- * lock. Answers whether anything was failed.
- */
+/** The caller holds the subscription's renewal lock. */
 export async function applyRenewalPaymentFailureUnderLock(
   container: MedusaContainer,
   input: FailAwaitingRenewalCycleInput
@@ -229,11 +225,7 @@ export async function applyRenewalPaymentFailureUnderLock(
     : await failAwaitingRenewalCycleUnderLock(container, input)
 }
 
-/**
- * Applies the failure recorded on an attempt while its lock was busy, unless the renewal order has
- * been paid since (a capture wins), and clears it either way. The caller holds the subscription's
- * renewal lock.
- */
+/** The caller holds the subscription's renewal lock. */
 export async function applyRecordedRenewalPaymentFailureUnderLock(
   container: MedusaContainer,
   attemptId: string
@@ -269,10 +261,6 @@ export async function applyRecordedRenewalPaymentFailureUnderLock(
   return applied ? "applied" : orderPaid ? "order_paid" : "stale"
 }
 
-/**
- * The failure of a charge whose cycle was closed while it was in flight (a cancellation ends the
- * cycle but leaves its attempt processing): closes the attempt only, with no dunning and no event.
- */
 async function failAttemptOfClosedCycleUnderLock(
   container: MedusaContainer,
   input: FailAwaitingRenewalCycleInput

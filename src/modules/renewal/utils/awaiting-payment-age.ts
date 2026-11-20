@@ -28,7 +28,6 @@ function parsePositiveHours(raw: string | undefined, fallback: number): number {
   return parsed
 }
 
-/** How long a charge may await the provider before it raises an alert. */
 export function resolveAwaitingPaymentAlertHours(
   raw: string | undefined = process.env[AWAITING_PAYMENT_ALERT_HOURS_ENV]
 ): number {
@@ -36,7 +35,6 @@ export function resolveAwaitingPaymentAlertHours(
 }
 
 /**
- * How long a charge must have awaited the provider before an admin may resolve it as failed.
  * Independent of the alert hours: lowering the alert must not let a charge that can still settle
  * be failed and charged again through dunning.
  */
@@ -46,7 +44,6 @@ export function resolveAwaitingPaymentResolveMinHours(
   return parsePositiveHours(raw, DEFAULT_AWAITING_PAYMENT_RESOLVE_MIN_HOURS)
 }
 
-/** The moment after which a charge submitted at `submittedAt` has waited longer than `limitHours`. */
 export function awaitingPaymentLimitEndsAt(
   submittedAt: Date | string,
   limitHours: number

@@ -23,13 +23,11 @@ export const ACTIVE_DUNNING_CASE_STATUSES: readonly DunningCaseStatus[] = [
   DunningCaseStatus.AWAITING_MANUAL_RESOLUTION,
 ]
 
-/** A case in one of these has a retry charge the provider may still settle. */
 export const CHARGE_IN_FLIGHT_DUNNING_CASE_STATUSES: readonly DunningCaseStatus[] = [
   DunningCaseStatus.RETRYING,
   DunningCaseStatus.AWAITING_PAYMENT,
 ]
 
-/** Why a case closed, recovered or not: its `recovery_reason`. */
 export enum DunningRecoveryReason {
   PAYMENT_RECOVERED = "payment_recovered",
   CUSTOMER_PAYMENT = "customer_payment",
@@ -43,7 +41,6 @@ export enum DunningRecoveryReason {
   MARKED_UNRECOVERED_BY_ADMIN = "marked_unrecovered_by_admin",
 }
 
-/** Where the renewal payment failure that opens a case was raised. */
 export enum DunningPaymentFailureSource {
   PAYMENT_PROVIDER = "payment_provider",
   PAYMENT_SESSION = "payment_session",

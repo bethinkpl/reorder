@@ -365,10 +365,7 @@ export function mapPaymentStatus(
   return "ok"
 }
 
-/**
- * Storefronts know a retry charge in flight only as `retry_in_progress`, so a charge awaiting the
- * provider's answer is reported the same way; the admin keeps the distinction.
- */
+/** Storefronts only know a retry charge in flight as `retry_in_progress`. */
 function toStoreRetryBlockedReason<T extends RetryBlockedReason | null>(reason: T) {
   return reason === RetryBlockedReason.PAYMENT_IN_PROGRESS
     ? RetryBlockedReason.RETRY_IN_PROGRESS
@@ -834,11 +831,6 @@ export type StoreRetryRouteError = RouteError & {
   blocked_reason?: RetryBlockedReason
 }
 
-/**
- * A retry the workflow refused, also as the plain object a workflow run rethrows. A refusal naming
- * why the case can't be retried, and a case another run holds, answer as the eligibility check
- * does: with `blocked_reason` in the storefront's vocabulary.
- */
 export function mapStoreRetryError(
   subscriptionId: string,
   error: unknown
@@ -1007,9 +999,8 @@ export function sendStoreJson(res: MedusaResponse, body: unknown, status = 200) 
 }
 
 /**
- * The refusals of a pause or resume the storefront can act on. Medusa's error handler would answer
- * both with its generic conflict text (and an unexpected error for the lock), so the routes answer
- * them in the shape of its 409 instead.
+ * Medusa's error handler would replace both messages (and answer the lock with an unexpected
+ * error), so the routes answer them.
  */
 export function mapStoreSubscriptionChangeConflict(error: unknown) {
   if (isRenewalPaymentInProgress(error)) {

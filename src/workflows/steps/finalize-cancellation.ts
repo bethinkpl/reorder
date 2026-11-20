@@ -112,7 +112,6 @@ async function loadSubscription(
   return (await subscriptionModule.retrieveSubscription(id)) as SubscriptionRecord
 }
 
-/** Puts back exactly the fields the finalize step writes on the subscription. */
 async function restoreCancelledSubscription(
   container: { resolve(key: string): unknown },
   previous: SubscriptionRecord

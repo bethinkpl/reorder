@@ -16,11 +16,8 @@ import { getAdminErrorMessage } from "../lib/admin-error-message"
 type ResolveAwaitingPaymentDrawerProps<TResponse> = {
   open: boolean
   onOpenChange: (open: boolean) => void
-  /** The admin route that resolves the awaiting payment; it takes `{ reason?: string }`. */
   endpoint: string
-  /** What resolving does for this record, shown above the reason. */
   explanation: ReactNode
-  /** Runs after the route answered 200, before the drawer closes. */
   onResolved: (response: TResponse) => void | Promise<void>
 }
 

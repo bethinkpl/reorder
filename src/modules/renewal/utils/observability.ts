@@ -10,7 +10,6 @@ type LoggerLike = {
 
 type LogLevel = "info" | "warn" | "error"
 
-/** The `event` of each renewal log line. */
 export const RenewalLogEvents = {
   EXECUTION: "renewal.execution",
   DUNNING: "renewal.dunning",
@@ -129,7 +128,6 @@ export function classifyRenewalFailure(error: unknown): RenewalFailureKind {
   return "unexpected_error"
 }
 
-/** The refusals a cycle's own state raises before anything is charged. */
 export const CYCLE_STATE_BLOCKED_RENEWAL_FAILURE_KINDS: readonly RenewalFailureKind[] = [
   "already_processing",
   "duplicate_execution",
@@ -137,7 +135,6 @@ export const CYCLE_STATE_BLOCKED_RENEWAL_FAILURE_KINDS: readonly RenewalFailureK
   "dunning_owns_cycle",
 ]
 
-/** The failures that mean "not now", not "something is wrong". */
 export const BLOCKED_RENEWAL_FAILURE_KINDS: readonly RenewalFailureKind[] = [
   ...CYCLE_STATE_BLOCKED_RENEWAL_FAILURE_KINDS,
   "cycle_superseded",

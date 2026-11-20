@@ -80,10 +80,6 @@ export enum DunningRetryBlockedReason {
   MANUAL_RESOLUTION_REQUIRED = "manual_resolution_required",
 }
 
-/**
- * The retry charge of a case awaiting its payment: when it was submitted, and the moment after which
- * an unpaid one can be resolved as failed.
- */
 export type DunningAwaitingPaymentAdminSummary = {
   submitted_at: string
   can_fail_after: string

@@ -44,7 +44,6 @@ export type LockedRun<T> =
   | { acquired: true, result: T }
   | { acquired: false, error: unknown }
 
-/** `runUnderLock` that answers instead of throwing when another owner kept the lock all along. */
 export async function tryUnderLock<T>(
   container: MedusaContainer,
   key: string,

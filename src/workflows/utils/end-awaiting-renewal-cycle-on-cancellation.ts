@@ -47,7 +47,6 @@ export type EndAwaitingRenewalCyclesOnCancellationInput = {
   actor_id: string | null
   actor_type?: ActivityLogActorType
   reason: string | null
-  /** `scheduler` when a sweep ends a cycle a failed cancellation left behind. */
   source: CancellationLogSource | "scheduler"
 }
 

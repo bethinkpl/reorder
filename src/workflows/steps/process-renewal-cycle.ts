@@ -1640,7 +1640,6 @@ export const createRenewalPaymentCollectionStep = createStep(
 export const RenewalRunOutcome = {
   SUCCEEDED: "succeeded",
   AWAITING_PAYMENT: "awaiting_payment",
-  /** The charge was submitted but the cycle could not be parked: it is still `processing`. */
   PARK_FAILED: "park_failed",
   FAILED: "failed",
 } as const
@@ -1651,7 +1650,6 @@ type RenewalCycleDTO = Awaited<ReturnType<RenewalModuleService["retrieveRenewalC
 
 export type SubmittedRenewalCharge = {
   outcome: RenewalRunOutcome
-  /** `null` when the cycle could not be parked. */
   renewal_cycle: RenewalCycleDTO | null
 }
 

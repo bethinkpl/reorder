@@ -40,6 +40,7 @@ const statusFilterOptions = [
   { label: "Open", value: DunningCaseAdminStatus.OPEN },
   { label: "Retry scheduled", value: DunningCaseAdminStatus.RETRY_SCHEDULED },
   { label: "Retrying", value: DunningCaseAdminStatus.RETRYING },
+  { label: "Awaiting payment", value: DunningCaseAdminStatus.AWAITING_PAYMENT },
   {
     label: "Awaiting manual resolution",
     value: DunningCaseAdminStatus.AWAITING_MANUAL_RESOLUTION,
@@ -651,6 +652,8 @@ function formatStatus(status: DunningCaseAdminStatus) {
       return "Retry scheduled"
     case DunningCaseAdminStatus.RETRYING:
       return "Retrying"
+    case DunningCaseAdminStatus.AWAITING_PAYMENT:
+      return "Awaiting payment"
     case DunningCaseAdminStatus.AWAITING_MANUAL_RESOLUTION:
       return "Awaiting manual resolution"
     case DunningCaseAdminStatus.RECOVERED:
@@ -667,6 +670,8 @@ function getStatusColor(status: DunningCaseAdminStatus) {
     case DunningCaseAdminStatus.RETRY_SCHEDULED:
       return "orange"
     case DunningCaseAdminStatus.RETRYING:
+      return "blue"
+    case DunningCaseAdminStatus.AWAITING_PAYMENT:
       return "blue"
     case DunningCaseAdminStatus.AWAITING_MANUAL_RESOLUTION:
       return "grey"

@@ -8,6 +8,12 @@ import {
   createOrUpdateOrderPaymentCollectionWorkflow,
   createPaymentSessionsWorkflow,
 } from "@medusajs/medusa/core-flows"
+import { DUNNING_MODULE } from "../../modules/dunning"
+import type DunningModuleService from "../../modules/dunning/service"
+import {
+  ACTIVE_DUNNING_CASE_STATUSES,
+  DunningPaymentFailureSource,
+} from "../../modules/dunning/types"
 import { RENEWAL_MODULE } from "../../modules/renewal"
 import RenewalModuleService from "../../modules/renewal/service"
 import {
@@ -15,6 +21,8 @@ import {
   RenewalApprovalStatus,
   RenewalAttemptStatus,
   RenewalCycleStatus,
+  RenewalSettlementSource,
+  RenewalTriggerType,
 } from "../../modules/renewal/types"
 import { renewalErrors } from "../../modules/renewal/utils/errors"
 import {
@@ -23,6 +31,7 @@ import {
   getRenewalErrorMessage,
   isAlertableRenewalFailure,
   logRenewalEvent,
+  RenewalLogEvents,
 } from "../../modules/renewal/utils/observability"
 import { normalizeActivityLogEvent } from "../../modules/activity-log/utils/normalize-log-event"
 import {
@@ -49,7 +58,13 @@ import {
 import { toISOStringOrNull } from "../utils/date-output"
 import { recordOrderCaptureTransactions } from "../utils/record-order-capture-transactions"
 import { resolvePaymentCollection } from "../utils/resolve-payment-collection"
-import { settleRenewalCycleSucceeded } from "../utils/settle-renewal-cycle-succeeded"
+import { endRenewalCycleOnCancellation } from "../utils/end-awaiting-renewal-cycle-on-cancellation"
+import { reconcileTrackedCapture } from "../utils/late-payment-capture"
+import {
+  type RenewalSettlementAudit,
+  settleRenewalCycleSucceeded,
+  SUBSCRIPTION_CANCELLED_REFUSAL,
+} from "../utils/settle-renewal-cycle-succeeded"
 import {
   computeSubscriptionDiscountAmount,
   roundCurrency,
@@ -124,7 +139,7 @@ type SubscriptionRecord = {
 
 export type ProcessRenewalCycleStepInput = {
   renewal_cycle_id: string
-  trigger_type: "scheduler" | "manual"
+  trigger_type: `${RenewalTriggerType}`
   triggered_by?: string | null
   reason?: string | null
   correlation_id?: string | null
@@ -148,13 +163,8 @@ type RenewalCycleRecord = {
   metadata: Record<string, unknown> | null
 }
 
-type PaymentQualifiedFailureSource =
-  | "payment_session"
-  | "payment_provider"
-  | "payment_capture"
-
 type PaymentQualifiedRenewalError = Error & {
-  dunning_payment_failure_source?: PaymentQualifiedFailureSource
+  dunning_payment_failure_source?: DunningPaymentFailureSource
   dunning_payment_error_code?: string | null
   dunning_renewal_order_id?: string | null
 }
@@ -162,7 +172,7 @@ type PaymentQualifiedRenewalError = Error & {
 export type RenewalExecutionContext = {
   renewal_cycle_id: string
   subscription_id: string
-  trigger_type: "scheduler" | "manual"
+  trigger_type: `${RenewalTriggerType}`
   triggered_by: string | null
   reason: string | null
   correlation_id: string
@@ -234,8 +244,41 @@ export type RenewalOrderStepResult = {
   } | null
 }
 
-function getRenewalActivityLogActorType(triggerType: "scheduler" | "manual") {
-  return triggerType === "manual"
+export type RenewalSettlementInputs = {
+  attempt_id: string
+  audit: RenewalSettlementAudit
+  source_snapshot: SubscriptionSourceSnapshot | null
+  consumed_skip_next_cycle: boolean
+}
+
+function buildRenewalSettlementAudit(
+  context: RenewalExecutionContext
+): RenewalSettlementAudit {
+  return {
+    correlation_id: context.correlation_id,
+    trigger_type: context.trigger_type,
+    triggered_by: context.triggered_by ?? null,
+    attempt_no: context.attempt_no,
+    operation_started_at: context.operation_started_at,
+    scheduled_for: context.scheduled_for,
+    previous_state: context.cycle_previous_state,
+  }
+}
+
+function buildRenewalSettlementInputs(
+  context: RenewalExecutionContext,
+  sourceSnapshot: SubscriptionSourceSnapshot | null
+): RenewalSettlementInputs {
+  return {
+    attempt_id: context.attempt_id,
+    audit: buildRenewalSettlementAudit(context),
+    source_snapshot: sourceSnapshot,
+    consumed_skip_next_cycle: context.subscription.skip_next_cycle,
+  }
+}
+
+function getRenewalActivityLogActorType(triggerType: `${RenewalTriggerType}`) {
+  return triggerType === RenewalTriggerType.MANUAL
     ? ActivityLogActorType.USER
     : ActivityLogActorType.SCHEDULER
 }
@@ -470,6 +513,7 @@ async function resolveAppliedPendingChanges(
     frequency_interval: pending.frequency_interval,
     frequency_value: pending.frequency_value,
     effective_at: pending.effective_at,
+    requested_at: pending.requested_at ?? null,
   }
 }
 
@@ -1034,7 +1078,7 @@ function readProviderErrorCode(error: unknown) {
 
 function createPaymentQualifiedRenewalError(
   error: unknown,
-  source: PaymentQualifiedFailureSource,
+  source: DunningPaymentFailureSource,
   renewalOrderId: string
 ): PaymentQualifiedRenewalError {
   const message = getRenewalErrorMessage(error)
@@ -1052,7 +1096,7 @@ function createPaymentQualifiedRenewalError(
 function getPaymentQualifiedFailureContext(
   error: unknown
 ): {
-  source: PaymentQualifiedFailureSource
+  source: DunningPaymentFailureSource
   error_code: string | null
   renewal_order_id: string | null
 } | null {
@@ -1142,7 +1186,7 @@ async function recordRenewalFailure(
     },
     reason: context.reason ?? null,
     metadata: {
-      source: context.trigger_type === "manual" ? "admin" : "scheduler",
+      source: context.trigger_type === RenewalTriggerType.MANUAL ? "admin" : "scheduler",
       renewal_cycle_id: context.renewal_cycle_id,
       order_id: paymentFailure?.renewal_order_id ?? null,
       trigger_type: context.trigger_type,
@@ -1180,7 +1224,7 @@ async function recordRenewalFailure(
       })
     } catch (dunningError) {
       logRenewalEvent(logger, "warn", {
-        event: "renewal.dunning",
+        event: RenewalLogEvents.DUNNING,
         outcome: "failed",
         correlation_id: context.correlation_id,
         renewal_cycle_id: context.renewal_cycle_id,
@@ -1198,7 +1242,7 @@ async function recordRenewalFailure(
   }
 
   logRenewalEvent(logger, "error", {
-    event: "renewal.execution",
+    event: RenewalLogEvents.EXECUTION,
     outcome: "failed",
     correlation_id: context.correlation_id,
     renewal_cycle_id: context.renewal_cycle_id,
@@ -1248,6 +1292,28 @@ export async function assertNoCustomerPaymentInProgress(
   )
 }
 
+export async function assertNoDunningOwnsFailedCycle(
+  container: MedusaContainer,
+  cycle: { id: string, status: RenewalCycleStatus, subscription_id: string }
+) {
+  if (cycle.status !== RenewalCycleStatus.FAILED) {
+    return
+  }
+
+  const dunningModule = container.resolve<DunningModuleService>(DUNNING_MODULE)
+  const [activeCase] = await dunningModule.listDunningCases(
+    {
+      subscription_id: cycle.subscription_id,
+      status: [...ACTIVE_DUNNING_CASE_STATUSES],
+    },
+    { select: ["id"], take: 1 }
+  )
+
+  if (activeCase) {
+    throw renewalErrors.dunningOwnsCycle(cycle.id)
+  }
+}
+
 export const prepareRenewalCycleStep = createStep(
   "prepare-renewal-cycle",
   async function (
@@ -1271,10 +1337,16 @@ export const prepareRenewalCycleStep = createStep(
       throw renewalErrors.duplicateExecutionBlocked(cycle.id)
     }
 
+    if (cycle.status === RenewalCycleStatus.AWAITING_PAYMENT) {
+      throw renewalErrors.awaitingPayment(cycle.id)
+    }
+
+    await assertNoDunningOwnsFailedCycle(container, cycle)
+
     const subscription = await loadSubscription(container, cycle.subscription_id)
 
     logRenewalEvent(logger, "info", {
-      event: "renewal.execution",
+      event: RenewalLogEvents.EXECUTION,
       outcome: "started",
       correlation_id: correlationId,
       renewal_cycle_id: cycle.id,
@@ -1303,7 +1375,7 @@ export const prepareRenewalCycleStep = createStep(
       const failureKind = classifyRenewalFailure(error)
 
       logRenewalEvent(logger, "warn", {
-        event: "renewal.execution",
+        event: RenewalLogEvents.EXECUTION,
         outcome: "blocked",
         correlation_id: correlationId,
         renewal_cycle_id: cycle.id,
@@ -1344,6 +1416,7 @@ export const prepareRenewalCycleStep = createStep(
       attempt_count: attemptNo,
       last_error: null,
       applied_pending_update_data: appliedPendingChanges,
+      settlement_inputs: null,
       metadata: {
         ...(cycle.metadata ?? {}),
         last_trigger_type: input.trigger_type,
@@ -1393,6 +1466,12 @@ export const prepareRenewalCycleStep = createStep(
       const cycle = await renewalModule.retrieveRenewalCycle(context.renewal_cycle_id)
 
       if (cycle.status !== RenewalCycleStatus.PROCESSING) {
+        return
+      }
+
+      const attempt = await renewalModule.retrieveRenewalAttempt(context.attempt_id)
+
+      if (attempt.payment_reference) {
         return
       }
 
@@ -1499,6 +1578,16 @@ export const createRenewalOrderStep = createStep(
           subscription.product_id,
           appliedPendingChanges.variant_id
         )
+
+        await container
+          .resolve<RenewalModuleService>(RENEWAL_MODULE)
+          .updateRenewalCycles({
+            id: context.renewal_cycle_id,
+            settlement_inputs: buildRenewalSettlementInputs(
+              context,
+              resolvedSourceSnapshot
+            ),
+          })
       }
 
       return new StepResponse<RenewalOrderStepResult>({
@@ -1551,6 +1640,141 @@ export const createRenewalPaymentCollectionStep = createStep(
   }
 )
 
+export const RenewalRunOutcome = {
+  SUCCEEDED: "succeeded",
+  AWAITING_PAYMENT: "awaiting_payment",
+  PARK_FAILED: "park_failed",
+  FAILED: "failed",
+} as const
+
+export type RenewalRunOutcome = (typeof RenewalRunOutcome)[keyof typeof RenewalRunOutcome]
+
+type RenewalCycleDTO = Awaited<ReturnType<RenewalModuleService["retrieveRenewalCycle"]>>
+
+export type SubmittedRenewalCharge = {
+  outcome: RenewalRunOutcome
+  renewal_cycle: RenewalCycleDTO | null
+}
+
+async function parkRenewalCycleAwaitingPayment(
+  container: MedusaContainer,
+  context: RenewalExecutionContext,
+  orderResult: RenewalOrderStepResult,
+  paymentSessionId: string
+): Promise<SubmittedRenewalCharge> {
+  const renewalModule = container.resolve<RenewalModuleService>(RENEWAL_MODULE)
+  const orderId = orderResult.generated_order_id
+  const cycle = await renewalModule.retrieveRenewalCycle(context.renewal_cycle_id)
+
+  if (cycle.status === RenewalCycleStatus.SUCCEEDED) {
+    await renewalModule.updateRenewalAttempts({
+      id: context.attempt_id,
+      status: RenewalAttemptStatus.SUCCEEDED,
+      finished_at: new Date(),
+      payment_reference: paymentSessionId,
+      order_id: orderId,
+    })
+
+    return { outcome: RenewalRunOutcome.SUCCEEDED, renewal_cycle: cycle }
+  }
+
+  if (cycle.status === RenewalCycleStatus.FAILED) {
+    logRenewalEvent(container.resolve("logger"), "error", {
+      event: RenewalLogEvents.AWAITING_PAYMENT_PARK,
+      outcome: "failed",
+      correlation_id: context.correlation_id,
+      renewal_cycle_id: context.renewal_cycle_id,
+      subscription_id: context.subscription_id,
+      trigger_type: context.trigger_type,
+      triggered_by: context.triggered_by ?? null,
+      attempt_no: context.attempt_no,
+      duration_ms: Date.now() - context.operation_started_at,
+      alertable: true,
+      message: `RenewalCycle '${context.renewal_cycle_id}' had already failed when its run came to park the charge submitted on payment session '${paymentSessionId}'; it was left failed`,
+      metadata: {
+        payment_session_id: paymentSessionId,
+        generated_order_id: orderId,
+      },
+    })
+
+    return { outcome: RenewalRunOutcome.FAILED, renewal_cycle: cycle }
+  }
+
+  await renewalModule.updateRenewalAttempts({
+    id: context.attempt_id,
+    payment_reference: paymentSessionId,
+    order_id: orderId,
+  })
+
+  const parked = await renewalModule.updateRenewalCycles({
+    id: context.renewal_cycle_id,
+    status: RenewalCycleStatus.AWAITING_PAYMENT,
+    settlement_inputs: buildRenewalSettlementInputs(
+      context,
+      orderResult.resolved_source_snapshot
+    ),
+  })
+
+  logRenewalEvent(container.resolve("logger"), "info", {
+    event: RenewalLogEvents.EXECUTION,
+    outcome: "awaiting_payment",
+    correlation_id: context.correlation_id,
+    renewal_cycle_id: context.renewal_cycle_id,
+    subscription_id: context.subscription_id,
+    trigger_type: context.trigger_type,
+    triggered_by: context.triggered_by ?? null,
+    attempt_no: context.attempt_no,
+    duration_ms: Date.now() - context.operation_started_at,
+    metadata: {
+      generated_order_id: orderId,
+      payment_session_id: paymentSessionId,
+    },
+  })
+
+  return { outcome: RenewalRunOutcome.AWAITING_PAYMENT, renewal_cycle: parked }
+}
+
+async function parkOrReportRenewalCycle(
+  container: MedusaContainer,
+  context: RenewalExecutionContext,
+  orderResult: RenewalOrderStepResult,
+  paymentSessionId: string
+): Promise<SubmittedRenewalCharge> {
+  try {
+    return await parkRenewalCycleAwaitingPayment(
+      container,
+      context,
+      orderResult,
+      paymentSessionId
+    )
+  } catch (error) {
+    logRenewalEvent(container.resolve("logger"), "error", {
+      event: RenewalLogEvents.AWAITING_PAYMENT_PARK,
+      outcome: "failed",
+      correlation_id: context.correlation_id,
+      renewal_cycle_id: context.renewal_cycle_id,
+      subscription_id: context.subscription_id,
+      trigger_type: context.trigger_type,
+      triggered_by: context.triggered_by ?? null,
+      attempt_no: context.attempt_no,
+      duration_ms: Date.now() - context.operation_started_at,
+      alertable: true,
+      message: `RenewalCycle '${context.renewal_cycle_id}' submitted its charge on payment session '${paymentSessionId}' but could not be parked to await it; it stays 'processing', and once its renewal order is paid the payment's capture or, ten minutes on, the awaiting-payment sweep settles it: ${getRenewalErrorMessage(error)}`,
+      metadata: {
+        payment_session_id: paymentSessionId,
+        generated_order_id: orderResult.generated_order_id,
+      },
+    })
+
+    return { outcome: RenewalRunOutcome.PARK_FAILED, renewal_cycle: null }
+  }
+}
+
+export type AuthorizeRenewalPaymentStepOutput =
+  | ({ charge_submitted: true } & SubmittedRenewalCharge)
+  /** `payment_session_id` names the session a charge was taken on there and then. */
+  | { charge_submitted: false, payment_session_id: string | null }
+
 export const authorizeRenewalPaymentStep = createStep(
   "authorize-renewal-payment",
   async function (
@@ -1564,10 +1788,14 @@ export const authorizeRenewalPaymentStep = createStep(
     const { context, order_result, payment_session_data } = input
 
     if (!order_result.payment) {
-      return new StepResponse(void 0)
+      return new StepResponse<AuthorizeRenewalPaymentStepOutput>({
+        charge_submitted: false,
+        payment_session_id: null,
+      })
     }
 
     const orderId = order_result.order?.id as string
+    let paymentSessionId: string | null = null
 
     try {
       const data =
@@ -1589,16 +1817,21 @@ export const authorizeRenewalPaymentStep = createStep(
             data,
             // What tells a later renewal tick, and the dunning retry, that this session is one of
             // ours rather than one the customer opened.
-            context: { renewal_cycle_id: context.renewal_cycle_id },
+            context: {
+              renewal_cycle_id: context.renewal_cycle_id,
+              renewal_attempt_id: context.attempt_id,
+            },
           },
         })
       } catch (error) {
         throw createPaymentQualifiedRenewalError(
           error,
-          "payment_session",
+          DunningPaymentFailureSource.PAYMENT_SESSION,
           orderId
         )
       }
+
+      paymentSessionId = paymentSessionResult.result.id
 
       const paymentModule =
         container.resolve<IPaymentModuleService>(Modules.PAYMENT)
@@ -1612,7 +1845,7 @@ export const authorizeRenewalPaymentStep = createStep(
       } catch (error) {
         throw createPaymentQualifiedRenewalError(
           error,
-          "payment_provider",
+          DunningPaymentFailureSource.PAYMENT_PROVIDER,
           orderId
         )
       }
@@ -1656,19 +1889,97 @@ export const authorizeRenewalPaymentStep = createStep(
         if (captureError) {
           throw createPaymentQualifiedRenewalError(
             captureError,
-            "payment_capture",
+            DunningPaymentFailureSource.PAYMENT_CAPTURE,
             orderId
           )
         }
+      } else {
+        const submitted = await parkOrReportRenewalCycle(
+          container,
+          context,
+          order_result,
+          paymentSessionResult.result.id
+        )
+
+        return new StepResponse<AuthorizeRenewalPaymentStepOutput>({
+          charge_submitted: true,
+          ...submitted,
+        })
       }
     } catch (error) {
       await recordRenewalFailure(container, context, error)
       throw error
     }
 
-    return new StepResponse(void 0)
+    return new StepResponse<AuthorizeRenewalPaymentStepOutput>({
+      charge_submitted: false,
+      payment_session_id: paymentSessionId,
+    })
   }
 )
+
+/**
+ * The charge went through, but the subscription was cancelled while the provider took it (the run's
+ * lock lapsed). The cycle ends as the cancellation ends an awaiting one, with the attempt left on its
+ * session, and the capture is reconciled as a late payment so the host is asked to refund it.
+ */
+async function endRenewalCycleOfCancelledSubscription(
+  container: MedusaContainer,
+  context: RenewalExecutionContext,
+  orderResult: RenewalOrderStepResult,
+  paymentSessionId: string | null
+) {
+  const renewalModule = container.resolve<RenewalModuleService>(RENEWAL_MODULE)
+
+  if (paymentSessionId) {
+    await renewalModule.updateRenewalAttempts({
+      id: context.attempt_id,
+      payment_reference: paymentSessionId,
+      order_id: orderResult.generated_order_id,
+    })
+  }
+
+  await endRenewalCycleOnCancellation(
+    container,
+    {
+      subscription: await container
+        .resolve<SubscriptionModuleService>(SUBSCRIPTION_MODULE)
+        .retrieveSubscription(context.subscription_id),
+      cancelled_at: new Date(),
+      actor_id: null,
+      actor_type: ActivityLogActorType.SYSTEM,
+      reason: null,
+      source: "scheduler",
+    },
+    context.renewal_cycle_id
+  )
+
+  const [payment] = paymentSessionId
+    ? (
+        await container
+          .resolve<IPaymentModuleService>(Modules.PAYMENT)
+          .listPayments({ payment_session_id: paymentSessionId })
+      ).filter(({ captured_at }) => captured_at)
+    : []
+
+  if (payment && paymentSessionId) {
+    await reconcileTrackedCapture(container, {
+      charge: {
+        kind: "renewal",
+        session_id: paymentSessionId,
+        renewal_cycle_id: context.renewal_cycle_id,
+        renewal_attempt_id: context.attempt_id,
+      },
+      payment_id: payment.id,
+      payment_collection_id: payment.payment_collection_id,
+      subscription_id: context.subscription_id,
+      order_id: orderResult.generated_order_id,
+      kept_for_churn_reversal: false,
+    })
+  }
+
+  return await renewalModule.retrieveRenewalCycle(context.renewal_cycle_id)
+}
 
 export const finalizeRenewalCycleStep = createStep(
   "finalize-renewal-cycle",
@@ -1676,44 +1987,44 @@ export const finalizeRenewalCycleStep = createStep(
     input: {
       context: RenewalExecutionContext
       order_result: RenewalOrderStepResult
+      authorization: AuthorizeRenewalPaymentStepOutput
     },
     { container }
   ) {
-    const { context, order_result } = input
+    const { context, order_result, authorization } = input
     const generatedOrderId = order_result.generated_order_id
 
-    try {
-      const { renewal_cycle: updatedCycle } = await settleRenewalCycleSucceeded(
-        container,
-        {
-          renewal_cycle_id: context.renewal_cycle_id,
-          subscription_id: context.subscription_id,
-          order_id: generatedOrderId,
-          finished_at: new Date(),
-          attempt_id: context.attempt_id,
-          source_snapshot: order_result.resolved_source_snapshot,
-          source: "renewal",
-          audit: {
-            correlation_id: context.correlation_id,
-            trigger_type: context.trigger_type,
-            triggered_by: context.triggered_by ?? null,
-            attempt_no: context.attempt_no,
-            operation_started_at: context.operation_started_at,
-            scheduled_for: context.scheduled_for,
-            previous_state: context.cycle_previous_state,
-          },
-        }
-      )
-
-      return new StepResponse({
-        renewal_cycle: updatedCycle,
-        subscription_id: context.subscription_id,
-        attempt_id: context.attempt_id,
-        generated_order_id: generatedOrderId,
-      })
-    } catch (error) {
+    const settlement = await settleRenewalCycleSucceeded(container, {
+      renewal_cycle_id: context.renewal_cycle_id,
+      subscription_id: context.subscription_id,
+      order_id: generatedOrderId,
+      finished_at: new Date(),
+      attempt_id: context.attempt_id,
+      source_snapshot: order_result.resolved_source_snapshot,
+      consumed_skip_next_cycle: context.subscription.skip_next_cycle,
+      source: RenewalSettlementSource.RENEWAL,
+      audit: buildRenewalSettlementAudit(context),
+    }).catch(async (error: unknown) => {
       await recordRenewalFailure(container, context, error)
       throw error
-    }
+    })
+    const cancelled = settlement.reason === SUBSCRIPTION_CANCELLED_REFUSAL
+
+    // Kept out of the failure recording above: it fails the attempt, and the awaiting-payment sweep
+    // only delivers again the capture of an attempt still processing.
+    return new StepResponse({
+      outcome: cancelled ? RenewalRunOutcome.FAILED : RenewalRunOutcome.SUCCEEDED,
+      renewal_cycle: cancelled
+        ? await endRenewalCycleOfCancelledSubscription(
+            container,
+            context,
+            order_result,
+            authorization.charge_submitted ? null : authorization.payment_session_id
+          )
+        : settlement.renewal_cycle,
+      subscription_id: context.subscription_id,
+      attempt_id: context.attempt_id,
+      generated_order_id: generatedOrderId,
+    })
   }
 )

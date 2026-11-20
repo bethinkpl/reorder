@@ -25,6 +25,8 @@ import {
 import {
   RenewalAttemptStatus,
   RenewalCycleStatus,
+  RenewalSettlementSource,
+  RenewalTriggerType,
 } from "../../../modules/renewal/types"
 import { persistSubscriptionLogEvent } from "../../steps/create-subscription-log-event"
 import { settleRenewalCycleSucceeded } from "../settle-renewal-cycle-succeeded"
@@ -38,14 +40,25 @@ const pendingChange = {
   effective_at: null,
 }
 
+const requestedAt = "2026-02-20T09:00:00.000Z"
+const laterRequestedAt = "2026-03-01T18:30:00.000Z"
+
+const scheduledChange = {
+  ...pendingChange,
+  requested_at: requestedAt,
+  requested_by: "cus_1",
+}
+
 const scheduledFor = new Date("2026-03-01T00:00:00.000Z")
 const finishedAt = new Date("2026-03-02T12:00:00.000Z")
 
 type BuildOptions = {
   cycleStatus?: RenewalCycleStatus
-  appliedPendingUpdateData?: typeof pendingChange | null
+  appliedPendingUpdateData?: typeof pendingChange & { requested_at?: string } | null
+  pendingUpdateData?: Record<string, unknown> | null
   attempts?: { id: string, attempt_no: number }[]
   nextRenewalAt?: Date | null
+  settlementInputs?: Record<string, unknown> | null
 }
 
 function buildContainer(options: BuildOptions = {}) {
@@ -57,6 +70,7 @@ function buildContainer(options: BuildOptions = {}) {
     status: options.cycleStatus ?? RenewalCycleStatus.FAILED,
     generated_order_id: "order_1",
     applied_pending_update_data: options.appliedPendingUpdateData ?? null,
+    settlement_inputs: options.settlementInputs ?? null,
     attempt_count: 2,
     last_error: "card_declined",
   }
@@ -80,10 +94,14 @@ function buildContainer(options: BuildOptions = {}) {
       sku: "SKU-OLD",
     },
     pricing_snapshot: { discount_type: "percentage", discount_value: 5, label: "5% off" },
-    pending_update_data: { variant_id: "var_new" },
+    pending_update_data:
+      options.pendingUpdateData === undefined ? scheduledChange : options.pendingUpdateData,
+    skip_next_cycle: true,
   }
 
-  const updateSubscriptions = jest.fn(async () => undefined)
+  const updateSubscriptions = jest.fn(
+    async (_payload: Record<string, unknown>) => undefined
+  )
   const updateRenewalCycles = jest.fn(async (payload: Record<string, unknown>) => ({
     ...cycle,
     ...payload,
@@ -145,7 +163,7 @@ const baseInput = {
 /** Exactly what `finalizeRenewalCycleStep` hands the helper. */
 const finalizeAudit = {
   correlation_id: "renewal-scheduler-1",
-  trigger_type: "scheduler" as const,
+  trigger_type: RenewalTriggerType.SCHEDULER,
   triggered_by: null,
   attempt_no: 3,
   operation_started_at: Date.now(),
@@ -285,6 +303,137 @@ describe("settleRenewalCycleSucceeded", () => {
     )
   })
 
+  it("writes the source snapshot the cycle stored when the caller passes none", async () => {
+    const storedSnapshot = {
+      product_id: "prod_1",
+      variant_id: "var_new",
+      title: "Plan - Quarterly",
+      quantity: 1,
+      unit_price: 4999,
+      subtitle: null,
+      sku: "SKU-NEW",
+      is_discountable: true,
+      is_tax_inclusive: false,
+      requires_shipping: true,
+      tax_lines: [],
+      adjustments: [],
+    }
+    const { container, updateSubscriptions } = buildContainer({
+      appliedPendingUpdateData: pendingChange,
+      settlementInputs: {
+        attempt_id: "rat_1",
+        audit: finalizeAudit,
+        source_snapshot: storedSnapshot,
+      },
+    })
+
+    await settleRenewalCycleSucceeded(container, baseInput)
+
+    expect(updateSubscriptions).toHaveBeenCalledWith(
+      expect.objectContaining({ source_snapshot: storedSnapshot })
+    )
+  })
+
+  describe("a plan change scheduled while the cycle waited to be settled", () => {
+    it.each([
+      {
+        name: "clears the request the cycle applied",
+        applied: { ...pendingChange, requested_at: requestedAt },
+        current: scheduledChange,
+        cleared: true,
+      },
+      {
+        name: "keeps a newer request for another plan",
+        applied: { ...pendingChange, requested_at: requestedAt },
+        current: {
+          ...scheduledChange,
+          variant_id: "var_other",
+          frequency_value: 6,
+          requested_at: laterRequestedAt,
+        },
+        cleared: false,
+      },
+      {
+        name: "keeps a newer request for the same plan",
+        applied: { ...pendingChange, requested_at: requestedAt },
+        current: { ...scheduledChange, requested_at: laterRequestedAt },
+        cleared: false,
+      },
+      {
+        name: "clears an identical request for a cycle that recorded no request time",
+        applied: pendingChange,
+        current: { ...scheduledChange, effective_at: undefined },
+        cleared: true,
+      },
+      {
+        name: "keeps a different request for a cycle that recorded no request time",
+        applied: pendingChange,
+        current: { ...scheduledChange, frequency_value: 6 },
+        cleared: false,
+      },
+    ])("$name, still applying the cycle's own change", async ({ applied, current, cleared }) => {
+      const { container, updateSubscriptions } = buildContainer({
+        appliedPendingUpdateData: applied,
+        pendingUpdateData: current,
+      })
+
+      await settleRenewalCycleSucceeded(container, baseInput)
+
+      const [written] = updateSubscriptions.mock.calls[0]
+
+      expect(written).toMatchObject({ variant_id: "var_new", frequency_value: 3 })
+
+      if (cleared) {
+        expect(written.pending_update_data).toBeNull()
+      } else {
+        expect(written).not.toHaveProperty("pending_update_data")
+      }
+    })
+
+    it("leaves the subscription's pending change alone when the cycle applied none", async () => {
+      const { container, updateSubscriptions } = buildContainer()
+
+      await settleRenewalCycleSucceeded(container, baseInput)
+
+      expect(updateSubscriptions.mock.calls[0][0]).not.toHaveProperty("pending_update_data")
+    })
+  })
+
+  describe("a skip requested while the cycle waited to be settled", () => {
+    it.each([
+      { name: "resets the skip the caller says the run consumed", consumed: true, stored: undefined, reset: true },
+      { name: "keeps a skip the caller says the run did not consume", consumed: false, stored: undefined, reset: false },
+      { name: "keeps a skip the cycle's stored inputs say the run did not consume", consumed: undefined, stored: false, reset: false },
+      { name: "resets the skip the cycle's stored inputs say the run consumed", consumed: undefined, stored: true, reset: true },
+      { name: "resets the skip when the stored inputs predate the record", consumed: undefined, stored: null, reset: true },
+    ])("$name", async ({ consumed, stored, reset }) => {
+      const { container, updateSubscriptions } = buildContainer({
+        settlementInputs:
+          stored === undefined
+            ? null
+            : {
+                attempt_id: "rat_1",
+                audit: finalizeAudit,
+                source_snapshot: null,
+                ...(stored === null ? {} : { consumed_skip_next_cycle: stored }),
+              },
+      })
+
+      await settleRenewalCycleSucceeded(container, {
+        ...baseInput,
+        ...(consumed === undefined ? {} : { consumed_skip_next_cycle: consumed }),
+      })
+
+      const [written] = updateSubscriptions.mock.calls[0]
+
+      if (reset) {
+        expect(written.skip_next_cycle).toBe(false)
+      } else {
+        expect(written).not.toHaveProperty("skip_next_cycle")
+      }
+    })
+  })
+
   it("closes the caller's own attempt when it owns one", async () => {
     const { container, updateRenewalAttempts, createRenewalAttempts } =
       buildContainer()
@@ -316,7 +465,7 @@ describe("settleRenewalCycleSucceeded", () => {
 
     await settleRenewalCycleSucceeded(container, {
       ...baseInput,
-      source: "customer_payment",
+      source: RenewalSettlementSource.CUSTOMER_PAYMENT,
     })
 
     expect(updateRenewalAttempts).not.toHaveBeenCalled()
@@ -330,7 +479,7 @@ describe("settleRenewalCycleSucceeded", () => {
       error_message: null,
       payment_reference: null,
       order_id: "order_1",
-      metadata: { source: "customer_payment" },
+      metadata: { source: RenewalSettlementSource.CUSTOMER_PAYMENT },
     })
   })
 
@@ -340,7 +489,7 @@ describe("settleRenewalCycleSucceeded", () => {
     await settleRenewalCycleSucceeded(container, {
       ...baseInput,
       attempt_id: "rat_1",
-      source: "renewal",
+      source: RenewalSettlementSource.RENEWAL,
       audit: finalizeAudit,
     })
 
@@ -368,7 +517,7 @@ describe("settleRenewalCycleSucceeded", () => {
         source: "scheduler",
         renewal_cycle_id: "rc_1",
         order_id: "order_1",
-        trigger_type: "scheduler",
+        trigger_type: RenewalTriggerType.SCHEDULER,
         scheduled_for: scheduledFor.toISOString(),
       }),
     })
@@ -381,7 +530,7 @@ describe("settleRenewalCycleSucceeded", () => {
 
     await settleRenewalCycleSucceeded(container, {
       ...baseInput,
-      source: "customer_payment",
+      source: RenewalSettlementSource.CUSTOMER_PAYMENT,
     })
 
     expect(persistSubscriptionLogEvent).toHaveBeenCalledTimes(1)
@@ -389,7 +538,7 @@ describe("settleRenewalCycleSucceeded", () => {
       actor_type: ActivityLogActorType.SYSTEM,
       actor_id: null,
       metadata: expect.objectContaining({
-        source: "customer_payment",
+        source: RenewalSettlementSource.CUSTOMER_PAYMENT,
         trigger_type: null,
       }),
       // The state the recovery moved the cycle out of.

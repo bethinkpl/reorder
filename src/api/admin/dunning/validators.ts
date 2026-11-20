@@ -1,16 +1,10 @@
 import { createFindParams } from "@medusajs/medusa/api/utils/validators"
 import { z } from "zod"
+import { DunningCaseStatus } from "../../../modules/dunning/types"
 
 const optionalIsoDateTime = z.string().datetime().optional()
 
-const dunningCaseStatusSchema = z.enum([
-  "open",
-  "retry_scheduled",
-  "retrying",
-  "awaiting_manual_resolution",
-  "recovered",
-  "unrecovered",
-])
+const dunningCaseStatusSchema = z.nativeEnum(DunningCaseStatus)
 
 const dunningAttemptStatusSchema = z.enum([
   "processing",
@@ -102,6 +96,14 @@ export const PostAdminReverseChurnDunningSchema = z.object({
 
 export type PostAdminReverseChurnDunningSchemaType = z.infer<
   typeof PostAdminReverseChurnDunningSchema
+>
+
+export const PostAdminResolveAwaitingDunningPaymentSchema = z.object({
+  reason: z.string().trim().min(1).max(500).optional(),
+})
+
+export type PostAdminResolveAwaitingDunningPaymentSchemaType = z.infer<
+  typeof PostAdminResolveAwaitingDunningPaymentSchema
 >
 
 export const PostAdminDunningRetryScheduleSchema = z.object({

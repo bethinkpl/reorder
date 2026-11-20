@@ -52,6 +52,10 @@ Current pricing semantics:
 - `resume`
   - optional body
   - returns updated status summary
+- `pause` and `resume` refuse while a renewal charge or a dunning retry charge is waiting for the payment
+  provider's answer: `409` with `{ "type": "conflict", "code": "renewal_payment_in_progress", "message" }`;
+  the action is available again once the payment has been settled or has failed. While a renewal run holds the
+  subscription they answer `409` with `{ "type": "conflict", "message" }` and can be retried in a moment
 - `skip-next-delivery`
   - optional body
   - returns unchanged technical `next_renewal_at`

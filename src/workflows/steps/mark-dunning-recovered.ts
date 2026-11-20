@@ -1,11 +1,16 @@
 import { createStep, StepResponse } from "@medusajs/framework/workflows-sdk"
 import { DUNNING_MODULE } from "../../modules/dunning"
 import type DunningModuleService from "../../modules/dunning/service"
-import { DunningCaseStatus } from "../../modules/dunning/types"
+import {
+  CHARGE_IN_FLIGHT_DUNNING_CASE_STATUSES,
+  DunningCaseStatus,
+  DunningRecoveryReason,
+} from "../../modules/dunning/types"
 import { dunningErrors } from "../../modules/dunning/utils/errors"
 import { SUBSCRIPTION_MODULE } from "../../modules/subscription"
 import type SubscriptionModuleService from "../../modules/subscription/service"
 import { SubscriptionStatus } from "../../modules/subscription/types"
+import { withoutPaymentContext } from "./pause-subscription"
 
 type SubscriptionRecord = {
   id: string
@@ -80,7 +85,7 @@ export const markDunningRecoveredStep = createStep(
       throw dunningErrors.alreadyUnrecovered(dunningCase.id)
     }
 
-    if (dunningCase.status === DunningCaseStatus.RETRYING) {
+    if (CHARGE_IN_FLIGHT_DUNNING_CASE_STATUSES.includes(dunningCase.status)) {
       throw dunningErrors.retryInFlightTransitionBlocked(
         dunningCase.id,
         "be marked recovered"
@@ -98,7 +103,7 @@ export const markDunningRecoveredStep = createStep(
       next_retry_at: null,
       recovered_at: changedAt,
       closed_at: changedAt,
-      recovery_reason: "marked_recovered_by_admin",
+      recovery_reason: DunningRecoveryReason.MARKED_RECOVERED_BY_ADMIN,
       metadata: appendAuditMetadata(
         dunningCase.metadata,
         "mark_recovered",
@@ -135,7 +140,7 @@ export const markDunningRecoveredStep = createStep(
 
     if (compensation.previous_subscription) {
       await subscriptionModule.updateSubscriptions(
-        compensation.previous_subscription as any
+        withoutPaymentContext(compensation.previous_subscription) as any
       )
     }
   }

@@ -1,4 +1,5 @@
 import { randomUUID } from "crypto"
+import type { OperationLogOutcome } from "../../../common/types/log-outcome"
 
 type LoggerLike = {
   info: (message: string) => void
@@ -7,6 +8,24 @@ type LoggerLike = {
 }
 
 type LogLevel = "info" | "warn" | "error"
+
+export const DunningLogEvents = {
+  RETRY: "dunning.retry",
+  JOB: "dunning.job",
+  JOB_BATCH: "dunning.job.batch",
+  JOB_CASE: "dunning.job.case",
+  JOB_DISCOVERY: "dunning.job.discovery",
+  EVENT: "dunning.event",
+  CUSTOMER_RECOVERY: "dunning.customer_recovery",
+  AWAITING_PAYMENT_RESOLVED: "dunning.awaiting_payment_resolved",
+  AWAITING_PAYMENT_OVERDUE: "dunning.awaiting_payment_overdue",
+  AWAITING_PAYMENT_SESSION_MISSING: "dunning.awaiting_payment_session_missing",
+  PAYMENT_FAILURE_RECORDED: "dunning.payment_failure_recorded",
+  RECORDED_PAYMENT_FAILURE: "dunning.recorded_payment_failure",
+  LATE_PAYMENT_FAILURE: "dunning.late_payment_failure",
+  STALE_ATTEMPT_CLOSED: "dunning.stale_attempt_closed",
+  STALE_RETRY: "dunning.stale_retry",
+} as const
 
 export type DunningFailureKind =
   | "already_retrying"
@@ -31,6 +50,7 @@ type DunningLogPayload = {
   success_count?: number
   failure_count?: number
   blocked_count?: number
+  awaiting_count?: number
   scanned_count?: number
   processed_count?: number
   recovered_count?: number
@@ -42,7 +62,7 @@ type DunningLogPayload = {
   avg_time_to_recover_ms?: number
   batch_size?: number
   job_name?: string
-  outcome?: "started" | "succeeded" | "failed" | "blocked" | "completed"
+  outcome?: OperationLogOutcome
   failure_kind?: DunningFailureKind
   alertable?: boolean
   message?: string

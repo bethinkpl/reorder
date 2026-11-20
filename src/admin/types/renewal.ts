@@ -3,6 +3,7 @@ export enum RenewalCycleAdminStatus {
   PROCESSING = "processing",
   SUCCEEDED = "succeeded",
   FAILED = "failed",
+  AWAITING_PAYMENT = "awaiting_payment",
 }
 
 export enum RenewalAttemptAdminStatus {
@@ -75,12 +76,18 @@ export type RenewalCycleAdminListItem = {
   updated_at: string
 }
 
+export type RenewalAwaitingPaymentAdminSummary = {
+  submitted_at: string
+  can_fail_after: string
+}
+
 export type RenewalCycleAdminDetail = RenewalCycleAdminListItem & {
   created_at: string
   processed_at: string | null
   last_error: string | null
   pending_changes: RenewalAdminPendingChangeSummary | null
   attempts: RenewalAttemptAdminRecord[]
+  awaiting_payment: RenewalAwaitingPaymentAdminSummary | null
   metadata: Record<string, unknown> | null
 }
 
@@ -105,4 +112,17 @@ export type ApproveRenewalChangesAdminRequest = {
 
 export type RejectRenewalChangesAdminRequest = {
   reason: string
+}
+
+export type ResolveAwaitingRenewalPaymentAdminRequest = {
+  reason?: string
+}
+
+export enum RenewalAwaitingPaymentAdminResolution {
+  SETTLED = "settled",
+  FAILED = "failed",
+}
+
+export type ResolveAwaitingRenewalPaymentAdminResponse = RenewalCycleAdminDetailResponse & {
+  resolution: RenewalAwaitingPaymentAdminResolution
 }

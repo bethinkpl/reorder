@@ -37,6 +37,8 @@ import {
   CancellationCaseAdminStatus,
   CancellationFinalOutcomeAdmin,
 } from "../../../../types/cancellation"
+import { DunningCaseAdminStatus } from "../../../../types/dunning"
+import { RenewalCycleAdminStatus } from "../../../../types/renewal"
 import type {
   ApplyRetentionOfferAdminRequest,
   CancellationAdminOfferEventRecord,
@@ -79,11 +81,12 @@ const offerTypeOptions: Array<{ label: string, value: OfferType }> = [
   { label: "Bonus offer", value: "bonus_offer" },
 ]
 
-const activeDunningStatuses = new Set([
-  "open",
-  "retry_scheduled",
-  "retrying",
-  "awaiting_manual_resolution",
+const activeDunningStatuses = new Set<string>([
+  DunningCaseAdminStatus.OPEN,
+  DunningCaseAdminStatus.RETRY_SCHEDULED,
+  DunningCaseAdminStatus.RETRYING,
+  DunningCaseAdminStatus.AWAITING_PAYMENT,
+  DunningCaseAdminStatus.AWAITING_MANUAL_RESOLUTION,
 ])
 
 const effectiveAtOptions = [
@@ -1618,17 +1621,19 @@ function formatDunningStatus(
   status: NonNullable<CancellationCaseAdminDetail["dunning"]>["status"]
 ) {
   switch (status) {
-    case "open":
+    case DunningCaseAdminStatus.OPEN:
       return "Open"
-    case "retry_scheduled":
+    case DunningCaseAdminStatus.RETRY_SCHEDULED:
       return "Retry scheduled"
-    case "retrying":
+    case DunningCaseAdminStatus.RETRYING:
       return "Retrying"
-    case "awaiting_manual_resolution":
+    case DunningCaseAdminStatus.AWAITING_PAYMENT:
+      return "Awaiting payment"
+    case DunningCaseAdminStatus.AWAITING_MANUAL_RESOLUTION:
       return "Awaiting manual resolution"
-    case "recovered":
+    case DunningCaseAdminStatus.RECOVERED:
       return "Recovered"
-    case "unrecovered":
+    case DunningCaseAdminStatus.UNRECOVERED:
       return "Unrecovered"
   }
 }
@@ -1637,14 +1642,16 @@ function formatRenewalStatus(
   status: NonNullable<CancellationCaseAdminDetail["renewal"]>["status"]
 ) {
   switch (status) {
-    case "scheduled":
+    case RenewalCycleAdminStatus.SCHEDULED:
       return "Scheduled"
-    case "processing":
+    case RenewalCycleAdminStatus.PROCESSING:
       return "Processing"
-    case "succeeded":
+    case RenewalCycleAdminStatus.SUCCEEDED:
       return "Succeeded"
-    case "failed":
+    case RenewalCycleAdminStatus.FAILED:
       return "Failed"
+    case RenewalCycleAdminStatus.AWAITING_PAYMENT:
+      return "Awaiting payment"
   }
 }
 

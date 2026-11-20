@@ -10,6 +10,7 @@ jest.mock("../../ensure-next-renewal-cycle", () => ({
 }))
 
 jest.mock("../../utils/settle-renewal-cycle-succeeded", () => ({
+  ...jest.requireActual("../../utils/settle-renewal-cycle-succeeded"),
   settleRenewalCycleSucceeded: jest.fn(async () => ({ settled: true })),
 }))
 
@@ -17,7 +18,8 @@ import {
   createOrUpdateOrderPaymentCollectionWorkflow,
   createPaymentSessionsWorkflow,
 } from "@medusajs/medusa/core-flows"
-import { DunningCaseStatus } from "../../../modules/dunning/types"
+import { DunningCaseStatus, DunningRecoveryReason } from "../../../modules/dunning/types"
+import { RenewalSettlementSource } from "../../../modules/renewal/types"
 import { SubscriptionStatus } from "../../../modules/subscription/types"
 import { settleRenewalCycleSucceeded } from "../../utils/settle-renewal-cycle-succeeded"
 import { runDunningRetry } from "../run-dunning-retry"
@@ -69,9 +71,9 @@ function buildContainer(options: BuildContainerOptions = {}) {
     },
   }
 
+  // Stateful, like the module: the recovery settlement reads the case back before writing it.
   const updateDunningCases = jest.fn(async (payload: Record<string, unknown>) => ({
-    ...dunningCase,
-    ...payload,
+    ...Object.assign(dunningCase, payload),
   }))
   const updateSubscriptions = jest.fn(async () => undefined)
 
@@ -107,7 +109,7 @@ function buildContainer(options: BuildContainerOptions = {}) {
           return { info: jest.fn(), warn: jest.fn(), error: jest.fn() }
         case "dunning":
           return {
-            retrieveDunningCase: jest.fn(async () => dunningCase),
+            retrieveDunningCase: jest.fn(async () => ({ ...dunningCase })),
             listDunningAttempts: jest.fn(async () => [
               { id: "dunatt_prev", attempt_no: 1 },
             ]),
@@ -175,7 +177,7 @@ describe("runDunningRetry - recovery branch", () => {
 
     expect(response.output).toMatchObject({
       outcome: "recovered",
-      recovery_reason: "payment_recovered",
+      recovery_reason: DunningRecoveryReason.PAYMENT_RECOVERED,
       renewal_order_id: "order_1",
       recovered_now: true,
     })
@@ -183,7 +185,7 @@ describe("runDunningRetry - recovery branch", () => {
       expect.objectContaining({
         id: "dun_1",
         status: DunningCaseStatus.RECOVERED,
-        recovery_reason: "payment_recovered",
+        recovery_reason: DunningRecoveryReason.PAYMENT_RECOVERED,
         metadata: expect.objectContaining({
           park_reason: null,
           recovery_payment_reference: "pay_1",
@@ -200,7 +202,8 @@ describe("runDunningRetry - recovery branch", () => {
         renewal_cycle_id: "rc_1",
         subscription_id: "sub_1",
         order_id: "order_1",
-        source: "dunning_retry",
+        consumed_skip_next_cycle: false,
+        source: RenewalSettlementSource.DUNNING_RETRY,
       })
     )
     expect(ensureNextRenewalCycleRun).toHaveBeenCalledWith({
@@ -215,12 +218,11 @@ describe("runDunningRetry - recovery branch", () => {
 
     expect(settleRenewalCycleSucceeded).toHaveBeenCalledWith(
       container,
-      expect.objectContaining({ source: "customer_payment" })
+      expect.objectContaining({ source: RenewalSettlementSource.CUSTOMER_PAYMENT })
     )
   })
 
-  it("leaves the next cycle alone when billing has moved past this one", async () => {
-    // Scheduling one here would delete the cycle that is actually due.
+  it("still ensures the next cycle when billing has moved past this one", async () => {
     const { container } = buildContainer()
     ;(settleRenewalCycleSucceeded as jest.Mock).mockResolvedValueOnce({
       settled: false,
@@ -230,7 +232,7 @@ describe("runDunningRetry - recovery branch", () => {
     const response = await runDunningRetry(container, { dunning_case_id: "dun_1" })
 
     expect(response.output.outcome).toBe("recovered")
-    expect(ensureNextRenewalCycleRun).not.toHaveBeenCalled()
+    expect(ensureNextRenewalCycleRun).toHaveBeenCalledWith({ input: { subscription_id: "sub_1" } })
   })
 
   it("still schedules the next cycle when the settlement found this one done", async () => {
@@ -275,13 +277,13 @@ describe("runDunningRetry - recovery branch", () => {
 
     expect(response.output).toMatchObject({
       outcome: "recovered",
-      recovery_reason: "customer_payment",
+      recovery_reason: DunningRecoveryReason.CUSTOMER_PAYMENT,
       recovered_now: true,
     })
     expect(updateDunningCases).toHaveBeenCalledWith(
       expect.objectContaining({
         status: DunningCaseStatus.RECOVERED,
-        recovery_reason: "customer_payment",
+        recovery_reason: DunningRecoveryReason.CUSTOMER_PAYMENT,
       })
     )
   })

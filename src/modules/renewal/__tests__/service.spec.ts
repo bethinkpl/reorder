@@ -1,3 +1,4 @@
+import { PaymentActions } from "@medusajs/framework/utils"
 import { moduleIntegrationTestRunner } from "@medusajs/test-utils"
 import { DateTime } from "luxon"
 import { RENEWAL_MODULE } from ".."
@@ -92,6 +93,56 @@ moduleIntegrationTestRunner<RenewalModuleService>({
         expect(retrievedAttempt.renewal_cycle_id).toEqual(cycle.id)
         expect(retrievedAttempt.status).toEqual(RenewalAttemptStatus.PROCESSING)
       })
+
+      it("keeps a reported payment failure on an attempt, finds it by its presence and clears it", async () => {
+        const cycle = await service.createRenewalCycles({
+          subscription_id: "sub_module_003",
+          scheduled_for: new Date("2026-03-30T12:00:00.000Z"),
+          status: RenewalCycleStatus.AWAITING_PAYMENT,
+          attempt_count: 2,
+        } as any)
+        const [first, second] = (await service.createRenewalAttempts([
+          {
+            renewal_cycle_id: cycle.id,
+            attempt_no: 1,
+            started_at: new Date("2026-03-30T12:01:00.000Z"),
+            status: RenewalAttemptStatus.FAILED,
+          },
+          {
+            renewal_cycle_id: cycle.id,
+            attempt_no: 2,
+            started_at: new Date("2026-03-30T12:02:00.000Z"),
+            status: RenewalAttemptStatus.PROCESSING,
+            payment_reference: "payses_module_003",
+          },
+        ] as any)) as unknown as { id: string }[]
+        const failure = {
+          session_id: "payses_module_003",
+          action: PaymentActions.FAILED,
+          reason: "declined",
+          received_at: "2026-03-30T12:03:00.000Z",
+        }
+
+        await service.updateRenewalAttempts({ id: second.id, reported_payment_failure: failure })
+
+        const reported = await service.listRenewalAttempts({
+          renewal_cycle_id: cycle.id,
+          reported_payment_failure: { $ne: null },
+        } as any)
+
+        expect(reported.map(({ id }) => id)).toEqual([second.id])
+        expect(reported[0].reported_payment_failure).toEqual(failure)
+        expect((await service.retrieveRenewalAttempt(first.id)).reported_payment_failure).toBeNull()
+
+        await service.updateRenewalAttempts({ id: second.id, reported_payment_failure: null })
+
+        expect(
+          await service.listRenewalAttempts({
+            renewal_cycle_id: cycle.id,
+            reported_payment_failure: { $ne: null },
+          } as any)
+        ).toEqual([])
+      })
     })
 
     describe("windowed keyset scheduler queries", () => {
@@ -101,7 +152,9 @@ moduleIntegrationTestRunner<RenewalModuleService>({
 
       type CreateCycleInput = Parameters<
         RenewalModuleService["createRenewalCycles"]
-      >[0]
+      >[0] extends ReadonlyArray<infer Item>
+        ? Item
+        : Parameters<RenewalModuleService["createRenewalCycles"]>[0]
 
       // Fully-populated seed literal, typed against the generated create input so
       // no `as any` is needed; callers only override id/status/scheduled_for.

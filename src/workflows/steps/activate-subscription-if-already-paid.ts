@@ -31,7 +31,7 @@ type SubscriptionRecord = {
 type Compensation = {
   subscription_id: string
   status: SubscriptionStatus
-  payment_context: SubscriptionPaymentContext | null
+  payment_context?: SubscriptionPaymentContext | null
 }
 
 /**
@@ -97,7 +97,7 @@ export async function activateSubscriptionIfAlreadyPaid(
     compensation: {
       subscription_id: subscription.id,
       status: subscription.status,
-      payment_context: paymentContext,
+      ...(resolved && paymentContext ? { payment_context: paymentContext } : {}),
     },
   }
 }
@@ -129,7 +129,9 @@ export const activateSubscriptionIfAlreadyPaidStep = createStep(
     await subscriptionModule.updateSubscriptions({
       id: compensation.subscription_id,
       status: compensation.status,
-      payment_context: compensation.payment_context,
+      ...("payment_context" in compensation
+        ? { payment_context: compensation.payment_context }
+        : {}),
     })
   }
 )

@@ -234,7 +234,8 @@ export const ensureNextRenewalCycleStep = createStep(
 
     if (
       existingCycle.status === RenewalCycleStatus.PROCESSING ||
-      existingCycle.status === RenewalCycleStatus.SUCCEEDED
+      existingCycle.status === RenewalCycleStatus.SUCCEEDED ||
+      existingCycle.status === RenewalCycleStatus.AWAITING_PAYMENT
     ) {
       return new StepResponse<
         EnsureNextRenewalCycleStepOutput,

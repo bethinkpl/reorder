@@ -1,7 +1,7 @@
-import { MedusaError } from "@medusajs/framework/utils"
+import { MedusaError, serializeError } from "@medusajs/framework/utils"
 import { mapStoreCancellationError } from "../route"
 import { cancellationErrors } from "../../../../../../../../modules/cancellation/utils/errors"
-import { dunningErrors } from "../../../../../../../../modules/dunning/utils/errors"
+import { renewalSubscriptionLockKey } from "../../../../../../../../modules/renewal/utils/lock-key"
 import { subscriptionErrors } from "../../../../../../../../modules/subscription/utils/errors"
 
 describe("mapStoreCancellationError", () => {
@@ -19,35 +19,32 @@ describe("mapStoreCancellationError", () => {
     expect(mapped.message).not.toContain("sub_123")
   })
 
-  it("explains an in-flight payment retry", () => {
-    const mapped = mapStoreCancellationError(
-      dunningErrors.retryInFlightTransitionBlocked(
-        "dc_123",
-        "be closed for subscription cancellation"
-      )
-    )
+  it.each([
+    {
+      name: "a not-found",
+      error: cancellationErrors.notFound("CancellationCase", "cc_123"),
+      status: 404,
+      type: MedusaError.Types.NOT_FOUND,
+    },
+    {
+      name: "invalid data",
+      error: cancellationErrors.missingCancellationReason("cc_123"),
+      status: 400,
+      type: MedusaError.Types.INVALID_DATA,
+    },
+    {
+      name: "an unexpected state",
+      error: new MedusaError(MedusaError.Types.UNEXPECTED_STATE, "RenewalCycle 'rc_123' is corrupt"),
+      status: 500,
+      type: MedusaError.Types.UNEXPECTED_STATE,
+    },
+  ])("answers $name with its status and a generic message that names no record", ({ error, status, type }) => {
+    for (const thrown of [error, serializeError(error)]) {
+      const mapped = mapStoreCancellationError(thrown)
 
-    expect(mapped.status).toEqual(409)
-    expect(mapped.message).toContain("payment recovery")
-    expect(mapped.message).not.toContain("dc_123")
-  })
-
-  it("keeps a not-found as a 404", () => {
-    const mapped = mapStoreCancellationError(
-      cancellationErrors.notFound("CancellationCase", "cc_123")
-    )
-
-    expect(mapped.status).toEqual(404)
-    expect(mapped.type).toEqual(MedusaError.Types.NOT_FOUND)
-  })
-
-  it("keeps invalid data as a 400", () => {
-    const mapped = mapStoreCancellationError(
-      cancellationErrors.missingCancellationReason("cc_123")
-    )
-
-    expect(mapped.status).toEqual(400)
-    expect(mapped.type).toEqual(MedusaError.Types.INVALID_DATA)
+      expect(mapped).toMatchObject({ status, type })
+      expect(mapped.message).not.toContain("_123")
+    }
   })
 
   it("unwraps a medusa error carried as a cause", () => {
@@ -75,6 +72,35 @@ describe("mapStoreCancellationError", () => {
 
     expect(mapped.status).toEqual(409)
     expect(mapped.type).toEqual(MedusaError.Types.CONFLICT)
+  })
+
+  it.each([
+    {
+      name: "a lock acquisition failure",
+      error: { name: "Error", message: `Failed to acquire lock for key "${renewalSubscriptionLockKey("sub_123")}"` },
+      message: /already being updated/,
+    },
+    {
+      name: "a lock another owner inserted first",
+      error: { name: "Error", message: `"${renewalSubscriptionLockKey("sub_123")}" is already locked.` },
+      message: /already being updated/,
+    },
+    {
+      name: "a lock timeout the provider raised as a conflict",
+      error: serializeError(new MedusaError(MedusaError.Types.CONFLICT, "Timed-out acquiring lock.")),
+      message: /already being updated/,
+    },
+    {
+      name: "a transition the workflow does not allow",
+      error: serializeError(new MedusaError(MedusaError.Types.NOT_ALLOWED, "Subscription 'sub_123' can't be cancelled")),
+      message: /can't be cancelled right now/,
+    },
+  ])("reads $name that a workflow rethrew as a serialised plain object", ({ error, message }) => {
+    const mapped = mapStoreCancellationError(error)
+
+    expect(mapped.status).toEqual(409)
+    expect(mapped.type).toEqual(MedusaError.Types.CONFLICT)
+    expect(mapped.message).toMatch(message)
   })
 
   it("falls back to a generic failure for an unrecognised error", () => {

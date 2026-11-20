@@ -56,10 +56,18 @@ export function asSubscriptionWorkflowRecord(
   return subscription as SubscriptionWorkflowRecord
 }
 
+export function withoutPaymentContext<T extends object>(
+  subscription: T
+): Omit<T, "payment_context"> {
+  const restore: Partial<T> & { payment_context?: unknown } = { ...subscription }
+  delete restore.payment_context
+  return restore as Omit<T, "payment_context">
+}
+
 export function asSubscriptionUpdateInput(
   subscription: SubscriptionWorkflowRecord
 ): SubscriptionUpdateInput {
-  return subscription as unknown as SubscriptionUpdateInput
+  return withoutPaymentContext(subscription) as unknown as SubscriptionUpdateInput
 }
 
 export const pauseSubscriptionStep = createStep(

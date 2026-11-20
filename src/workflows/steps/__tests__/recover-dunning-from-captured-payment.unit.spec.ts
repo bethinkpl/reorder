@@ -10,6 +10,7 @@ jest.mock("../../ensure-next-renewal-cycle", () => ({
 }))
 
 jest.mock("../../utils/settle-renewal-cycle-succeeded", () => ({
+  ...jest.requireActual("../../utils/settle-renewal-cycle-succeeded"),
   settleRenewalCycleSucceeded: jest.fn(async () => ({
     settled: true,
     reason: null,
@@ -17,7 +18,8 @@ jest.mock("../../utils/settle-renewal-cycle-succeeded", () => ({
 }))
 
 import type { MedusaContainer } from "@medusajs/framework/types"
-import { DunningCaseStatus } from "../../../modules/dunning/types"
+import { DunningCaseStatus, DunningRecoveryReason } from "../../../modules/dunning/types"
+import { RenewalSettlementSource } from "../../../modules/renewal/types"
 import { SubscriptionStatus } from "../../../modules/subscription/types"
 import { settleRenewalCycleSucceeded } from "../../utils/settle-renewal-cycle-succeeded"
 import { recoverDunningFromCapturedPayment } from "../recover-dunning-from-captured-payment"
@@ -127,14 +129,14 @@ describe("recoverDunningFromCapturedPayment", () => {
       subscription_id: "sub_1",
       dunning_case_id: "dun_1",
       renewal_order_id: "order_1",
-      recovery_reason: "customer_payment",
+      recovery_reason: DunningRecoveryReason.CUSTOMER_PAYMENT,
       reason: null,
     })
     expect(updateDunningCases).toHaveBeenCalledWith(
       expect.objectContaining({
         id: "dun_1",
         status: DunningCaseStatus.RECOVERED,
-        recovery_reason: "customer_payment",
+        recovery_reason: DunningRecoveryReason.CUSTOMER_PAYMENT,
         recovered_at: now,
         closed_at: now,
         next_retry_at: null,
@@ -160,7 +162,8 @@ describe("recoverDunningFromCapturedPayment", () => {
       subscription_id: "sub_1",
       order_id: "order_1",
       finished_at: now,
-      source: "customer_payment",
+      consumed_skip_next_cycle: false,
+      source: RenewalSettlementSource.CUSTOMER_PAYMENT,
     })
     expect(ensureNextRenewalCycleRun).toHaveBeenCalledWith({
       input: { subscription_id: "sub_1" },
@@ -248,7 +251,7 @@ describe("recoverDunningFromCapturedPayment", () => {
     })
   })
 
-  it("leaves the upcoming cycle alone when billing has moved past this one", async () => {
+  it("still ensures the upcoming cycle when billing has moved past this one", async () => {
     const { container } = buildContainer()
     ;(settleRenewalCycleSucceeded as jest.Mock).mockResolvedValueOnce({
       settled: false,
@@ -258,10 +261,10 @@ describe("recoverDunningFromCapturedPayment", () => {
     const response = await run(container)
 
     expect(response.output).toMatchObject({ recovered: true })
-    expect(ensureNextRenewalCycleRun).not.toHaveBeenCalled()
+    expect(ensureNextRenewalCycleRun).toHaveBeenCalledWith({ input: { subscription_id: "sub_1" } })
   })
 
-  it("leaves the upcoming cycle alone while healing an older superseded recovery", async () => {
+  it("still ensures the upcoming cycle while healing an older superseded recovery", async () => {
     // What the reconciler mostly finds on old data: a case closed long ago whose cycle the
     // subscription has already billed past.
     const { container } = buildContainer({
@@ -275,7 +278,7 @@ describe("recoverDunningFromCapturedPayment", () => {
 
     await run(container)
 
-    expect(ensureNextRenewalCycleRun).not.toHaveBeenCalled()
+    expect(ensureNextRenewalCycleRun).toHaveBeenCalledWith({ input: { subscription_id: "sub_1" } })
   })
 
   it("names the customer as the settlement source", async () => {
@@ -285,7 +288,7 @@ describe("recoverDunningFromCapturedPayment", () => {
 
     expect(settleRenewalCycleSucceeded).toHaveBeenCalledWith(
       container,
-      expect.objectContaining({ source: "customer_payment" })
+      expect.objectContaining({ source: RenewalSettlementSource.CUSTOMER_PAYMENT })
     )
   })
 

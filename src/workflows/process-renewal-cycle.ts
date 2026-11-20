@@ -2,6 +2,7 @@ import {
   createHook,
   createWorkflow,
   transform,
+  when,
   WorkflowResponse,
 } from "@medusajs/framework/workflows-sdk"
 import { acquireLockStep, releaseLockStep } from "@medusajs/medusa/core-flows"
@@ -17,9 +18,11 @@ import {
   finalizeRenewalCycleStep,
   prepareRenewalCycleStep,
   ProcessRenewalCycleStepInput,
+  RenewalRunOutcome,
 } from "./steps/process-renewal-cycle"
 import { labelSubscriptionOrderAdjustmentsStep } from "./steps/label-subscription-order-adjustments"
 import { buildAnalyticsIncrementalRebuildInput } from "./utils/analytics-incremental"
+import { renewalSubscriptionLockKey } from "../modules/renewal/utils/lock-key"
 
 export const setPaymentSessionDataResult = z
   .record(z.string(), z.unknown())
@@ -64,7 +67,7 @@ export const processRenewalCycleWorkflow = createWorkflow(
     const scope = resolveRenewalCycleSubscriptionStep(input)
 
     const lockKey = transform({ scope }, function ({ scope }) {
-      return `renewal:subscription:${scope.subscription_id}`
+      return renewalSubscriptionLockKey(scope.subscription_id)
     })
 
     acquireLockStep({
@@ -138,24 +141,50 @@ export const processRenewalCycleWorkflow = createWorkflow(
     )
     const paymentSessionData = setPaymentSessionData.getResult()
 
-    authorizeRenewalPaymentStep({
+    const authorization = authorizeRenewalPaymentStep({
       context,
       order_result: orderResult,
       payment_session_data: paymentSessionData,
     })
 
-    const result = finalizeRenewalCycleStep({
-      context,
-      order_result: orderResult,
-    })
-
-    const ensureInput = transform({ result }, function ({ result }) {
-      return {
-        subscription_id: result.subscription_id,
+    const finalized = when(
+      "finalize-renewal-charged-now",
+      { authorization },
+      function ({ authorization }) {
+        return !authorization.charge_submitted
       }
+    ).then(function () {
+      const result = finalizeRenewalCycleStep({
+        context,
+        order_result: orderResult,
+        authorization,
+      })
+
+      ensureNextRenewalCycleStep({
+        subscription_id: result.subscription_id,
+      })
+
+      return result
     })
 
-    ensureNextRenewalCycleStep(ensureInput)
+    const result = transform(
+      { finalized, authorization, context, orderResult },
+      function ({ finalized, authorization, context, orderResult }) {
+        if (finalized) {
+          return { ...finalized }
+        }
+
+        return {
+          outcome: authorization.charge_submitted
+            ? authorization.outcome
+            : RenewalRunOutcome.FAILED,
+          renewal_cycle: authorization.charge_submitted ? authorization.renewal_cycle : null,
+          subscription_id: context.subscription_id,
+          attempt_id: context.attempt_id,
+          generated_order_id: orderResult.generated_order_id,
+        }
+      }
+    )
 
     const incrementalAnalyticsInput = transform({ input }, function ({ input }) {
       return buildAnalyticsIncrementalRebuildInput({

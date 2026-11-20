@@ -1,22 +1,57 @@
 import {
   createWorkflow,
   transform,
+  when,
   WorkflowResponse,
 } from "@medusajs/framework/workflows-sdk"
+import { acquireLockStep, releaseLockStep } from "@medusajs/medusa/core-flows"
 import { normalizeActivityLogEvent } from "../modules/activity-log/utils/normalize-log-event"
 import {
   ActivityLogActorType,
   ActivityLogEventType,
 } from "../modules/activity-log/types"
+import { RetentionOfferType } from "../modules/cancellation/types"
+import { assertNoRenewalPaymentInProgressStep } from "./steps/assert-no-renewal-payment-in-progress"
 import { createSubscriptionLogEventStep } from "./steps/create-subscription-log-event"
 import {
   applyRetentionOfferStep,
   type ApplyRetentionOfferStepInput,
 } from "./steps/apply-retention-offer"
+import { resolveCancellationCaseSubscriptionStep } from "./steps/resolve-cancellation-case-subscription"
+import { renewalSubscriptionLockKey } from "../modules/renewal/utils/lock-key"
 
 export const applyRetentionOfferWorkflow = createWorkflow(
   "apply-retention-offer",
   function (input: ApplyRetentionOfferStepInput) {
+    const scope = resolveCancellationCaseSubscriptionStep({
+      cancellation_case_id: input.cancellation_case_id,
+    })
+    const renewalLockKey = transform({ scope }, function ({ scope }) {
+      return renewalSubscriptionLockKey(scope.subscription_id)
+    })
+
+    acquireLockStep({
+      key: renewalLockKey,
+      timeout: 5,
+      ttl: 120,
+      executeOnSubWorkflow: true,
+    }).config({
+      name: "acquire-apply-retention-offer-renewal-lock",
+    })
+
+    const dunningLocks = when(
+      "assert-pause-offer-without-renewal-payment-in-progress",
+      { input },
+      function ({ input }) {
+        return input.offer_type === RetentionOfferType.PAUSE_OFFER
+      }
+    ).then(function () {
+      return assertNoRenewalPaymentInProgressStep({
+        subscription_id: scope.subscription_id,
+        action: "be paused",
+      })
+    })
+
     const result = applyRetentionOfferStep(input)
     const logInput = transform({ result, input }, function ({ result, input }) {
       return {
@@ -56,6 +91,25 @@ export const applyRetentionOfferWorkflow = createWorkflow(
       }
     })
     createSubscriptionLogEventStep(logInput)
+
+    const dunningLockRelease = transform({ dunningLocks }, function ({ dunningLocks }) {
+      return { key: dunningLocks?.keys ?? [], owner_id: dunningLocks?.owner_id }
+    })
+
+    releaseLockStep({
+      key: dunningLockRelease.key,
+      ownerId: dunningLockRelease.owner_id,
+      executeOnSubWorkflow: true,
+    }).config({
+      name: "release-apply-retention-offer-dunning-locks",
+    })
+
+    releaseLockStep({
+      key: renewalLockKey,
+      executeOnSubWorkflow: true,
+    }).config({
+      name: "release-apply-retention-offer-renewal-lock",
+    })
 
     return new WorkflowResponse(result)
   }

@@ -56,7 +56,8 @@
             "scheduled",
             "processing",
             "succeeded",
-            "failed"
+            "failed",
+            "awaiting_payment"
           ],
           "mappedType": "enum"
         },
@@ -123,6 +124,15 @@
         },
         "applied_pending_update_data": {
           "name": "applied_pending_update_data",
+          "type": "jsonb",
+          "unsigned": false,
+          "autoincrement": false,
+          "primary": false,
+          "nullable": true,
+          "mappedType": "json"
+        },
+        "settlement_inputs": {
+          "name": "settlement_inputs",
           "type": "jsonb",
           "unsigned": false,
           "autoincrement": false,
@@ -380,6 +390,15 @@
           "primary": false,
           "nullable": true,
           "mappedType": "text"
+        },
+        "reported_payment_failure": {
+          "name": "reported_payment_failure",
+          "type": "jsonb",
+          "unsigned": false,
+          "autoincrement": false,
+          "primary": false,
+          "nullable": true,
+          "mappedType": "json"
         },
         "metadata": {
           "name": "metadata",

@@ -1,10 +1,12 @@
 import type { MedusaContainer } from "@medusajs/framework/types"
 import { ContainerRegistrationKeys, Modules } from "@medusajs/framework/utils"
+import { CANCELLATION_MODULE } from "../../modules/cancellation"
 import { DUNNING_MODULE } from "../../modules/dunning"
 import { DunningCaseStatus } from "../../modules/dunning/types"
 import { SUBSCRIPTION_MODULE } from "../../modules/subscription"
 import { SubscriptionStatus } from "../../modules/subscription/types"
 import { activateSubscriptionOnPaymentCaptured } from "../activate-subscription-on-payment-captured"
+import { SubscriptionLogEvents } from "../../modules/subscription/utils/observability"
 
 const ensureNextRenewalCycleRun = jest.fn(
   async (_input: { input: { subscription_id: string } }) => ({ result: {} })
@@ -40,7 +42,9 @@ const activationCall = { id: "sub_1", status: SubscriptionStatus.ACTIVE }
 
 function defaultStaged(): Staged {
   return {
-    payment: [{ id: "pay_1", payment_collection_id: "paycol_1" }],
+    payment: [
+      { id: "pay_1", payment_collection_id: "paycol_1", payment_session: { context: {} } },
+    ],
     cart_payment_collection: [{ cart_id: "cart_1" }],
     subscription: [
       {
@@ -116,6 +120,10 @@ function buildContainer(options: {
 
       if (key === DUNNING_MODULE) {
         return { listDunningCases: async () => dunningCases }
+      }
+
+      if (key === CANCELLATION_MODULE) {
+        return { listCancellationCases: async () => [] }
       }
 
       if (key === "logger") {
@@ -274,7 +282,7 @@ describe("activateSubscriptionOnPaymentCaptured", () => {
     expect(errorLogs).toEqual([
       JSON.stringify({
         domain: "subscriptions",
-        event: "payment_captured_on_terminal_subscription",
+        event: SubscriptionLogEvents.PAYMENT_CAPTURED_ON_TERMINAL_SUBSCRIPTION,
         subscription_id: "sub_1",
         payment_id: "pay_1",
         status: SubscriptionStatus.PAYMENT_FAILED,
@@ -371,7 +379,10 @@ describe("activateSubscriptionOnPaymentCaptured", () => {
     expect(recoverDunningRun).not.toHaveBeenCalled()
   })
 
-  it("logs one alertable line and keeps going when the recovery workflow throws", async () => {
+  it.each([
+    { name: "an error", rejection: new Error("lock timeout") },
+    { name: "a workflow's plain object", rejection: { name: "Error", message: "lock timeout" } },
+  ])("logs one alertable line naming the cause and keeps going when the recovery workflow throws $name", async ({ rejection }) => {
     // A throwing subscriber is logged and dropped by both event buses, so this must not raise.
     const errorLogs: string[] = []
     const container = buildContainer({
@@ -381,15 +392,16 @@ describe("activateSubscriptionOnPaymentCaptured", () => {
       errorLogs,
       dunningCases: [{ id: "dun_1", status: DunningCaseStatus.OPEN }],
     })
-    recoverDunningRun.mockRejectedValueOnce(new Error("lock timeout"))
+    recoverDunningRun.mockRejectedValueOnce(rejection)
 
     await activateSubscriptionOnPaymentCaptured(container, "pay_1")
 
     expect(errorLogs).toHaveLength(1)
     expect(JSON.parse(errorLogs[0])).toEqual({
       domain: "subscriptions",
-      event: "dunning_recovery_from_capture_failed",
+      event: SubscriptionLogEvents.DUNNING_RECOVERY_FROM_CAPTURE_FAILED,
       subscription_id: "sub_1",
+      order_id: "order_1",
       dunning_case_id: "dun_1",
       payment_id: "pay_1",
       alertable: true,
@@ -435,7 +447,7 @@ describe("activateSubscriptionOnPaymentCaptured", () => {
     expect(recoverDunningRun).not.toHaveBeenCalled()
     expect(errorLogs).toHaveLength(1)
     expect(JSON.parse(errorLogs[0]).event).toBe(
-      "payment_captured_on_terminal_subscription"
+      SubscriptionLogEvents.PAYMENT_CAPTURED_ON_TERMINAL_SUBSCRIPTION
     )
   })
 

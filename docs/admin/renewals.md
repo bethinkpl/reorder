@@ -142,6 +142,9 @@ The detail page currently renders:
 
 These sections are read-oriented and designed for quick operator inspection.
 
+While a charge waits for the payment provider's answer (`awaiting_payment` in the detail payload), `Cycle overview`
+also shows when the payment was submitted and after when an unpaid one can be resolved as failed.
+
 Layout:
 - the left column contains `Cycle overview`, `Approval summary`, `Pending changes`, `Attempt history`, and `Technical metadata`
 - the right column contains `Subscription summary` and `Generated order summary` as linked Medusa-style cards
@@ -152,6 +155,7 @@ Layout:
 
 The detail page action menu includes:
 - `Force renewal`
+- `Resolve payment…`
 - `Approve changes`
 - `Reject changes`
 
@@ -161,6 +165,9 @@ Current action rules in the UI:
 
 - `Force renewal`
   Available when cycle status is `scheduled` or `failed`.
+- `Resolve payment…`
+  Available when cycle status is `awaiting_payment`, or `processing` with its latest attempt still `processing`
+  (the charge was submitted; `awaiting_payment` in the detail payload is set).
 - `Approve changes`
   Available only when approval is required and approval status is `pending`.
 - `Reject changes`
@@ -202,6 +209,25 @@ Behavior:
 - submit shows a final confirmation prompt
 - errors are displayed inline in the drawer and through toast feedback
 - the drawer uses existing detail data and local form state rather than a separate remote display query
+
+### Resolve Payment Drawer
+
+Purpose:
+- end a renewal whose payment result never arrived, through `POST /admin/renewals/:id/resolve-awaiting-payment`
+
+Fields:
+- optional `reason`, an internal note kept on the failed attempt (`metadata.admin_resolution`); the customer never
+  sees it
+
+Behavior:
+- the drawer explains the outcome: the renewal is settled if its order has been paid; otherwise it is failed and
+  dunning starts, but only once the payment has waited longer than the minimum age
+  (`RENEWAL_AWAITING_PAYMENT_RESOLVE_MIN_HOURS`), with the moment taken from `awaiting_payment.can_fail_after`
+- submit shows a final confirmation prompt
+- success shows the resolution (settled or failed) through toast feedback and refetches the renewal queries
+- a refusal (for example "its payment may still arrive") is displayed inline in the drawer and through toast feedback
+- the drawer is the reusable `ResolveAwaitingPaymentDrawer` (`src/admin/components/resolve-awaiting-payment-drawer.tsx`),
+  which takes the route, the explanation and an `onResolved` callback
 
 ### Force Renewal Confirmation
 

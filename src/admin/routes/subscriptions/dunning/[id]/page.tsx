@@ -18,6 +18,7 @@ import {
 import {
   ArrowPath,
   CheckCircle,
+  CreditCard,
   EllipsisHorizontal,
   ShoppingBag,
   Spinner,
@@ -27,6 +28,8 @@ import {
 import { useMutation, useQueryClient } from "@tanstack/react-query"
 import { ReactNode, useEffect, useMemo, useState } from "react"
 import { Link, UIMatch, useParams } from "react-router-dom"
+import { ResolveAwaitingPaymentDrawer } from "../../../../components/resolve-awaiting-payment-drawer"
+import { getAdminErrorMessage } from "../../../../lib/admin-error-message"
 import { sdk } from "../../../../lib/client"
 import {
   invalidateAdminDunningQueries,
@@ -37,14 +40,17 @@ import {
   DunningAttemptAdminStatus,
   DunningCaseAdminDetail,
   DunningCaseAdminDetailResponse,
+  DunningAwaitingPaymentAdminResolution,
   DunningCaseAdminStatus,
   DunningRetryBlockedReason,
   MarkRecoveredDunningAdminRequest,
   MarkUnrecoveredDunningAdminRequest,
+  ResolveAwaitingDunningPaymentAdminResponse,
   RetryNowDunningAdminRequest,
   ReverseChurnDunningAdminRequest,
   UpdateDunningRetryScheduleAdminRequest,
 } from "../../../../types/dunning"
+import { RenewalCycleAdminStatus } from "../../../../types/renewal"
 
 type ActionDrawerMode =
   | "mark_recovered"
@@ -61,6 +67,13 @@ const terminalStatuses = new Set<DunningCaseAdminStatus>([
   DunningCaseAdminStatus.UNRECOVERED,
 ])
 
+const chargeInFlightStatuses = new Set<DunningCaseAdminStatus>([
+  DunningCaseAdminStatus.RETRYING,
+  DunningCaseAdminStatus.AWAITING_PAYMENT,
+])
+
+const HOUR_MS = 60 * 60 * 1000
+
 const DunningDetailPage = () => {
   const { id } = useParams()
   const queryClient = useQueryClient()
@@ -72,6 +85,7 @@ const DunningDetailPage = () => {
   const [intervals, setIntervals] = useState("1440, 4320, 10080")
   const [maxAttempts, setMaxAttempts] = useState("3")
   const [formError, setFormError] = useState<string | null>(null)
+  const [resolveDrawerOpen, setResolveDrawerOpen] = useState(false)
 
   const { data, isLoading, isError, error } = useAdminDunningDetailQuery(id)
   const dunningCase = data?.dunning_case
@@ -227,15 +241,20 @@ const DunningDetailPage = () => {
     }))
   }, [dunningCase])
 
-  const isCaseOpen = dunningCase
-    ? !terminalStatuses.has(dunningCase.status) &&
-    dunningCase.status !== DunningCaseAdminStatus.RETRYING
+  const isCaseActive = dunningCase
+    ? !terminalStatuses.has(dunningCase.status)
     : false
+  const isChargeInFlight = dunningCase
+    ? chargeInFlightStatuses.has(dunningCase.status)
+    : false
+  const isCaseOpen = isCaseActive && !isChargeInFlight
   const canRetryNow = dunningCase?.retry_eligible ?? false
   const retryBlockedReason = dunningCase?.retry_blocked_reason ?? null
   const canMarkRecovered = isCaseOpen
   const canMarkUnrecovered = isCaseOpen
   const canEditRetrySchedule = isCaseOpen
+  const canResolvePayment =
+    dunningCase?.status === DunningCaseAdminStatus.AWAITING_PAYMENT
   const canReverseChurn =
     dunningCase?.status === DunningCaseAdminStatus.UNRECOVERED &&
     dunningCase?.subscription?.status === "payment_failed"
@@ -262,6 +281,17 @@ const DunningDetailPage = () => {
       "3"
     )
   }, [actionDrawerOpen, actionDrawerMode, retryScheduleFormData])
+
+  const handlePaymentResolved = async (
+    response: ResolveAwaitingDunningPaymentAdminResponse
+  ) => {
+    await invalidateAdminDunningQueries(
+      queryClient,
+      id,
+      dunningCase?.subscription.subscription_id
+    )
+    toast.success(describeResolvedPayment(response))
+  }
 
   const openDrawer = (mode: ActionDrawerMode) => {
     setActionDrawerMode(mode)
@@ -480,7 +510,7 @@ const DunningDetailPage = () => {
                         <span>{retryNowMutation.isPending ? "Retrying..." : "Retry now"}</span>
                       </DropdownMenu.Item>
                     )
-                  : isCaseOpen && retryBlockedReason
+                  : isCaseActive && retryBlockedReason
                     ? (
                         <DropdownMenu.Item className="flex items-center gap-x-2" disabled>
                           <TriangleRightMini className="text-ui-fg-subtle" />
@@ -488,6 +518,18 @@ const DunningDetailPage = () => {
                         </DropdownMenu.Item>
                       )
                     : null}
+                {canResolvePayment
+                  ? (
+                      <DropdownMenu.Item
+                        className="flex items-center gap-x-2"
+                        disabled={isActionPending}
+                        onClick={() => setResolveDrawerOpen(true)}
+                      >
+                        <CreditCard className="text-ui-fg-subtle" />
+                        <span>Resolve payment…</span>
+                      </DropdownMenu.Item>
+                    )
+                  : null}
                 {canMarkRecovered
                   ? (
                       <DropdownMenu.Item
@@ -621,6 +663,20 @@ const DunningDetailPage = () => {
                   label="Recovery reason"
                   value={dunningCase.recovery_reason || "-"}
                 />
+                {dunningCase.awaiting_payment
+                  ? (
+                      <>
+                        <DetailRow
+                          label="Payment submitted"
+                          value={formatDateTime(dunningCase.awaiting_payment.submitted_at)}
+                        />
+                        <DetailRow
+                          label="Can be resolved as failed after"
+                          value={formatDateTime(dunningCase.awaiting_payment.can_fail_after)}
+                        />
+                      </>
+                    )
+                  : null}
               </div>
             </div>
           </Container>
@@ -909,6 +965,14 @@ const DunningDetailPage = () => {
         </div>
       </div>
 
+      <ResolveAwaitingPaymentDrawer
+        open={resolveDrawerOpen}
+        onOpenChange={setResolveDrawerOpen}
+        endpoint={`/admin/dunning/${dunningCase.id}/resolve-awaiting-payment`}
+        explanation={describeAwaitingPaymentResolution(dunningCase.awaiting_payment)}
+        onResolved={handlePaymentResolved}
+      />
+
       <Drawer open={actionDrawerOpen} onOpenChange={setActionDrawerOpen}>
         <Drawer.Content>
           <Drawer.Header>
@@ -1100,6 +1164,8 @@ function formatCaseStatus(status: DunningCaseAdminStatus) {
       return "Retry scheduled"
     case DunningCaseAdminStatus.RETRYING:
       return "Retrying"
+    case DunningCaseAdminStatus.AWAITING_PAYMENT:
+      return "Awaiting payment"
     case DunningCaseAdminStatus.AWAITING_MANUAL_RESOLUTION:
       return "Awaiting manual resolution"
     case DunningCaseAdminStatus.RECOVERED:
@@ -1109,32 +1175,22 @@ function formatCaseStatus(status: DunningCaseAdminStatus) {
   }
 }
 
-function formatRetryBlockedReason(reason: DunningRetryBlockedReason) {
-  switch (reason) {
-    case "no_active_case":
-      return "no active recovery case"
-    case "retry_in_progress":
-      return "a retry is already running"
-    case "case_closed":
-      return "the case is closed"
-    case "subscription_not_retryable":
-      return "the subscription is not chargeable"
-    case "no_payment_method":
-      return "no saved payment method"
-    case "max_attempts_reached":
-      return "all attempts are used up"
-    case "missing_renewal_order":
-      return "the case has no renewal order"
-    case "missing_retry_schedule":
-      return "the case has no retry schedule"
-    case "retry_not_due":
-      return "the next retry is not due yet"
-    case "manual_resolution_required":
-      return "the case needs manual resolution"
-    default:
-      reason satisfies never
-      return reason
-  }
+const RETRY_BLOCKED_REASON_LABELS: Record<DunningRetryBlockedReason, string> = {
+  [DunningRetryBlockedReason.NO_ACTIVE_CASE]: "no active recovery case",
+  [DunningRetryBlockedReason.RETRY_IN_PROGRESS]: "a retry is already running",
+  [DunningRetryBlockedReason.PAYMENT_IN_PROGRESS]: "a payment is awaiting its result",
+  [DunningRetryBlockedReason.CASE_CLOSED]: "the case is closed",
+  [DunningRetryBlockedReason.SUBSCRIPTION_NOT_RETRYABLE]: "the subscription is not chargeable",
+  [DunningRetryBlockedReason.NO_PAYMENT_METHOD]: "no saved payment method",
+  [DunningRetryBlockedReason.MAX_ATTEMPTS_REACHED]: "all attempts are used up",
+  [DunningRetryBlockedReason.MISSING_RENEWAL_ORDER]: "the case has no renewal order",
+  [DunningRetryBlockedReason.MISSING_RETRY_SCHEDULE]: "the case has no retry schedule",
+  [DunningRetryBlockedReason.RETRY_NOT_DUE]: "the next retry is not due yet",
+  [DunningRetryBlockedReason.MANUAL_RESOLUTION_REQUIRED]: "the case needs manual resolution",
+}
+
+function formatRetryBlockedReason(reason: `${DunningRetryBlockedReason}`) {
+  return RETRY_BLOCKED_REASON_LABELS[reason]
 }
 
 function getCaseStatusColor(status: DunningCaseAdminStatus) {
@@ -1144,6 +1200,8 @@ function getCaseStatusColor(status: DunningCaseAdminStatus) {
     case DunningCaseAdminStatus.RETRY_SCHEDULED:
       return "orange"
     case DunningCaseAdminStatus.RETRYING:
+      return "blue"
+    case DunningCaseAdminStatus.AWAITING_PAYMENT:
       return "blue"
     case DunningCaseAdminStatus.AWAITING_MANUAL_RESOLUTION:
       return "grey"
@@ -1199,14 +1257,16 @@ function formatRenewalStatus(
   status: NonNullable<DunningCaseAdminDetail["renewal"]>["status"]
 ) {
   switch (status) {
-    case "scheduled":
+    case RenewalCycleAdminStatus.SCHEDULED:
       return "Scheduled"
-    case "processing":
+    case RenewalCycleAdminStatus.PROCESSING:
       return "Processing"
-    case "succeeded":
+    case RenewalCycleAdminStatus.SUCCEEDED:
       return "Succeeded"
-    case "failed":
+    case RenewalCycleAdminStatus.FAILED:
       return "Failed"
+    case RenewalCycleAdminStatus.AWAITING_PAYMENT:
+      return "Awaiting payment"
   }
 }
 
@@ -1214,10 +1274,33 @@ function formatIntervals(intervals: number[]) {
   return intervals.map((interval) => `${interval} min`).join(", ")
 }
 
-function getAdminErrorMessage(error: unknown, fallback: string) {
-  if (error instanceof Error) {
-    return error.message
+function describeAwaitingPaymentResolution(
+  awaitingPayment: DunningCaseAdminDetail["awaiting_payment"]
+) {
+  const recovers = "Recovers the case if its renewal order has been paid."
+  const fails =
+    "Otherwise fails the retry as a failed payment would: the next retry is scheduled, or the case is closed as unrecovered after its last attempt"
+
+  if (!awaitingPayment) {
+    return `${recovers} ${fails}, once the payment has waited long enough.`
   }
 
-  return fallback
+  const waitMs =
+    Date.parse(awaitingPayment.can_fail_after) -
+    Date.parse(awaitingPayment.submitted_at)
+  const minHours = Math.round(waitMs / HOUR_MS)
+
+  return `${recovers} ${fails}, once the payment has waited longer than ${minHours} hours (after ${formatDateTime(awaitingPayment.can_fail_after)}); until then an unpaid retry is left waiting.`
+}
+
+function describeResolvedPayment(
+  response: ResolveAwaitingDunningPaymentAdminResponse
+) {
+  if (response.resolution === DunningAwaitingPaymentAdminResolution.RECOVERED) {
+    return "Payment resolved: the case is recovered"
+  }
+
+  return response.dunning_case.status === DunningCaseAdminStatus.UNRECOVERED
+    ? "Payment resolved as failed: the case is closed as unrecovered"
+    : "Payment resolved as failed: the next retry is scheduled"
 }

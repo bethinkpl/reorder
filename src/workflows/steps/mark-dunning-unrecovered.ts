@@ -1,7 +1,11 @@
 import { createStep, StepResponse } from "@medusajs/framework/workflows-sdk"
 import { DUNNING_MODULE } from "../../modules/dunning"
 import type DunningModuleService from "../../modules/dunning/service"
-import { DunningCaseStatus } from "../../modules/dunning/types"
+import {
+  CHARGE_IN_FLIGHT_DUNNING_CASE_STATUSES,
+  DunningCaseStatus,
+  DunningRecoveryReason,
+} from "../../modules/dunning/types"
 import { dunningErrors } from "../../modules/dunning/utils/errors"
 import { settleSubscriptionPaymentFailure } from "../utils/settle-subscription-payment-failure"
 
@@ -64,7 +68,7 @@ export const markDunningUnrecoveredStep = createStep(
       throw dunningErrors.alreadyUnrecovered(dunningCase.id)
     }
 
-    if (dunningCase.status === DunningCaseStatus.RETRYING) {
+    if (CHARGE_IN_FLIGHT_DUNNING_CASE_STATUSES.includes(dunningCase.status)) {
       throw dunningErrors.retryInFlightTransitionBlocked(
         dunningCase.id,
         "be marked unrecovered"
@@ -78,7 +82,7 @@ export const markDunningUnrecoveredStep = createStep(
       status: DunningCaseStatus.UNRECOVERED,
       next_retry_at: null,
       closed_at: changedAt,
-      recovery_reason: "marked_unrecovered_by_admin",
+      recovery_reason: DunningRecoveryReason.MARKED_UNRECOVERED_BY_ADMIN,
       metadata: appendAuditMetadata(
         dunningCase.metadata,
         input,
@@ -89,7 +93,7 @@ export const markDunningUnrecoveredStep = createStep(
     const settlement = await settleSubscriptionPaymentFailure(container, {
       subscription_id: dunningCase.subscription_id,
       dunning_case_id: dunningCase.id,
-      recovery_reason: "marked_unrecovered_by_admin",
+      recovery_reason: DunningRecoveryReason.MARKED_UNRECOVERED_BY_ADMIN,
       at: changedAt,
     })
 

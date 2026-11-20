@@ -5,9 +5,11 @@ import type {
 } from "@medusajs/framework/http"
 import { ContainerRegistrationKeys, MedusaError } from "@medusajs/framework/utils"
 import { CancellationCaseStatus } from "../../../../../modules/cancellation/types"
-import { DunningCaseStatus } from "../../../../../modules/dunning/types"
+import { ACTIVE_DUNNING_CASE_STATUSES, DunningCaseStatus } from "../../../../../modules/dunning/types"
+import { getDunningErrorMessage } from "../../../../../modules/dunning/utils/observability"
 import {
   RetryBlockedReason,
+  readRetryBlockedReason,
   resolveRetryEligibility,
 } from "../../../../../modules/dunning/utils/retry-eligibility"
 import { resolveProductSubscriptionConfig } from "../../../../../modules/plan-offer/utils/effective-config"
@@ -18,10 +20,16 @@ import {
 } from "../../../../../modules/subscription/types"
 import { getEffectiveNextRenewalAt } from "../../../../../modules/subscription/utils/effective-next-renewal"
 import {
+  isRenewalPaymentInProgress,
+  RENEWAL_PAYMENT_IN_PROGRESS,
+} from "../../../../../modules/subscription/utils/errors"
+import {
   computeSubscriptionDiscountAmount,
   roundCurrency,
 } from "../../../../../workflows/utils/subscription-discount"
 import type { FrequencyInterval } from "../../../../../common/types/frequency-interval"
+import { isLockBusyError } from "../../../../../common/utils/lock-busy-error"
+import { type RouteError, mapMedusaErrorByType } from "../../../../route-errors"
 
 const ACTIVE_CANCELLATION_STATUSES = [
   CancellationCaseStatus.REQUESTED,
@@ -334,7 +342,7 @@ export async function retrieveOwnedSubscriptionDetail(
   })
 }
 
-function mapPaymentStatus(
+export function mapPaymentStatus(
   subscriptionStatus: string,
   dunningCase: DunningCaseRecord | null
 ) {
@@ -348,15 +356,20 @@ function mapPaymentStatus(
 
   if (
     subscriptionStatus === SubscriptionStatus.PAST_DUE ||
-    dunningCase?.status === DunningCaseStatus.OPEN ||
-    dunningCase?.status === DunningCaseStatus.RETRY_SCHEDULED ||
-    dunningCase?.status === DunningCaseStatus.RETRYING ||
-    dunningCase?.status === DunningCaseStatus.AWAITING_MANUAL_RESOLUTION
+    (dunningCase &&
+      ACTIVE_DUNNING_CASE_STATUSES.includes(dunningCase.status as DunningCaseStatus))
   ) {
     return dunningCase ? "recovery_required" : "recovery_failed"
   }
 
   return "ok"
+}
+
+/** Storefronts only know a retry charge in flight as `retry_in_progress`. */
+function toStoreRetryBlockedReason<T extends RetryBlockedReason | null>(reason: T) {
+  return reason === RetryBlockedReason.PAYMENT_IN_PROGRESS
+    ? RetryBlockedReason.RETRY_IN_PROGRESS
+    : reason
 }
 
 function mapPaymentRecovery(
@@ -387,9 +400,12 @@ function mapPaymentRecovery(
 
   return {
     dunning_case_id: dunningCase.id,
-    state: dunningCase.status,
+    state:
+      dunningCase.status === DunningCaseStatus.AWAITING_PAYMENT
+        ? DunningCaseStatus.RETRYING
+        : dunningCase.status,
     retry_eligible: eligibility.eligible,
-    retry_blocked_reason: eligibility.blocked_reason,
+    retry_blocked_reason: toStoreRetryBlockedReason(eligibility.blocked_reason),
     attempt_count: dunningCase.attempt_count,
     max_attempts: dunningCase.max_attempts,
     next_retry_at: toIsoStringOrNull(dunningCase.next_retry_at),
@@ -452,7 +468,7 @@ async function getSubscriptionDunningCase(
     ],
     filters: {
       subscription_id: [subscriptionId],
-      status: ACTIVE_DUNNING_STATUSES,
+      status: [...ACTIVE_DUNNING_CASE_STATUSES],
     },
   })
 
@@ -487,13 +503,6 @@ async function getLatestDunningAttempt(
   return latest ?? null
 }
 
-const ACTIVE_DUNNING_STATUSES = [
-  DunningCaseStatus.OPEN,
-  DunningCaseStatus.RETRY_SCHEDULED,
-  DunningCaseStatus.RETRYING,
-  DunningCaseStatus.AWAITING_MANUAL_RESOLUTION,
-]
-
 async function getDunningCasesForSubscriptions(
   query: any,
   subscriptionIds: string[]
@@ -521,7 +530,7 @@ async function getDunningCasesForSubscriptions(
     ],
     filters: {
       subscription_id: subscriptionIds,
-      status: ACTIVE_DUNNING_STATUSES,
+      status: [...ACTIVE_DUNNING_CASE_STATUSES],
     },
   })
 
@@ -808,12 +817,57 @@ export class StoreRetryNotEligibleError extends MedusaError {
   readonly blocked_reason: RetryBlockedReason
 
   constructor(subscriptionId: string, blockedReason: RetryBlockedReason) {
+    const storeReason = toStoreRetryBlockedReason(blockedReason)
+
     super(
       MedusaError.Types.CONFLICT,
-      `Subscription '${subscriptionId}' is not eligible for payment retry (${blockedReason}).`
+      `Subscription '${subscriptionId}' is not eligible for payment retry (${storeReason}).`
     )
-    this.blocked_reason = blockedReason
+    this.blocked_reason = storeReason
   }
+}
+
+export type StoreRetryRouteError = RouteError & {
+  blocked_reason?: RetryBlockedReason
+}
+
+export function mapStoreRetryError(
+  subscriptionId: string,
+  error: unknown
+): StoreRetryRouteError {
+  const blockedReason = isLockBusyError(error)
+    ? RetryBlockedReason.RETRY_IN_PROGRESS
+    : readRetryBlockedReason(error)
+
+  if (blockedReason) {
+    const refusal = new StoreRetryNotEligibleError(subscriptionId, blockedReason)
+
+    return {
+      status: 409,
+      type: refusal.type,
+      message: refusal.message,
+      blocked_reason: refusal.blocked_reason,
+    }
+  }
+
+  const message = getDunningErrorMessage(error)
+  const byType = mapMedusaErrorByType(error, message)
+
+  if (byType) {
+    return byType
+  }
+
+  const normalized = message.toLowerCase()
+
+  if (normalized.includes("was not found")) {
+    return { status: 404, type: MedusaError.Types.NOT_FOUND, message }
+  }
+
+  if (normalized.includes("invalid") || normalized.includes("missing")) {
+    return { status: 400, type: MedusaError.Types.INVALID_DATA, message }
+  }
+
+  return { status: 409, type: MedusaError.Types.CONFLICT, message }
 }
 
 export async function getRetryableDunningCaseForSubscription(
@@ -942,4 +996,25 @@ export async function getStoreProductSubscriptionOfferResponse(
 
 export function sendStoreJson(res: MedusaResponse, body: unknown, status = 200) {
   return res.status(status).json(body)
+}
+
+export function mapStoreSubscriptionChangeConflict(error: unknown) {
+  if (isRenewalPaymentInProgress(error)) {
+    return {
+      type: MedusaError.Types.CONFLICT,
+      code: RENEWAL_PAYMENT_IN_PROGRESS,
+      message:
+        "A payment for this subscription is being processed. Please try again once it has completed.",
+    }
+  }
+
+  if (isLockBusyError(error)) {
+    return {
+      type: MedusaError.Types.CONFLICT,
+      message:
+        "This subscription is already being updated. Please try again in a moment.",
+    }
+  }
+
+  return null
 }

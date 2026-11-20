@@ -1,7 +1,10 @@
+import { serializeError } from "@medusajs/framework/utils"
 import { DunningCaseStatus } from "../../types"
 import { SubscriptionStatus } from "../../../subscription/types"
+import { dunningErrors } from "../errors"
 import {
   RetryBlockedReason,
+  readRetryBlockedReason,
   resolveRetryEligibility,
   toRetryBlockedError,
 } from "../retry-eligibility"
@@ -80,6 +83,14 @@ describe("resolveRetryEligibility", () => {
     expect(
       resolveRetryEligibility(buildInput({ dunningCase: { status: DunningCaseStatus.RETRYING } }))
     ).toEqual({ eligible: false, blocked_reason: RetryBlockedReason.RETRY_IN_PROGRESS })
+  })
+
+  it("blocks while a submitted charge awaits the provider's answer", () => {
+    expect(
+      resolveRetryEligibility(
+        buildInput({ dunningCase: { status: DunningCaseStatus.AWAITING_PAYMENT } })
+      )
+    ).toEqual({ eligible: false, blocked_reason: "payment_in_progress" })
   })
 
   it.each([DunningCaseStatus.RECOVERED, DunningCaseStatus.UNRECOVERED])(
@@ -255,5 +266,25 @@ describe("toRetryBlockedError", () => {
 
     expect(error).toBeInstanceOf(Error)
     expect(error.message).toContain("dun_1")
+  })
+})
+
+describe("readRetryBlockedReason", () => {
+  it.each(Object.values(RetryBlockedReason))(
+    "reads '%s' from the error and from the plain object a workflow run rethrows",
+    (reason) => {
+      const error = toRetryBlockedError(reason, { id: "dun_1", status: DunningCaseStatus.RETRYING })
+
+      expect(readRetryBlockedReason(error)).toEqual(reason)
+      expect(readRetryBlockedReason(serializeError(error))).toEqual(reason)
+    }
+  )
+
+  it.each([
+    ["another dunning error", dunningErrors.conflict("DunningCase 'dun_1' can't be closed")],
+    ["an error with a code of its own", { code: "renewal_payment_in_progress", message: "busy" }],
+    ["no error", null],
+  ])("reads nothing from %s", (_name, error) => {
+    expect(readRetryBlockedReason(error)).toBeNull()
   })
 })

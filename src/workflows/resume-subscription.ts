@@ -3,6 +3,8 @@ import {
   transform,
   WorkflowResponse,
 } from "@medusajs/framework/workflows-sdk"
+import { acquireLockStep, releaseLockStep } from "@medusajs/medusa/core-flows"
+import { assertNoRenewalPaymentInProgressStep } from "./steps/assert-no-renewal-payment-in-progress"
 import { createSubscriptionLogEventStep } from "./steps/create-subscription-log-event"
 import { ensureNextRenewalCycleStep } from "./steps/ensure-next-renewal-cycle"
 import {
@@ -17,10 +19,29 @@ import {
 import { rebuildAnalyticsDailySnapshotsWorkflow } from "./rebuild-analytics-daily-snapshots"
 import { toISOStringOrNull } from "./utils/date-output"
 import { buildAnalyticsIncrementalRebuildInput } from "./utils/analytics-incremental"
+import { renewalSubscriptionLockKey } from "../modules/renewal/utils/lock-key"
 
 export const resumeSubscriptionWorkflow = createWorkflow(
   "resume-subscription",
   function (input: ResumeSubscriptionStepInput) {
+    const renewalLockKey = transform({ input }, function ({ input }) {
+      return renewalSubscriptionLockKey(input.id)
+    })
+
+    acquireLockStep({
+      key: renewalLockKey,
+      timeout: 5,
+      ttl: 120,
+      executeOnSubWorkflow: true,
+    }).config({
+      name: "acquire-resume-subscription-renewal-lock",
+    })
+
+    const dunningLocks = assertNoRenewalPaymentInProgressStep({
+      subscription_id: input.id,
+      action: "be resumed",
+    })
+
     const subscriptionChange = resumeSubscriptionStep(input)
     const logInput = transform(
       { subscriptionChange, input },
@@ -92,6 +113,21 @@ export const resumeSubscriptionWorkflow = createWorkflow(
     )
     rebuildAnalyticsDailySnapshotsWorkflow.runAsStep({
       input: incrementalAnalyticsInput,
+    })
+
+    releaseLockStep({
+      key: dunningLocks.keys,
+      ownerId: dunningLocks.owner_id,
+      executeOnSubWorkflow: true,
+    }).config({
+      name: "release-resume-subscription-dunning-locks",
+    })
+
+    releaseLockStep({
+      key: renewalLockKey,
+      executeOnSubWorkflow: true,
+    }).config({
+      name: "release-resume-subscription-renewal-lock",
     })
 
     return new WorkflowResponse({

@@ -54,6 +54,7 @@
             "open",
             "retry_scheduled",
             "retrying",
+            "awaiting_payment",
             "awaiting_manual_resolution",
             "recovered",
             "unrecovered"
@@ -396,6 +397,15 @@
           "primary": false,
           "nullable": true,
           "mappedType": "text"
+        },
+        "reported_payment_failure": {
+          "name": "reported_payment_failure",
+          "type": "jsonb",
+          "unsigned": false,
+          "autoincrement": false,
+          "primary": false,
+          "nullable": true,
+          "mappedType": "json"
         },
         "metadata": {
           "name": "metadata",

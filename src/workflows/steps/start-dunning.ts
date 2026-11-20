@@ -2,7 +2,9 @@ import { createStep, StepResponse } from "@medusajs/framework/workflows-sdk"
 import { DUNNING_MODULE } from "../../modules/dunning"
 import type DunningModuleService from "../../modules/dunning/service"
 import {
+  ACTIVE_DUNNING_CASE_STATUSES,
   DunningCaseStatus,
+  DunningPaymentFailureSource,
   type DunningRetrySchedule,
 } from "../../modules/dunning/types"
 import { dunningErrors } from "../../modules/dunning/utils/errors"
@@ -21,19 +23,9 @@ import { subscriptionErrors } from "../../modules/subscription/utils/errors"
 import type { SubscriptionSettingsShape } from "../../modules/settings/utils/normalize-settings"
 import { toISOStringOrNull } from "../utils/date-output"
 import { getEffectiveSubscriptionSettings } from "../utils/subscription-settings"
+import { withoutPaymentContext } from "./pause-subscription"
 
-const ACTIVE_DUNNING_CASE_STATUSES = new Set<DunningCaseStatus>([
-  DunningCaseStatus.OPEN,
-  DunningCaseStatus.RETRY_SCHEDULED,
-  DunningCaseStatus.RETRYING,
-  DunningCaseStatus.AWAITING_MANUAL_RESOLUTION,
-])
-
-const PAYMENT_FAILURE_SOURCES = new Set([
-  "payment_provider",
-  "payment_session",
-  "payment_capture",
-])
+const PAYMENT_FAILURE_SOURCES = new Set<string>(Object.values(DunningPaymentFailureSource))
 
 type SubscriptionRecord = {
   id: string
@@ -71,7 +63,7 @@ export type StartDunningStepInput = {
   subscription_id: string
   renewal_cycle_id: string
   renewal_order_id?: string | null
-  payment_failure_source: "payment_provider" | "payment_session" | "payment_capture"
+  payment_failure_source: `${DunningPaymentFailureSource}`
   payment_error_code?: string | null
   payment_error_message: string
   failed_at?: string | Date | null
@@ -108,7 +100,7 @@ type StartDunningCompensation =
   }
 
 function isActiveDunningCase(status: DunningCaseStatus) {
-  return ACTIVE_DUNNING_CASE_STATUSES.has(status)
+  return ACTIVE_DUNNING_CASE_STATUSES.includes(status)
 }
 
 async function loadSubscription(
@@ -430,7 +422,9 @@ export const startDunningStep = createStep(
     }
 
     if (compensation.previous_subscription) {
-      await subscriptionModule.updateSubscriptions(compensation.previous_subscription)
+      await subscriptionModule.updateSubscriptions(
+        withoutPaymentContext(compensation.previous_subscription)
+      )
     }
   }
 )

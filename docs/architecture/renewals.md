@@ -111,7 +111,8 @@ The current implementation follows these rules:
 - pending changes are only considered when they are effective for the cycle date
 - approval is enforced when the cycle requires it
 - `Plans & Offers` are re-resolved at execution time before pending changes are applied
-- successful execution updates the subscription’s active cadence and clears applied `pending_update_data`
+- successful execution updates the subscription’s active cadence and clears `pending_update_data` only while it is still the request the cycle applied (matched by its `requested_at`, which the cycle records with the applied change); a plan change scheduled while the cycle waited for its payment or for dunning stays pending for the next cycle
+- successful execution resets `skip_next_cycle` only when the cycle's run had it set, which the run records in `settlement_inputs.consumed_skip_next_cycle`: a skip requested while the charge awaited the provider is kept for the next cycle. A dunning recovery never resets it, since dunning only follows a charge and a run with the skip set charges nothing, so a skip found then was requested for a later cycle
 - the cycle records whether pending changes were actually applied
 
 This means:
@@ -245,9 +246,10 @@ It is responsible for:
 - recording success or failure
 
 Current implementation detail:
-- the workflow acquires a Medusa workflow lock with key `renewal:${renewal_cycle_id}`
+- the workflow acquires a Medusa workflow lock with key `renewal:subscription:<subscription_id>`
 - the current lock settings are `timeout = 10` seconds and `ttl = 120` seconds
-- this shared lock protects both scheduler execution and manual force execution
+- this shared lock protects scheduler execution, manual force execution, the settlement or failure of a charge
+  that awaits the provider, and the cancellation, pause and resume workflows, which take it themselves
 
 ### Renewal Order Pricing and Discounts
 
@@ -284,7 +286,10 @@ promotions or plan pricing for them by default. The renewal item build works as 
   by the checkout; recurring application is an app-level replay of frozen terms
 - a failure between `prepare-renewal-cycle` and the failure-recording steps (e.g. a hook
   handler throw) reverts the workflow; a compensation handler on `prepare-renewal-cycle`
-  marks the cycle and attempt FAILED so the cycle never strands in PROCESSING
+  marks the cycle and attempt FAILED so the cycle does not strand in PROCESSING. The exception is
+  a run that submitted its charge but could not park the cycle (`park_failed`): the cycle stays
+  PROCESSING with its attempt open, and its capture or, ten minutes on, the awaiting-payment sweep
+  settles it once the order is paid
 - the generated order id is persisted on the cycle as soon as the order exists, and a retry
   **reuses** it instead of creating a duplicate order for the same billing period. Retries
   collect the order's `summary.pending_difference`, not its total — an attempt that captured
@@ -292,7 +297,8 @@ promotions or plan pricing for them by default. The renewal item build works as 
   straight to finalizing (advancing the subscription) rather than double-charging or wedging
 - the host app can pay part or all of the order before the card is charged via the
   `applyRenewalCredits` workflow hook (see `src/workflows/README.md`). It runs after the order
-  exists, on a reused order too, and the payment collection is sized from the
+  exists, on a reused order too (but never for a failed cycle while a dunning case is active: dunning
+  retries don't call it), and the payment collection is sized from the
   `pending_difference` read after it; an order the credits cover needs no saved payment method
   and is finalized without a charge
 

@@ -8,6 +8,7 @@ import {
   RenewalAdminSubscriptionSummary,
   RenewalAttemptAdminRecord,
   RenewalAttemptAdminStatus,
+  RenewalAwaitingPaymentAdminSummary,
   RenewalCycleAdminDetail,
   RenewalCycleAdminDetailResponse,
   RenewalCycleAdminListItem,
@@ -15,12 +16,17 @@ import {
   RenewalCycleAdminStatus,
 } from "../../../admin/types/renewal"
 import {
+  CHARGE_IN_FLIGHT_RENEWAL_CYCLE_STATUSES,
   RenewalApprovalStatus,
   RenewalAppliedPendingUpdateData,
   RenewalAttemptStatus,
   RenewalCycleStatus,
 } from "../types"
 import { getEffectiveNextRenewalAt } from "../../subscription/utils/effective-next-renewal"
+import {
+  awaitingPaymentLimitEndsAt,
+  resolveAwaitingPaymentResolveMinHours,
+} from "./awaiting-payment-age"
 import { renewalErrors } from "./errors"
 import type { FrequencyInterval } from "../../../common/types/frequency-interval"
 
@@ -44,7 +50,7 @@ type RenewalCycleRecord = {
   subscription_id: string
   scheduled_for: string
   processed_at: string | null
-  status: "scheduled" | "processing" | "succeeded" | "failed"
+  status: RenewalCycleStatus
   approval_required: boolean
   approval_status: "pending" | "approved" | "rejected" | null
   approval_decided_at: string | null
@@ -210,7 +216,7 @@ function assertSortableField(order?: string) {
   }
 }
 
-function mapCycleStatus(status: RenewalCycleRecord["status"]) {
+export function mapCycleStatus(status: RenewalCycleRecord["status"]) {
   switch (status) {
     case RenewalCycleStatus.SCHEDULED:
       return RenewalCycleAdminStatus.SCHEDULED
@@ -220,6 +226,8 @@ function mapCycleStatus(status: RenewalCycleRecord["status"]) {
       return RenewalCycleAdminStatus.SUCCEEDED
     case RenewalCycleStatus.FAILED:
       return RenewalCycleAdminStatus.FAILED
+    case RenewalCycleStatus.AWAITING_PAYMENT:
+      return RenewalCycleAdminStatus.AWAITING_PAYMENT
   }
 
   throw renewalErrors.invalidData(`Unsupported renewal cycle status '${status}'`)
@@ -625,6 +633,28 @@ export async function listRenewalAttemptsForCycle(
   }))
 }
 
+function mapAwaitingPayment(
+  cycleStatus: RenewalCycleRecord["status"],
+  attempts: RenewalAttemptAdminRecord[]
+): RenewalAwaitingPaymentAdminSummary | null {
+  const latest = attempts[attempts.length - 1]
+
+  if (
+    !CHARGE_IN_FLIGHT_RENEWAL_CYCLE_STATUSES.includes(cycleStatus) ||
+    latest?.status !== RenewalAttemptAdminStatus.PROCESSING
+  ) {
+    return null
+  }
+
+  return {
+    submitted_at: new Date(latest.started_at).toISOString(),
+    can_fail_after: awaitingPaymentLimitEndsAt(
+      latest.started_at,
+      resolveAwaitingPaymentResolveMinHours()
+    ).toISOString(),
+  }
+}
+
 export async function listAdminRenewals(
   container: MedusaContainer,
   input: ListAdminRenewalsInput
@@ -744,6 +774,7 @@ export async function getAdminRenewalDetail(
     last_error: record.last_error,
     pending_changes: mapPendingChanges(record.applied_pending_update_data),
     attempts,
+    awaiting_payment: mapAwaitingPayment(record.status, attempts),
     metadata: record.metadata ?? null,
   }
 

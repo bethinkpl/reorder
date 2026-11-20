@@ -1,24 +1,33 @@
 import type { MedusaContainer } from "@medusajs/framework/types"
+import { ContainerRegistrationKeys, Modules } from "@medusajs/framework/utils"
 import { createStep, StepResponse } from "@medusajs/framework/workflows-sdk"
 import { DUNNING_MODULE } from "../../modules/dunning"
 import type DunningModuleService from "../../modules/dunning/service"
-import { DunningCaseStatus } from "../../modules/dunning/types"
+import {
+  CHARGE_IN_FLIGHT_DUNNING_CASE_STATUSES,
+  DunningAttemptStatus,
+  DunningCaseStatus,
+  DunningRecoveryReason,
+} from "../../modules/dunning/types"
 import { dunningErrors } from "../../modules/dunning/utils/errors"
 import {
   createDunningCorrelationId,
+  DunningLogEvents,
   getDunningErrorMessage,
   logDunningEvent,
 } from "../../modules/dunning/utils/observability"
+import { RenewalSettlementSource } from "../../modules/renewal/types"
 import { SUBSCRIPTION_MODULE } from "../../modules/subscription"
 import type SubscriptionModuleService from "../../modules/subscription/service"
 import { SubscriptionStatus } from "../../modules/subscription/types"
 import { subscriptionErrors } from "../../modules/subscription/utils/errors"
 import { ensureNextRenewalCycleWorkflow } from "../ensure-next-renewal-cycle"
 import { settleDunningCaseRecovered } from "../utils/settle-dunning-recovery"
-import { settleRenewalCycleSucceeded } from "../utils/settle-renewal-cycle-succeeded"
+import {
+  settleRenewalCycleSucceeded,
+  SUBSCRIPTION_CANCELLED_REFUSAL,
+} from "../utils/settle-renewal-cycle-succeeded"
 import { loadOrderAmounts } from "./run-dunning-retry"
-
-const RECOVERY_REASON = "customer_payment"
 
 type DunningCaseRecord = {
   id: string
@@ -33,6 +42,16 @@ type DunningCaseRecord = {
 type SubscriptionRecord = {
   id: string
   status: SubscriptionStatus
+}
+
+type CapturedPaymentRecord = {
+  id: string
+  payment_session?: { context?: Record<string, unknown> | null } | null
+}
+
+type RetryAttemptPayment = {
+  attempt_id: string
+  payment_id: string
 }
 
 export type RecoverDunningFromCapturedPaymentStepInput = {
@@ -72,6 +91,82 @@ async function loadSubscription(container: MedusaContainer, id: string) {
   }
 }
 
+async function findRetryAttemptForPayment(
+  container: MedusaContainer,
+  dunningCaseId: string,
+  paymentId: string
+): Promise<RetryAttemptPayment | null> {
+  const query = container.resolve(ContainerRegistrationKeys.QUERY)
+  const dunningModule = container.resolve<DunningModuleService>(DUNNING_MODULE)
+
+  const { data: payments } = await query.graph({
+    entity: "payment",
+    fields: ["id", "payment_session.context"],
+    filters: { id: paymentId },
+  })
+
+  const payment: CapturedPaymentRecord | undefined = payments[0]
+  const context = payment?.payment_session?.context
+  const attemptId = context?.dunning_attempt_id
+
+  if (context?.dunning_case_id !== dunningCaseId || typeof attemptId !== "string") {
+    return null
+  }
+
+  const [attempt] = await dunningModule.listDunningAttempts({
+    id: attemptId,
+    dunning_case_id: dunningCaseId,
+    status: DunningAttemptStatus.PROCESSING,
+  })
+
+  return attempt ? { attempt_id: attempt.id, payment_id: paymentId } : null
+}
+
+async function findCapturedAwaitingAttempt(
+  container: MedusaContainer,
+  dunningCaseId: string
+): Promise<RetryAttemptPayment | null> {
+  const dunningModule = container.resolve<DunningModuleService>(DUNNING_MODULE)
+  const paymentModule = container.resolve(Modules.PAYMENT)
+
+  const attempts = await dunningModule.listDunningAttempts({
+    dunning_case_id: dunningCaseId,
+    status: DunningAttemptStatus.PROCESSING,
+  })
+  const awaiting = attempts.reduce<(typeof attempts)[number] | null>(
+    (highest, attempt) =>
+      !highest || attempt.attempt_no > highest.attempt_no ? attempt : highest,
+    null
+  )
+
+  if (!awaiting?.payment_reference) {
+    return null
+  }
+
+  const payments = await paymentModule.listPayments({
+    payment_session_id: awaiting.payment_reference,
+  })
+  const captured = payments.find((payment) => payment.captured_at)
+
+  return captured ? { attempt_id: awaiting.id, payment_id: captured.id } : null
+}
+
+async function findRetryAttemptPayment(
+  container: MedusaContainer,
+  dunningCase: DunningCaseRecord,
+  paymentId: string | null
+) {
+  if (paymentId) {
+    return await findRetryAttemptForPayment(container, dunningCase.id, paymentId)
+  }
+
+  if (CHARGE_IN_FLIGHT_DUNNING_CASE_STATUSES.includes(dunningCase.status)) {
+    return await findCapturedAwaitingAttempt(container, dunningCase.id)
+  }
+
+  return null
+}
+
 /**
  * Closes a dunning case the customer settled themselves, by paying the renewal order through the
  * host app instead of waiting for the next scheduled retry.
@@ -98,16 +193,23 @@ export async function recoverDunningFromCapturedPayment(
 
   const answer = (
     recovered: boolean,
-    reason: string | null
+    reason: string | null,
+    recoveryReason: DunningRecoveryReason = DunningRecoveryReason.CUSTOMER_PAYMENT
   ): StepResponse<RecoverDunningFromCapturedPaymentStepOutput> =>
     new StepResponse<RecoverDunningFromCapturedPaymentStepOutput>({
       recovered,
       subscription_id: subscription.id,
       dunning_case_id: dunningCase.id,
       renewal_order_id: dunningCase.renewal_order_id,
-      recovery_reason: recovered ? RECOVERY_REASON : null,
+      recovery_reason: recovered ? recoveryReason : null,
       reason,
     })
+
+  // A capture on a cancelled subscription is reconciled as a late payment, which asks the host for
+  // a refund once; recovering here would reopen billing on it instead.
+  if (subscription.status === SubscriptionStatus.CANCELLED) {
+    return answer(false, SUBSCRIPTION_CANCELLED_REFUSAL)
+  }
 
   if (!dunningCase.renewal_order_id) {
     return answer(false, "missing_renewal_order")
@@ -126,19 +228,24 @@ export async function recoverDunningFromCapturedPayment(
   // Deliberately non-fatal: by the time this runs the case is closed and the money is in, and a
   // throw would abandon a recovery nothing revisits - the case would no longer look open to
   // either the scheduler or the reconciler.
-  const healCycle = async () => {
+  const healCycle = async (
+    source: RenewalSettlementSource = RenewalSettlementSource.CUSTOMER_PAYMENT
+  ) => {
     try {
       const settlement = await settleRenewalCycleSucceeded(container, {
         renewal_cycle_id: dunningCase.renewal_cycle_id,
         subscription_id: subscription.id,
         order_id: dunningCase.renewal_order_id,
         finished_at: now,
-        source: RECOVERY_REASON,
+        // Dunning only follows a charge, and a run with the skip set charges nothing: a skip the
+        // subscription has now was requested after the cycle ran, for a later one.
+        consumed_skip_next_cycle: false,
+        source,
       })
 
-      // Billing already moved past this cycle, so the upcoming cycle is somebody else's and
-      // re-deriving it here would delete the one that is actually due.
-      if (settlement.reason === "cycle_superseded") {
+      // Also after a supersession: an earlier settlement of this cycle may have moved the dates
+      // and failed before it scheduled the next cycle.
+      if (settlement.reason === SUBSCRIPTION_CANCELLED_REFUSAL) {
         return
       }
 
@@ -147,7 +254,7 @@ export async function recoverDunningFromCapturedPayment(
       })
     } catch (error) {
       logDunningEvent(logger, "error", {
-        event: "dunning.customer_recovery",
+        event: DunningLogEvents.CUSTOMER_RECOVERY,
         outcome: "failed",
         correlation_id: correlationId,
         dunning_case_id: dunningCase.id,
@@ -165,7 +272,7 @@ export async function recoverDunningFromCapturedPayment(
 
   if (dunningCase.status === DunningCaseStatus.UNRECOVERED) {
     logDunningEvent(logger, "error", {
-      event: "dunning.customer_recovery",
+      event: DunningLogEvents.CUSTOMER_RECOVERY,
       outcome: "blocked",
       correlation_id: correlationId,
       dunning_case_id: dunningCase.id,
@@ -191,18 +298,35 @@ export async function recoverDunningFromCapturedPayment(
     return answer(false, "already_recovered")
   }
 
-  await settleDunningCaseRecovered(container, {
+  const retryPayment = await findRetryAttemptPayment(
+    container,
+    dunningCase,
+    input.payment_id
+  )
+  const recoveryReason = retryPayment
+    ? DunningRecoveryReason.PAYMENT_RECOVERED
+    : DunningRecoveryReason.CUSTOMER_PAYMENT
+
+  const settlement = await settleDunningCaseRecovered(container, {
     dunning_case: dunningCase,
-    subscription,
+    attempt: retryPayment ? { id: retryPayment.attempt_id } : undefined,
     finished_at: now,
-    recovery_reason: RECOVERY_REASON,
-    payment_reference: input.payment_id,
+    recovery_reason: recoveryReason,
+    payment_reference: retryPayment?.payment_id ?? input.payment_id,
   })
 
-  await healCycle()
+  if (!settlement.recovered) {
+    return answer(false, settlement.reason)
+  }
+
+  await healCycle(
+    retryPayment
+      ? RenewalSettlementSource.DUNNING_RETRY
+      : RenewalSettlementSource.CUSTOMER_PAYMENT
+  )
 
   logDunningEvent(logger, "info", {
-    event: "dunning.customer_recovery",
+    event: DunningLogEvents.CUSTOMER_RECOVERY,
     outcome: "succeeded",
     correlation_id: correlationId,
     dunning_case_id: dunningCase.id,
@@ -211,12 +335,13 @@ export async function recoverDunningFromCapturedPayment(
     success_count: 1,
     recovered_count: 1,
     metadata: {
-      payment_id: input.payment_id,
+      payment_id: retryPayment?.payment_id ?? input.payment_id,
       renewal_order_id: dunningCase.renewal_order_id,
+      recovery_reason: recoveryReason,
     },
   })
 
-  return answer(true, null)
+  return answer(true, null, recoveryReason)
 }
 
 export const recoverDunningFromCapturedPaymentStep = createStep(

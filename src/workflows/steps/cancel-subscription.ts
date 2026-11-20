@@ -61,16 +61,18 @@ export const cancelSubscriptionStep = createStep(
       },
     })
 
+    const previous = asSubscriptionWorkflowRecord(subscription)
+
     return new StepResponse<SubscriptionWorkflowStepResult, SubscriptionWorkflowRecord>(
       {
         current: asSubscriptionWorkflowRecord(updated),
-        previous: asSubscriptionWorkflowRecord(subscription),
+        previous,
       },
-      asSubscriptionWorkflowRecord(subscription)
+      previous
     )
   },
-  async function (subscription: SubscriptionWorkflowRecord | undefined, { container }) {
-    if (!subscription) {
+  async function (previous: SubscriptionWorkflowRecord | undefined, { container }) {
+    if (!previous) {
       return
     }
 
@@ -78,7 +80,7 @@ export const cancelSubscriptionStep = createStep(
       container.resolve(SUBSCRIPTION_MODULE)
 
     await subscriptionModuleService.updateSubscriptions(
-      asSubscriptionUpdateInput(subscription)
+      asSubscriptionUpdateInput(previous)
     )
   }
 )

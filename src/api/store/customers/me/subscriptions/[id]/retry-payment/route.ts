@@ -3,44 +3,16 @@ import type {
   MedusaResponse,
 } from "@medusajs/framework/http"
 import type { PostStoreRetrySubscriptionPaymentSchemaType } from "../../validators"
-import { MedusaError } from "@medusajs/framework/utils"
 import { runDunningRetryWorkflow } from "../../../../../../../workflows"
 import {
   getOwnedSubscriptionForAction,
   getRetryableDunningCaseForSubscription,
   getStoreSubscriptionDetailResponse,
+  mapStoreRetryError,
   requireStoreCustomer,
   sendStoreJson,
   StoreRetryNotEligibleError,
 } from "../../utils"
-
-function mapStoreRetryError(error: unknown) {
-  const message =
-    error instanceof Error ? error.message : "Unexpected subscription retry error"
-  const normalized = message.toLowerCase()
-
-  if (normalized.includes("was not found")) {
-    return {
-      status: 404,
-      type: MedusaError.Types.NOT_FOUND,
-      message,
-    }
-  }
-
-  if (normalized.includes("invalid") || normalized.includes("missing")) {
-    return {
-      status: 400,
-      type: MedusaError.Types.INVALID_DATA,
-      message,
-    }
-  }
-
-  return {
-    status: 409,
-    type: MedusaError.Types.CONFLICT,
-    message,
-  }
-}
 
 export const POST = async (
   req: AuthenticatedMedusaRequest<PostStoreRetrySubscriptionPaymentSchemaType>,
@@ -78,12 +50,9 @@ export const POST = async (
       },
     })
   } catch (error) {
-    const mapped = mapStoreRetryError(error)
+    const { status, ...body } = mapStoreRetryError(req.params.id, error)
 
-    return res.status(mapped.status).json({
-      type: mapped.type,
-      message: mapped.message,
-    })
+    return res.status(status).json(body)
   }
 
   const customerId = await requireStoreCustomer(req)

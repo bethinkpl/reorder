@@ -9,6 +9,7 @@ import {
   PostAdminDunningRetryScheduleSchema,
   PostAdminMarkRecoveredDunningSchema,
   PostAdminMarkUnrecoveredDunningSchema,
+  PostAdminResolveAwaitingDunningPaymentSchema,
   PostAdminRetryNowDunningSchema,
   PostAdminReverseChurnDunningSchema,
 } from "./validators"
@@ -65,6 +66,13 @@ export const adminDunningMiddlewares: MiddlewareRoute[] = [
     matcher: "/admin/dunning/:id/reverse-churn",
     method: "POST",
     middlewares: [validateAndTransformBody(PostAdminReverseChurnDunningSchema)],
+  },
+  {
+    matcher: "/admin/dunning/:id/resolve-awaiting-payment",
+    method: "POST",
+    middlewares: [
+      validateAndTransformBody(PostAdminResolveAwaitingDunningPaymentSchema),
+    ],
   },
   {
     matcher: "/admin/dunning/:id/retry-schedule",

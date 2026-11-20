@@ -17,6 +17,8 @@ import {
 import { DUNNING_MODULE } from "../../src/modules/dunning"
 import type DunningModuleService from "../../src/modules/dunning/service"
 import { DunningCaseStatus } from "../../src/modules/dunning/types"
+import { dunningCaseLockKey } from "../../src/modules/dunning/utils/lock-key"
+import { STALE_RETRY_MINUTES } from "../../src/modules/dunning/utils/stale-retry"
 import { RENEWAL_MODULE } from "../../src/modules/renewal"
 import type RenewalModuleService from "../../src/modules/renewal/service"
 import { RenewalCycleStatus } from "../../src/modules/renewal/types"
@@ -33,11 +35,16 @@ import {
   createRenewalCycleSeed,
   createSubscriptionSeed,
 } from "../helpers/cancellation-fixtures"
+import { createDunningAttemptSeed } from "../helpers/dunning-fixtures"
 
 const CUSTOMER_ID = "cus_self_service"
 
 function daysFromNow(days: number) {
   return new Date(Date.now() + days * 24 * 60 * 60 * 1000)
+}
+
+function minutesAgo(minutes: number) {
+  return new Date(Date.now() - minutes * 60 * 1000)
 }
 
 medusaIntegrationTestRunner({
@@ -297,13 +304,10 @@ medusaIntegrationTestRunner({
         expect(updatedSubscription.skip_next_cycle).toEqual(false)
       })
 
-      it("refuses to cancel while a dunning retry is in flight", async () => {
+      async function seedRetryingCase(reference: string, attemptStartedAt?: Date) {
         const container = getContainer()
-        const subscriptionModule =
-          container.resolve<SubscriptionModuleService>(SUBSCRIPTION_MODULE)
-
         const subscription = await createSubscriptionSeed(container, {
-          reference: "SUB-CUST-CANCEL-005",
+          reference,
           status: SubscriptionStatus.PAST_DUE,
           customer_id: CUSTOMER_ID,
           next_renewal_at: daysFromNow(-3),
@@ -313,34 +317,93 @@ medusaIntegrationTestRunner({
           status: RenewalCycleStatus.FAILED,
           scheduled_for: daysFromNow(-3),
         })
-        await createDunningCaseSeed(container, {
+        const dunningCase = await createDunningCaseSeed(container, {
           subscription_id: subscription.id,
           renewal_cycle_id: renewal.id,
           status: DunningCaseStatus.RETRYING,
         })
 
-        await expect(
-          cancelSubscriptionByCustomerWorkflow(container).run({
-            input: {
-              subscription_id: subscription.id,
-              reason: "Please cancel",
-              triggered_by: CUSTOMER_ID,
-            },
+        if (attemptStartedAt) {
+          await createDunningAttemptSeed(container, {
+            dunning_case_id: dunningCase.id,
+            started_at: attemptStartedAt,
           })
-        ).rejects.toMatchObject({
-          message: expect.stringContaining("retry is in flight"),
+        }
+
+        return { subscription, dunningCase }
+      }
+
+      it.each([
+        { retry: "with no attempt yet", startedMinutesAgo: null },
+        {
+          retry: "whose attempt is younger than the stale-retry margin",
+          startedMinutesAgo: STALE_RETRY_MINUTES - 1,
+        },
+      ])(
+        "refuses to cancel while a dunning retry $retry is in flight, writing nothing",
+        async ({ startedMinutesAgo }) => {
+          const container = getContainer()
+          const dunningModule =
+            container.resolve<DunningModuleService>(DUNNING_MODULE)
+          const subscriptionModule =
+            container.resolve<SubscriptionModuleService>(SUBSCRIPTION_MODULE)
+          const { subscription, dunningCase } = await seedRetryingCase(
+            `SUB-CUST-CANCEL-005-${startedMinutesAgo}`,
+            startedMinutesAgo === null ? undefined : minutesAgo(startedMinutesAgo)
+          )
+
+          await expect(
+            cancelSubscriptionByCustomerWorkflow(container).run({
+              input: {
+                subscription_id: subscription.id,
+                reason: "Please cancel",
+                triggered_by: CUSTOMER_ID,
+              },
+            })
+          ).rejects.toMatchObject({
+            message: expect.stringContaining("retry is in flight"),
+          })
+
+          expect(await dunningModule.retrieveDunningCase(dunningCase.id)).toMatchObject({
+            status: DunningCaseStatus.RETRYING,
+            closed_at: null,
+          })
+          expect(await subscriptionModule.retrieveSubscription(subscription.id)).toMatchObject({
+            status: SubscriptionStatus.PAST_DUE,
+            cancelled_at: null,
+          })
+        }
+      )
+
+      it("closes a case a retry run left retrying once its attempt is older than the stale-retry margin", async () => {
+        const container = getContainer()
+        const dunningModule =
+          container.resolve<DunningModuleService>(DUNNING_MODULE)
+        const subscriptionModule =
+          container.resolve<SubscriptionModuleService>(SUBSCRIPTION_MODULE)
+        const { subscription, dunningCase } = await seedRetryingCase(
+          "SUB-CUST-CANCEL-005-STALE",
+          minutesAgo(STALE_RETRY_MINUTES + 1)
+        )
+
+        await cancelSubscriptionByCustomerWorkflow(container).run({
+          input: {
+            subscription_id: subscription.id,
+            reason: "Please cancel",
+            triggered_by: CUSTOMER_ID,
+          },
         })
 
-        const untouchedSubscription =
-          await subscriptionModule.retrieveSubscription(subscription.id)
-
-        expect(untouchedSubscription.status).toEqual(
-          SubscriptionStatus.PAST_DUE
-        )
-        expect(untouchedSubscription.cancelled_at).toBeNull()
+        expect(await dunningModule.retrieveDunningCase(dunningCase.id)).toMatchObject({
+          status: DunningCaseStatus.UNRECOVERED,
+          closed_at: expect.any(Date),
+        })
+        expect(
+          (await subscriptionModule.retrieveSubscription(subscription.id)).status
+        ).toEqual(SubscriptionStatus.CANCELLED)
       })
 
-      it("waits for a concurrent retry to release its case before closing it", async () => {
+      it("waits for a concurrent retry to release its case, then refuses while the retry it left retrying is in flight", async () => {
         const container = getContainer()
         const dunningModule =
           container.resolve<DunningModuleService>(DUNNING_MODULE)
@@ -365,7 +428,7 @@ medusaIntegrationTestRunner({
           status: DunningCaseStatus.RETRY_SCHEDULED,
         })
 
-        await locking.acquire(`dunning:${dunningCase.id}`, { expire: 30 })
+        await locking.acquire(dunningCaseLockKey(dunningCase.id), { expire: 30 })
 
         const cancellation = cancelSubscriptionByCustomerWorkflow(
           container
@@ -395,25 +458,22 @@ medusaIntegrationTestRunner({
           id: dunningCase.id,
           status: DunningCaseStatus.RETRYING,
         } as any)
-        await locking.release(`dunning:${dunningCase.id}`)
+        await createDunningAttemptSeed(container, { dunning_case_id: dunningCase.id })
+        await locking.release(dunningCaseLockKey(dunningCase.id))
 
         await expect(settled).resolves.toEqual("rejected")
         await expect(cancellation).rejects.toMatchObject({
           message: expect.stringContaining("retry is in flight"),
         })
 
-        const finalCase = await dunningModule.retrieveDunningCase(
-          dunningCase.id
-        )
-        const untouchedSubscription =
-          await subscriptionModule.retrieveSubscription(subscription.id)
-
-        expect(finalCase.status).toEqual(DunningCaseStatus.RETRYING)
-        expect(finalCase.closed_at).toBeNull()
-        expect(untouchedSubscription.status).toEqual(
-          SubscriptionStatus.PAST_DUE
-        )
-        expect(untouchedSubscription.cancelled_at).toBeNull()
+        expect(await dunningModule.retrieveDunningCase(dunningCase.id)).toMatchObject({
+          status: DunningCaseStatus.RETRYING,
+          closed_at: null,
+        })
+        expect(await subscriptionModule.retrieveSubscription(subscription.id)).toMatchObject({
+          status: SubscriptionStatus.PAST_DUE,
+          cancelled_at: null,
+        })
       })
 
       it("rejects a second cancellation and leaves the first one untouched", async () => {

@@ -1,4 +1,6 @@
 import { randomUUID } from "crypto"
+import type { OperationLogOutcome } from "../../../common/types/log-outcome"
+import type { RenewalTriggerType } from "../types"
 
 type LoggerLike = {
   info: (message: string) => void
@@ -8,11 +10,31 @@ type LoggerLike = {
 
 type LogLevel = "info" | "warn" | "error"
 
+export const RenewalLogEvents = {
+  EXECUTION: "renewal.execution",
+  DUNNING: "renewal.dunning",
+  FORCE: "renewal.force",
+  JOB: "renewal.job",
+  JOB_CYCLE: "renewal.job.cycle",
+  AWAITING_PAYMENT_PARK: "renewal.awaiting_payment_park",
+  AWAITING_PAYMENT_SETTLEMENT: "renewal.awaiting_payment_settlement",
+  AWAITING_PAYMENT_RESOLVED: "renewal.awaiting_payment_resolved",
+  AWAITING_PAYMENT_OVERDUE: "renewal.awaiting_payment_overdue",
+  AWAITING_PAYMENT_SESSION_MISSING: "renewal.awaiting_payment_session_missing",
+  PROCESSING_SETTLEMENT: "renewal.processing_settlement",
+  PAYMENT_FAILURE_RECORDED: "renewal.payment_failure_recorded",
+  RECORDED_PAYMENT_FAILURE: "renewal.recorded_payment_failure",
+  LATE_PAYMENT_FAILURE: "renewal.late_payment_failure",
+  STALE_ATTEMPT_CLOSED: "renewal.stale_attempt_closed",
+} as const
+
 export type RenewalFailureKind =
   | "already_processing"
   | "duplicate_execution"
   | "cycle_superseded"
   | "customer_payment_in_progress"
+  | "awaiting_payment"
+  | "dunning_owns_cycle"
   | "subscription_not_eligible"
   | "approval_blocked"
   | "offer_policy_blocked"
@@ -24,18 +46,19 @@ type RenewalLogPayload = {
   correlation_id: string
   renewal_cycle_id?: string
   subscription_id?: string
-  trigger_type?: "scheduler" | "manual"
+  trigger_type?: `${RenewalTriggerType}`
   triggered_by?: string | null
   attempt_no?: number
   duration_ms?: number
   success_count?: number
   failure_count?: number
   blocked_count?: number
+  awaiting_count?: number
   scanned_count?: number
   processed_count?: number
   batch_size?: number
   job_name?: string
-  outcome?: "started" | "succeeded" | "failed" | "blocked" | "completed"
+  outcome?: OperationLogOutcome | "park_failed"
   failure_kind?: RenewalFailureKind
   alertable?: boolean
   message?: string
@@ -64,6 +87,14 @@ export function classifyRenewalFailure(error: unknown): RenewalFailureKind {
   // Ahead of the order-creation rule: the message names the order the customer is paying.
   if (message.includes("the customer is paying")) {
     return "customer_payment_in_progress"
+  }
+
+  if (message.includes("is awaiting its payment")) {
+    return "awaiting_payment"
+  }
+
+  if (message.includes("is handled by an active dunning case")) {
+    return "dunning_owns_cycle"
   }
 
   if (message.includes("isn't eligible for renewal")) {
@@ -98,13 +129,21 @@ export function classifyRenewalFailure(error: unknown): RenewalFailureKind {
   return "unexpected_error"
 }
 
+export const CYCLE_STATE_BLOCKED_RENEWAL_FAILURE_KINDS: readonly RenewalFailureKind[] = [
+  "already_processing",
+  "duplicate_execution",
+  "awaiting_payment",
+  "dunning_owns_cycle",
+]
+
+export const BLOCKED_RENEWAL_FAILURE_KINDS: readonly RenewalFailureKind[] = [
+  ...CYCLE_STATE_BLOCKED_RENEWAL_FAILURE_KINDS,
+  "cycle_superseded",
+  "customer_payment_in_progress",
+]
+
 export function isAlertableRenewalFailure(kind: RenewalFailureKind) {
-  return ![
-    "already_processing",
-    "duplicate_execution",
-    "cycle_superseded",
-    "customer_payment_in_progress",
-  ].includes(kind)
+  return !BLOCKED_RENEWAL_FAILURE_KINDS.includes(kind)
 }
 
 export function getRenewalErrorMessage(error: unknown) {

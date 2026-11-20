@@ -1,14 +1,10 @@
 import { createFindParams } from "@medusajs/medusa/api/utils/validators"
 import { z } from "zod"
+import { RenewalCycleStatus } from "../../../modules/renewal/types"
 
 const optionalIsoDateTime = z.string().datetime().optional()
 
-const renewalCycleStatusSchema = z.enum([
-  "scheduled",
-  "processing",
-  "succeeded",
-  "failed",
-])
+const renewalCycleStatusSchema = z.nativeEnum(RenewalCycleStatus)
 
 const renewalApprovalStatusSchema = z.enum([
   "pending",
@@ -87,4 +83,12 @@ export const PostAdminRejectRenewalChangesSchema = z.object({
 
 export type PostAdminRejectRenewalChangesSchemaType = z.infer<
   typeof PostAdminRejectRenewalChangesSchema
+>
+
+export const PostAdminResolveAwaitingRenewalPaymentSchema = z.object({
+  reason: z.string().trim().min(1).max(500).optional(),
+})
+
+export type PostAdminResolveAwaitingRenewalPaymentSchemaType = z.infer<
+  typeof PostAdminResolveAwaitingRenewalPaymentSchema
 >

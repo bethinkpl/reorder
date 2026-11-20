@@ -9,6 +9,7 @@ import {
 export enum RetryBlockedReason {
   NO_ACTIVE_CASE = "no_active_case",
   RETRY_IN_PROGRESS = "retry_in_progress",
+  PAYMENT_IN_PROGRESS = "payment_in_progress",
   CASE_CLOSED = "case_closed",
   SUBSCRIPTION_NOT_RETRYABLE = "subscription_not_retryable",
   NO_PAYMENT_METHOD = "no_payment_method",
@@ -48,7 +49,7 @@ export type RetryEligibility = {
   blocked_reason: RetryBlockedReason | null
 }
 
-const RETRYABLE_CASE_STATUSES: readonly DunningCaseStatus[] = [
+const RETRYABLE_DUNNING_CASE_STATUSES: readonly DunningCaseStatus[] = [
   DunningCaseStatus.OPEN,
   DunningCaseStatus.RETRY_SCHEDULED,
   DunningCaseStatus.AWAITING_MANUAL_RESOLUTION,
@@ -87,7 +88,11 @@ export function resolveRetryEligibility(input: RetryEligibilityInput): RetryElig
     return blocked(RetryBlockedReason.RETRY_IN_PROGRESS)
   }
 
-  if (!RETRYABLE_CASE_STATUSES.includes(dunningCase.status)) {
+  if (dunningCase.status === DunningCaseStatus.AWAITING_PAYMENT) {
+    return blocked(RetryBlockedReason.PAYMENT_IN_PROGRESS)
+  }
+
+  if (!RETRYABLE_DUNNING_CASE_STATUSES.includes(dunningCase.status)) {
     return blocked(RetryBlockedReason.CASE_CLOSED)
   }
 
@@ -134,6 +139,30 @@ export function toRetryBlockedError(
   reason: RetryBlockedReason,
   dunningCase: { id: string, status: DunningCaseStatus }
 ) {
+  const error = describeRetryBlocked(reason, dunningCase)
+
+  error.code = reason
+
+  return error
+}
+
+const RETRY_BLOCKED_REASONS = new Set<string>(Object.values(RetryBlockedReason))
+
+export function readRetryBlockedReason(error: unknown): RetryBlockedReason | null {
+  const code =
+    typeof error === "object" && error !== null && "code" in error
+      ? error.code
+      : null
+
+  return typeof code === "string" && RETRY_BLOCKED_REASONS.has(code)
+    ? (code as RetryBlockedReason)
+    : null
+}
+
+function describeRetryBlocked(
+  reason: RetryBlockedReason,
+  dunningCase: { id: string, status: DunningCaseStatus }
+) {
   switch (reason) {
     case RetryBlockedReason.CASE_CLOSED:
       return dunningCase.status === DunningCaseStatus.RECOVERED
@@ -141,6 +170,10 @@ export function toRetryBlockedError(
         : dunningErrors.alreadyUnrecovered(dunningCase.id)
     case RetryBlockedReason.RETRY_IN_PROGRESS:
       return dunningErrors.retryAlreadyProcessing(dunningCase.id)
+    case RetryBlockedReason.PAYMENT_IN_PROGRESS:
+      return dunningErrors.conflict(
+        `DunningCase '${dunningCase.id}' retry is already processing: its charge awaits the provider's answer (${reason})`
+      )
     case RetryBlockedReason.MAX_ATTEMPTS_REACHED:
       return dunningErrors.maxAttemptsExceeded(dunningCase.id)
     case RetryBlockedReason.RETRY_NOT_DUE:

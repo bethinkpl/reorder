@@ -3,6 +3,7 @@ import type {
   MedusaResponse,
 } from "@medusajs/framework/http"
 import { MedusaError } from "@medusajs/framework/utils"
+import { isLockBusyError } from "../../../../../../../common/utils/lock-busy-error"
 import type { PostStoreStartCancellationSchemaType } from "../../validators"
 import { cancelSubscriptionByCustomerWorkflow } from "../../../../../../../workflows"
 import { SubscriptionStatus } from "../../../../../../../modules/subscription/types"
@@ -13,71 +14,49 @@ import {
   sendStoreJson,
 } from "../../utils"
 
-function getNestedMessage(value: unknown): string | null {
-  if (!value) {
-    return null
-  }
+/** A workflow rethrows its step's error as a serialised plain object, which keeps the flag. */
+function findMedusaError(error: unknown): Pick<MedusaError, "type" | "message"> | null {
+  const cause =
+    typeof error === "object" && error !== null
+      ? (error as { cause?: unknown }).cause
+      : null
 
-  if (typeof value === "string") {
-    return value
-  }
-
-  if (value instanceof Error) {
-    const causeMessage = getNestedMessage(
-      (value as Error & { cause?: unknown }).cause
-    )
-
-    return value.message || causeMessage || null
+  for (const candidate of [error, cause]) {
+    if (
+      typeof candidate === "object" &&
+      candidate !== null &&
+      MedusaError.isMedusaError(candidate)
+    ) {
+      return candidate as Pick<MedusaError, "type" | "message">
+    }
   }
 
   return null
 }
 
+const CONFLICT_TYPES: readonly string[] = [
+  MedusaError.Types.CONFLICT,
+  MedusaError.Types.NOT_ALLOWED,
+]
+
+const UNEXPECTED_ANSWER = {
+  status: 500,
+  message: "Unexpected error while cancelling the subscription",
+}
+
+const CUSTOMER_ANSWERS: Record<string, { status: number, message: string }> = {
+  [MedusaError.Types.NOT_FOUND]: {
+    status: 404,
+    message: "This subscription could not be found.",
+  },
+  [MedusaError.Types.INVALID_DATA]: {
+    status: 400,
+    message: "This cancellation request can't be processed. Please check it and try again.",
+  },
+}
+
 export function mapStoreCancellationError(error: unknown) {
-  const errorCause =
-    error instanceof Error ? (error as Error & { cause?: unknown }).cause : null
-  const medusaError =
-    error instanceof MedusaError
-      ? error
-      : errorCause instanceof MedusaError
-        ? errorCause
-        : null
-
-  if (medusaError) {
-    const typeToStatus: Record<string, number> = {
-      [MedusaError.Types.NOT_FOUND]: 404,
-      [MedusaError.Types.INVALID_DATA]: 400,
-      [MedusaError.Types.CONFLICT]: 409,
-    }
-
-    if (medusaError.type === MedusaError.Types.CONFLICT) {
-      const isRetryInFlight = medusaError.message
-        .toLowerCase()
-        .includes("retry is in flight")
-
-      return {
-        status: 409,
-        type: medusaError.type,
-        message: isRetryInFlight
-          ? "A payment recovery attempt is in progress. Please try again in a moment."
-          : "This subscription can't be cancelled right now. Please try again in a moment.",
-      }
-    }
-
-    return {
-      status: typeToStatus[medusaError.type] ?? 500,
-      type: medusaError.type,
-      message: medusaError.message,
-    }
-  }
-
-  const message = getNestedMessage(error) ?? ""
-  const normalized = message.toLowerCase()
-
-  if (
-    normalized.includes("failed to acquire lock") ||
-    normalized.includes("acquiring lock")
-  ) {
+  if (isLockBusyError(error)) {
     return {
       status: 409,
       type: MedusaError.Types.CONFLICT,
@@ -86,11 +65,25 @@ export function mapStoreCancellationError(error: unknown) {
     }
   }
 
-  return {
-    status: 500,
-    type: MedusaError.Types.UNEXPECTED_STATE,
-    message: "Unexpected error while cancelling the subscription",
+  const medusaError = findMedusaError(error)
+
+  if (medusaError) {
+    if (CONFLICT_TYPES.includes(medusaError.type)) {
+      return {
+        status: 409,
+        type: MedusaError.Types.CONFLICT,
+        message:
+          "This subscription can't be cancelled right now. Please try again in a moment.",
+      }
+    }
+
+    // The workflow's own messages name internal records; the request itself is validated before it.
+    const answer = CUSTOMER_ANSWERS[medusaError.type] ?? UNEXPECTED_ANSWER
+
+    return { ...answer, type: medusaError.type }
   }
+
+  return { ...UNEXPECTED_ANSWER, type: MedusaError.Types.UNEXPECTED_STATE }
 }
 
 export const POST = async (

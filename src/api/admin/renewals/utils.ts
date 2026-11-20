@@ -7,6 +7,8 @@ import {
   type ListAdminRenewalsInput,
 } from "../../../modules/renewal/utils/admin-query"
 import { getRenewalErrorMessage } from "../../../modules/renewal/utils/observability"
+import { isLockBusyError } from "../../../common/utils/lock-busy-error"
+import { type RouteError, mapMedusaErrorByType } from "../../route-errors"
 
 export function normalizeAdminRenewalsListQuery(
   query: GetAdminRenewalsSchemaType
@@ -56,8 +58,23 @@ export async function getAdminRenewalsListResponse(
   )
 }
 
-export function mapRenewalAdminRouteError(error: unknown) {
+export function mapRenewalAdminRouteError(error: unknown): RouteError {
+  if (isLockBusyError(error)) {
+    return {
+      status: 409,
+      type: MedusaError.Types.CONFLICT,
+      message:
+        "This renewal's subscription is being updated by a renewal run or a payment right now; try again in a moment",
+    }
+  }
+
   const message = getRenewalErrorMessage(error)
+  const byType = mapMedusaErrorByType(error, message)
+
+  if (byType) {
+    return byType
+  }
+
   const normalized = message.toLowerCase()
 
   if (normalized.includes("was not found")) {

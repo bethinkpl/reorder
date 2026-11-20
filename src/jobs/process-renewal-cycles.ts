@@ -5,19 +5,22 @@ import { setTimeout as delay } from "node:timers/promises"
 import { DateTime } from "luxon"
 import { RENEWAL_MODULE } from "../modules/renewal"
 import type RenewalModuleService from "../modules/renewal/service"
+import { RenewalTriggerType } from "../modules/renewal/types"
 import {
   isApprovalEligible,
   type DueRenewalCycleRecord,
 } from "../modules/renewal/utils/scheduler-query"
 import {
+  BLOCKED_RENEWAL_FAILURE_KINDS,
   classifyRenewalFailure,
   createRenewalCorrelationId,
   getRenewalErrorMessage,
   isAlertableRenewalFailure,
   logRenewalEvent,
   type RenewalFailureKind,
+  RenewalLogEvents,
 } from "../modules/renewal/utils/observability"
-import { processRenewalCycleWorkflow } from "../workflows"
+import { processRenewalCycleWorkflow, RenewalRunOutcome } from "../workflows"
 
 const JOB_NAME = "process-renewal-cycles"
 const LOCK_KEY = "jobs:renewal-cycles"
@@ -78,14 +81,8 @@ const CONCURRENT_RENEWAL_BATCH_SIZE = positiveIntFromEnv(
 // Gap between consecutive concurrent chunks, in ms.
 const RENEWAL_SEPARATION_DELAY = 1000
 
-/** The failures that mean "not now", not "something is wrong". Exported for unit tests. */
 export function isBlockedRenewalOutcome(failureKind: RenewalFailureKind) {
-  return (
-    failureKind === "already_processing" ||
-    failureKind === "duplicate_execution" ||
-    failureKind === "cycle_superseded" ||
-    failureKind === "customer_payment_in_progress"
-  )
+  return BLOCKED_RENEWAL_FAILURE_KINDS.includes(failureKind)
 }
 
 async function processCycle(
@@ -98,28 +95,29 @@ async function processCycle(
   const startedAt = Date.now()
 
   try {
-    await processRenewalCycleWorkflow(container).run({
+    const { result } = await processRenewalCycleWorkflow(container).run({
       input: {
         renewal_cycle_id: cycle.id,
-        trigger_type: "scheduler",
+        trigger_type: RenewalTriggerType.SCHEDULER,
         correlation_id: cycleCorrelationId,
       },
     })
+    const { outcome } = result
 
-    logRenewalEvent(logger, "info", {
-      event: "renewal.job.cycle",
+    logRenewalEvent(logger, outcome === RenewalRunOutcome.FAILED ? "warn" : "info", {
+      event: RenewalLogEvents.JOB_CYCLE,
       job_name: JOB_NAME,
-      outcome: "succeeded",
+      outcome,
       correlation_id: cycleCorrelationId,
       renewal_cycle_id: cycle.id,
       subscription_id: cycle.subscription_id,
-      trigger_type: "scheduler",
+      trigger_type: RenewalTriggerType.SCHEDULER,
       duration_ms: Date.now() - startedAt,
-      success_count: 1,
-      failure_count: 0,
+      success_count: outcome === RenewalRunOutcome.SUCCEEDED ? 1 : 0,
+      failure_count: outcome === RenewalRunOutcome.FAILED ? 1 : 0,
     })
 
-    return "succeeded" as const
+    return outcome
   } catch (error) {
     const message = getRenewalErrorMessage(error)
     const failureKind = classifyRenewalFailure(error)
@@ -127,13 +125,13 @@ async function processCycle(
     const level = isBlockedKind ? "warn" : "error"
 
     logRenewalEvent(logger, level, {
-      event: "renewal.job.cycle",
+      event: RenewalLogEvents.JOB_CYCLE,
       job_name: JOB_NAME,
       outcome: isBlockedKind ? "blocked" : "failed",
       correlation_id: cycleCorrelationId,
       renewal_cycle_id: cycle.id,
       subscription_id: cycle.subscription_id,
-      trigger_type: "scheduler",
+      trigger_type: RenewalTriggerType.SCHEDULER,
       duration_ms: Date.now() - startedAt,
       success_count: 0,
       failure_count: 1,
@@ -165,7 +163,7 @@ export default async function processRenewalCyclesJob(
   const dueBefore = nowUtc.plus({ days: 1 }).startOf("day").toJSDate()
 
   logRenewalEvent(logger, "info", {
-    event: "renewal.job",
+    event: RenewalLogEvents.JOB,
     job_name: JOB_NAME,
     outcome: "started",
     correlation_id: jobCorrelationId,
@@ -184,7 +182,7 @@ export default async function processRenewalCyclesJob(
     // Contention is expected (fail-fast skip), but a provider outage lands
     // here too — surface the underlying error so ops can tell them apart.
     logRenewalEvent(logger, "warn", {
-      event: "renewal.job",
+      event: RenewalLogEvents.JOB,
       job_name: JOB_NAME,
       outcome: "blocked",
       correlation_id: jobCorrelationId,
@@ -205,7 +203,7 @@ export default async function processRenewalCyclesJob(
 
     if (fetched.length === 0) {
       logRenewalEvent(logger, "info", {
-        event: "renewal.job",
+        event: RenewalLogEvents.JOB,
         job_name: JOB_NAME,
         outcome: "completed",
         correlation_id: jobCorrelationId,
@@ -216,6 +214,7 @@ export default async function processRenewalCyclesJob(
         success_count: 0,
         failure_count: 0,
         blocked_count: 0,
+        awaiting_count: 0,
         message: "Renewal scheduler window empty; nothing due",
         metadata: { window_key: windowKey, cursor },
       })
@@ -227,6 +226,7 @@ export default async function processRenewalCyclesJob(
     let succeeded = 0
     let failed = 0
     let blocked = 0
+    let awaiting = 0
 
     for (let i = 0; i < renewable.length; i += CONCURRENT_RENEWAL_BATCH_SIZE) {
       const chunk = renewable.slice(i, i + CONCURRENT_RENEWAL_BATCH_SIZE)
@@ -240,10 +240,15 @@ export default async function processRenewalCyclesJob(
       for (const result of results) {
         const outcome = result.status === "fulfilled" ? result.value : "failed"
 
-        if (outcome === "succeeded") {
+        if (outcome === RenewalRunOutcome.SUCCEEDED) {
           succeeded += 1
         } else if (outcome === "blocked") {
           blocked += 1
+        } else if (
+          outcome === RenewalRunOutcome.AWAITING_PAYMENT ||
+          outcome === RenewalRunOutcome.PARK_FAILED
+        ) {
+          awaiting += 1
         } else {
           failed += 1
         }
@@ -262,7 +267,7 @@ export default async function processRenewalCyclesJob(
     await renewalModule.advanceRenewalJobCursor(JOB_NAME, windowKey, nextCursor)
 
     logRenewalEvent(logger, "info", {
-      event: "renewal.job",
+      event: RenewalLogEvents.JOB,
       job_name: JOB_NAME,
       outcome: "completed",
       correlation_id: jobCorrelationId,
@@ -273,12 +278,13 @@ export default async function processRenewalCyclesJob(
       success_count: succeeded,
       failure_count: failed,
       blocked_count: blocked,
+      awaiting_count: awaiting,
       message: "Renewal scheduler window batch completed",
       metadata: { window_key: windowKey, cursor: nextCursor },
     })
   } catch (error) {
     logRenewalEvent(logger, "error", {
-      event: "renewal.job",
+      event: RenewalLogEvents.JOB,
       job_name: JOB_NAME,
       outcome: "failed",
       correlation_id: jobCorrelationId,

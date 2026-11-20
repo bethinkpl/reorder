@@ -7,6 +7,7 @@ import { acquireLockStep, releaseLockStep } from "@medusajs/medusa/core-flows"
 import type { CancellationReasonCategory } from "../modules/cancellation/types"
 import { closeSubscriptionDunningStep } from "./steps/close-subscription-dunning"
 import { createSubscriptionLogEventStep } from "./steps/create-subscription-log-event"
+import { endAwaitingRenewalCyclesStep } from "./steps/end-awaiting-renewal-cycles"
 import { ensureNextRenewalCycleStep } from "./steps/ensure-next-renewal-cycle"
 import { finalizeCancellationStep } from "./steps/finalize-cancellation"
 import {
@@ -14,6 +15,8 @@ import {
   buildCancellationFinalizedLogEvent,
 } from "./steps/shared-cancellation-log"
 import { startCancellationCaseStep } from "./steps/start-cancellation-case"
+import { renewalSubscriptionLockKey } from "../modules/renewal/utils/lock-key"
+import { subscriptionLockKey } from "../modules/subscription/utils/lock-key"
 
 const CUSTOMER_ENTRY_SOURCE = "customer_self_service" as const
 const CUSTOMER_LOG_SOURCE = "storefront" as const
@@ -31,17 +34,18 @@ export type CancelSubscriptionByCustomerWorkflowInput = {
 export const cancelSubscriptionByCustomerWorkflow = createWorkflow(
   "cancel-subscription-by-customer",
   function (input: CancelSubscriptionByCustomerWorkflowInput) {
-    const subscriptionLockKey = transform({ input }, function ({ input }) {
-      return `subscription:${input.subscription_id}`
+    const customerLockKey = transform({ input }, function ({ input }) {
+      return subscriptionLockKey(input.subscription_id)
     })
     const renewalLockKey = transform({ input }, function ({ input }) {
-      return `renewal:subscription:${input.subscription_id}`
+      return renewalSubscriptionLockKey(input.subscription_id)
     })
 
     acquireLockStep({
-      key: subscriptionLockKey,
+      key: customerLockKey,
       timeout: 5,
       ttl: 120,
+      executeOnSubWorkflow: true,
     }).config({
       name: "acquire-customer-cancellation-subscription-lock",
     })
@@ -50,6 +54,7 @@ export const cancelSubscriptionByCustomerWorkflow = createWorkflow(
       key: renewalLockKey,
       timeout: 5,
       ttl: 120,
+      executeOnSubWorkflow: true,
     }).config({
       name: "acquire-customer-cancellation-renewal-lock",
     })
@@ -114,6 +119,20 @@ export const cancelSubscriptionByCustomerWorkflow = createWorkflow(
     )
     const finalizeResult = finalizeCancellationStep(finalizeInput)
 
+    const endAwaitingInput = transform(
+      { finalizeResult, input },
+      function ({ finalizeResult, input }) {
+        return {
+          subscription: finalizeResult.subscription,
+          cancelled_at: finalizeResult.current.finalized_at ?? new Date(),
+          actor_id: input.triggered_by ?? null,
+          reason: finalizeResult.current.reason,
+          source: CUSTOMER_LOG_SOURCE,
+        }
+      }
+    )
+    endAwaitingRenewalCyclesStep(endAwaitingInput)
+
     const finalizeLogInput = transform(
       { finalizeResult, input },
       function ({ finalizeResult, input }) {
@@ -145,12 +164,14 @@ export const cancelSubscriptionByCustomerWorkflow = createWorkflow(
 
     releaseLockStep({
       key: renewalLockKey,
+      executeOnSubWorkflow: true,
     }).config({
       name: "release-customer-cancellation-renewal-lock",
     })
 
     releaseLockStep({
-      key: subscriptionLockKey,
+      key: customerLockKey,
+      executeOnSubWorkflow: true,
     }).config({
       name: "release-customer-cancellation-subscription-lock",
     })

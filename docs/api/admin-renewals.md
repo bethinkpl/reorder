@@ -50,6 +50,7 @@ Supported renewal cycle statuses:
 - `processing`
 - `succeeded`
 - `failed`
+- `awaiting_payment` - the charge was submitted and the payment provider has not answered yet
 
 ### Approval Status Values
 
@@ -241,6 +242,7 @@ Shape:
         "order_id": null
       }
     ],
+    "awaiting_payment": null,
     "metadata": {
       "last_trigger_type": "manual",
       "last_correlation_id": "renewal-admin-force-uuid"
@@ -252,6 +254,19 @@ Shape:
 Notes:
 - `scheduled_for` is the operational renewal-cycle date stored in `renewal_cycle`
 - `effective_scheduled_for` is the projected delivery date shown in Admin when the linked subscription currently has a skipped next cycle
+- `awaiting_payment` describes the charge still waiting for the payment provider's answer, and is `null` unless the
+  cycle is `awaiting_payment`, or `processing` with its latest attempt still `processing`:
+
+  ```json
+  {
+    "submitted_at": "2026-04-15T10:00:00.000Z",
+    "can_fail_after": "2026-04-19T10:00:00.000Z"
+  }
+  ```
+
+  `submitted_at` is when the latest attempt started; `can_fail_after` is `submitted_at` plus
+  `RENEWAL_AWAITING_PAYMENT_RESOLVE_MIN_HOURS` (see section 6), the moment after which an unpaid charge can be
+  resolved as failed
 
 ### Common Errors
 
@@ -393,7 +408,60 @@ Returns the refreshed renewal detail payload with updated approval summary.
 - `409 conflict`
   Approval was already decided for this cycle.
 
-## 6. API Notes
+## 6. Resolve Awaiting Payment
+
+### Endpoint
+
+- Method: `POST`
+- Path: `/admin/renewals/:id/resolve-awaiting-payment`
+
+### Purpose
+
+Ends a renewal cycle whose payment result never arrived: the cycle is `awaiting_payment`, or `processing` with its
+charge submitted. It takes the `renewal:subscription:<subscription_id>` lock and then:
+- settles the cycle, as a capture would, when its order has been paid
+- otherwise fails its latest attempt and the cycle and starts dunning, but only once that attempt started more than
+  `RENEWAL_AWAITING_PAYMENT_RESOLVE_MIN_HOURS` hours ago (default `96`; independent of
+  `RENEWAL_AWAITING_PAYMENT_ALERT_HOURS`, which only drives the overdue alert). Keep it longer than the slowest
+  settlement your payment providers may still deliver.
+
+### Request Body
+
+```json
+{
+  "reason": "provider confirmed the transfer never arrived"
+}
+```
+
+Fields:
+- `reason?: string` - trimmed, 1-500 characters; kept on the failed attempt as `metadata.admin_resolution`
+  (`{ reason, resolved_by }`) and in the `renewal.awaiting_payment_resolved` log line. The cycle's error and the
+  dunning case it opens always read "Renewal payment never arrived", which is what the storefront shows
+
+### Success Response
+
+Status:
+- `200 OK`
+
+Returns the refreshed renewal detail payload plus `resolution: "settled" | "failed"`.
+
+### Common Errors
+
+- `400 invalid_data`
+  Invalid `reason`.
+- `404 not_found`
+  The renewal cycle does not exist.
+- `409 conflict`
+  The cycle isn't awaiting its payment.
+- `409 conflict`
+  The order is unpaid but the payment may still arrive: it has not waited longer than the minimum age yet. The
+  message names the number of hours.
+- `409 conflict`
+  The order is paid but the subscription has ended, or there is no payment attempt in progress to fail.
+- `409 conflict`
+  The renewal lock is held by a renewal or a payment being processed right now; try again.
+
+## 7. API Notes
 
 ### Read Model Notes
 
@@ -405,6 +473,15 @@ This means the payloads already include:
 - approval summary
 - latest attempt summary on list
 - full attempt history on detail
+
+### Error Mapping
+
+Mutation routes answer a domain error with its own message and a status taken from its `MedusaError` type, also
+when a workflow run rethrows it as a plain object: `not_found` is `404`, `invalid_data` is `400`, `conflict` and
+`not_allowed` are `409` (so is a payment the provider refused during a forced run), any other type is `500`. A
+renewal lock another run holds answers `409` with a readable "being updated" message. Any other error without a
+`MedusaError` type is `404` when its message reports something not found and `409` otherwise
+(`src/api/route-errors.ts`).
 
 ### Operational Notes
 

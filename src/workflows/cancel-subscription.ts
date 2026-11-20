@@ -3,7 +3,11 @@ import {
   transform,
   WorkflowResponse,
 } from "@medusajs/framework/workflows-sdk"
+import { acquireLockStep, releaseLockStep } from "@medusajs/medusa/core-flows"
+import { DunningRecoveryReason } from "../modules/dunning/types"
+import { closeSubscriptionDunningStep } from "./steps/close-subscription-dunning"
 import { createSubscriptionLogEventStep } from "./steps/create-subscription-log-event"
+import { endAwaitingRenewalCyclesStep } from "./steps/end-awaiting-renewal-cycles"
 import { ensureNextRenewalCycleStep } from "./steps/ensure-next-renewal-cycle"
 import {
   cancelSubscriptionStep,
@@ -15,11 +19,48 @@ import {
   ActivityLogEventType,
 } from "../modules/activity-log/types"
 import { toISOStringOrNull } from "./utils/date-output"
+import { renewalSubscriptionLockKey } from "../modules/renewal/utils/lock-key"
 
 export const cancelSubscriptionWorkflow = createWorkflow(
   "cancel-subscription",
   function (input: CancelSubscriptionStepInput) {
+    const renewalLockKey = transform({ input }, function ({ input }) {
+      return renewalSubscriptionLockKey(input.id)
+    })
+
+    acquireLockStep({
+      key: renewalLockKey,
+      timeout: 5,
+      ttl: 120,
+      executeOnSubWorkflow: true,
+    }).config({
+      name: "acquire-cancel-subscription-renewal-lock",
+    })
+
+    const closeDunningInput = transform({ input }, function ({ input }) {
+      return {
+        subscription_id: input.id,
+        triggered_by: input.triggered_by ?? null,
+        reason: input.reason ?? null,
+        recovery_reason: DunningRecoveryReason.SUBSCRIPTION_NOT_RETRYABLE,
+      }
+    })
+    closeSubscriptionDunningStep(closeDunningInput)
+
     const subscriptionChange = cancelSubscriptionStep(input)
+    const endAwaitingInput = transform(
+      { subscriptionChange, input },
+      function ({ subscriptionChange, input }) {
+        return {
+          subscription: subscriptionChange.previous,
+          cancelled_at: subscriptionChange.current.cancelled_at ?? new Date(),
+          actor_id: input.triggered_by ?? null,
+          reason: input.reason ?? null,
+          source: "admin" as const,
+        }
+      }
+    )
+    endAwaitingRenewalCyclesStep(endAwaitingInput)
     const logInput = transform(
       { subscriptionChange, input },
       function ({ subscriptionChange, input }) {
@@ -83,6 +124,13 @@ export const cancelSubscriptionWorkflow = createWorkflow(
       }
     })
     const renewal_cycle = ensureNextRenewalCycleStep(ensureInput)
+
+    releaseLockStep({
+      key: renewalLockKey,
+      executeOnSubWorkflow: true,
+    }).config({
+      name: "release-cancel-subscription-renewal-lock",
+    })
 
     return new WorkflowResponse({
       subscription: subscriptionChange.current,

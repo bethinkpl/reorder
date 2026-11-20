@@ -1,3 +1,6 @@
+import { DunningCaseAdminStatus } from "./dunning"
+import { RenewalCycleAdminStatus } from "./renewal"
+
 export enum CancellationCaseAdminStatus {
   REQUESTED = "requested",
   EVALUATING_RETENTION = "evaluating_retention",
@@ -38,13 +41,7 @@ export type CancellationAdminSubscriptionSummary = {
 
 export type CancellationAdminDunningSummary = {
   dunning_case_id: string
-  status:
-    | "open"
-    | "retry_scheduled"
-    | "retrying"
-    | "awaiting_manual_resolution"
-    | "recovered"
-    | "unrecovered"
+  status: `${DunningCaseAdminStatus}`
   attempt_count: number
   next_retry_at: string | null
   last_payment_error_message: string | null
@@ -52,7 +49,7 @@ export type CancellationAdminDunningSummary = {
 
 export type CancellationAdminRenewalSummary = {
   renewal_cycle_id: string
-  status: "scheduled" | "processing" | "succeeded" | "failed"
+  status: `${RenewalCycleAdminStatus}`
   scheduled_for: string
   approval_status: "pending" | "approved" | "rejected" | null
   generated_order_id: string | null

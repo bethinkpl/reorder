@@ -1,7 +1,10 @@
+import { RenewalCycleAdminStatus } from "./renewal"
+
 export enum DunningCaseAdminStatus {
   OPEN = "open",
   RETRY_SCHEDULED = "retry_scheduled",
   RETRYING = "retrying",
+  AWAITING_PAYMENT = "awaiting_payment",
   AWAITING_MANUAL_RESOLUTION = "awaiting_manual_resolution",
   RECOVERED = "recovered",
   UNRECOVERED = "unrecovered",
@@ -33,7 +36,7 @@ export type DunningAdminSubscriptionSummary = {
 
 export type DunningAdminRenewalSummary = {
   renewal_cycle_id: string
-  status: "scheduled" | "processing" | "succeeded" | "failed"
+  status: `${RenewalCycleAdminStatus}`
   scheduled_for: string
   generated_order_id: string | null
 }
@@ -63,17 +66,24 @@ export type DunningAttemptAdminRecord = {
   metadata: Record<string, unknown> | null
 }
 
-export type DunningRetryBlockedReason =
-  | "no_active_case"
-  | "retry_in_progress"
-  | "case_closed"
-  | "subscription_not_retryable"
-  | "no_payment_method"
-  | "max_attempts_reached"
-  | "missing_renewal_order"
-  | "missing_retry_schedule"
-  | "retry_not_due"
-  | "manual_resolution_required"
+export enum DunningRetryBlockedReason {
+  NO_ACTIVE_CASE = "no_active_case",
+  RETRY_IN_PROGRESS = "retry_in_progress",
+  PAYMENT_IN_PROGRESS = "payment_in_progress",
+  CASE_CLOSED = "case_closed",
+  SUBSCRIPTION_NOT_RETRYABLE = "subscription_not_retryable",
+  NO_PAYMENT_METHOD = "no_payment_method",
+  MAX_ATTEMPTS_REACHED = "max_attempts_reached",
+  MISSING_RENEWAL_ORDER = "missing_renewal_order",
+  MISSING_RETRY_SCHEDULE = "missing_retry_schedule",
+  RETRY_NOT_DUE = "retry_not_due",
+  MANUAL_RESOLUTION_REQUIRED = "manual_resolution_required",
+}
+
+export type DunningAwaitingPaymentAdminSummary = {
+  submitted_at: string
+  can_fail_after: string
+}
 
 export type DunningCaseAdminDetail = {
   id: string
@@ -82,7 +92,7 @@ export type DunningCaseAdminDetail = {
   renewal: DunningAdminRenewalSummary | null
   order: DunningAdminOrderSummary | null
   retry_eligible: boolean
-  retry_blocked_reason: DunningRetryBlockedReason | null
+  retry_blocked_reason: `${DunningRetryBlockedReason}` | null
   attempt_count: number
   max_attempts: number
   retry_schedule: DunningRetryScheduleSummary | null
@@ -94,6 +104,7 @@ export type DunningCaseAdminDetail = {
   closed_at: string | null
   recovery_reason: string | null
   attempts: DunningAttemptAdminRecord[]
+  awaiting_payment: DunningAwaitingPaymentAdminSummary | null
   metadata: Record<string, unknown> | null
   created_at: string
   updated_at: string
@@ -126,6 +137,15 @@ export type DunningCaseAdminDetailResponse = {
 
 export type RetryNowDunningAdminRequest = {
   reason?: string | null
+}
+
+export enum DunningAwaitingPaymentAdminResolution {
+  RECOVERED = "recovered",
+  FAILED = "failed",
+}
+
+export type ResolveAwaitingDunningPaymentAdminResponse = DunningCaseAdminDetailResponse & {
+  resolution: DunningAwaitingPaymentAdminResolution
 }
 
 export type MarkRecoveredDunningAdminRequest = {

@@ -3,19 +3,27 @@ import { ContainerRegistrationKeys } from "@medusajs/framework/utils"
 import {
   DunningAdminSubscriptionSummary,
   DunningAttemptAdminStatus,
+  DunningAwaitingPaymentAdminSummary,
   DunningCaseAdminListItem,
   DunningCaseAdminListResponse,
   DunningCaseAdminDetail,
   DunningCaseAdminDetailResponse,
   DunningCaseAdminStatus,
+  DunningRetryBlockedReason,
 } from "../../../admin/types/dunning"
 import {
   DunningAttemptStatus,
   DunningCaseStatus,
   type DunningRetrySchedule,
 } from "../types"
+import { RenewalCycleStatus } from "../../renewal/types"
+import { mapCycleStatus } from "../../renewal/utils/admin-query"
+import {
+  awaitingPaymentLimitEndsAt,
+  resolveAwaitingPaymentResolveMinHours,
+} from "../../renewal/utils/awaiting-payment-age"
 import { dunningErrors } from "./errors"
-import { resolveRetryEligibility } from "./retry-eligibility"
+import { resolveRetryEligibility, RetryBlockedReason } from "./retry-eligibility"
 import type {
   SubscriptionPaymentContext,
   SubscriptionStatus,
@@ -72,7 +80,7 @@ type SubscriptionRecord = {
 
 type RenewalCycleRecord = {
   id: string
-  status: "scheduled" | "processing" | "succeeded" | "failed"
+  status: RenewalCycleStatus
   scheduled_for: string
   generated_order_id: string | null
 }
@@ -167,7 +175,21 @@ const inMemorySortableFields = new Set([
   "order_display_id",
 ])
 
-function mapCaseStatus(status: DunningCaseRecord["status"]) {
+const ADMIN_RETRY_BLOCKED_REASONS: Record<RetryBlockedReason, DunningRetryBlockedReason> = {
+  [RetryBlockedReason.NO_ACTIVE_CASE]: DunningRetryBlockedReason.NO_ACTIVE_CASE,
+  [RetryBlockedReason.RETRY_IN_PROGRESS]: DunningRetryBlockedReason.RETRY_IN_PROGRESS,
+  [RetryBlockedReason.PAYMENT_IN_PROGRESS]: DunningRetryBlockedReason.PAYMENT_IN_PROGRESS,
+  [RetryBlockedReason.CASE_CLOSED]: DunningRetryBlockedReason.CASE_CLOSED,
+  [RetryBlockedReason.SUBSCRIPTION_NOT_RETRYABLE]: DunningRetryBlockedReason.SUBSCRIPTION_NOT_RETRYABLE,
+  [RetryBlockedReason.NO_PAYMENT_METHOD]: DunningRetryBlockedReason.NO_PAYMENT_METHOD,
+  [RetryBlockedReason.MAX_ATTEMPTS_REACHED]: DunningRetryBlockedReason.MAX_ATTEMPTS_REACHED,
+  [RetryBlockedReason.MISSING_RENEWAL_ORDER]: DunningRetryBlockedReason.MISSING_RENEWAL_ORDER,
+  [RetryBlockedReason.MISSING_RETRY_SCHEDULE]: DunningRetryBlockedReason.MISSING_RETRY_SCHEDULE,
+  [RetryBlockedReason.RETRY_NOT_DUE]: DunningRetryBlockedReason.RETRY_NOT_DUE,
+  [RetryBlockedReason.MANUAL_RESOLUTION_REQUIRED]: DunningRetryBlockedReason.MANUAL_RESOLUTION_REQUIRED,
+}
+
+export function mapCaseStatus(status: DunningCaseRecord["status"]) {
   switch (status) {
     case DunningCaseStatus.OPEN:
       return DunningCaseAdminStatus.OPEN
@@ -175,6 +197,8 @@ function mapCaseStatus(status: DunningCaseRecord["status"]) {
       return DunningCaseAdminStatus.RETRY_SCHEDULED
     case DunningCaseStatus.RETRYING:
       return DunningCaseAdminStatus.RETRYING
+    case DunningCaseStatus.AWAITING_PAYMENT:
+      return DunningCaseAdminStatus.AWAITING_PAYMENT
     case DunningCaseStatus.AWAITING_MANUAL_RESOLUTION:
       return DunningCaseAdminStatus.AWAITING_MANUAL_RESOLUTION
     case DunningCaseStatus.RECOVERED:
@@ -228,7 +252,7 @@ function mapListItem(
     renewal: renewal
       ? {
           renewal_cycle_id: renewal.id,
-          status: renewal.status,
+          status: mapCycleStatus(renewal.status),
           scheduled_for: renewal.scheduled_for,
           generated_order_id: renewal.generated_order_id,
         }
@@ -682,6 +706,28 @@ export async function listAdminDunningCases(
   }
 }
 
+function mapAwaitingPayment(
+  caseStatus: DunningCaseStatus,
+  attempts: DunningAttemptRecord[]
+): DunningAwaitingPaymentAdminSummary | null {
+  const latest = attempts[attempts.length - 1]
+
+  if (
+    caseStatus !== DunningCaseStatus.AWAITING_PAYMENT ||
+    latest?.status !== DunningAttemptStatus.PROCESSING
+  ) {
+    return null
+  }
+
+  return {
+    submitted_at: new Date(latest.started_at).toISOString(),
+    can_fail_after: awaitingPaymentLimitEndsAt(
+      latest.started_at,
+      resolveAwaitingPaymentResolveMinHours()
+    ).toISOString(),
+  }
+}
+
 export async function getAdminDunningDetail(
   container: MedusaContainer,
   id: string
@@ -794,7 +840,7 @@ export async function getAdminDunningDetail(
     renewal: renewal
       ? {
           renewal_cycle_id: renewal.id,
-          status: renewal.status,
+          status: mapCycleStatus(renewal.status),
           scheduled_for: renewal.scheduled_for,
           generated_order_id: renewal.generated_order_id,
         }
@@ -807,7 +853,9 @@ export async function getAdminDunningDetail(
         }
       : null,
     retry_eligible: retryEligibility.eligible,
-    retry_blocked_reason: retryEligibility.blocked_reason,
+    retry_blocked_reason: retryEligibility.blocked_reason
+      ? ADMIN_RETRY_BLOCKED_REASONS[retryEligibility.blocked_reason]
+      : null,
     attempt_count: dunningCase.attempt_count,
     max_attempts: dunningCase.max_attempts,
     retry_schedule: dunningCase.retry_schedule,
@@ -829,6 +877,7 @@ export async function getAdminDunningDetail(
       payment_reference: attempt.payment_reference,
       metadata: attempt.metadata,
     })),
+    awaiting_payment: mapAwaitingPayment(dunningCase.status, attempts),
     metadata: dunningCase.metadata,
     created_at: dunningCase.created_at,
     updated_at: dunningCase.updated_at,

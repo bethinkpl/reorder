@@ -1,0 +1,119 @@
+import { MedusaError, serializeError } from "@medusajs/framework/utils"
+import { mapCancellationAdminRouteError } from "../cancellations/utils"
+import { mapDunningAdminRouteError } from "../dunning/utils"
+import { mapRenewalAdminRouteError } from "../renewals/utils"
+import { mapSubscriptionSettingsAdminRouteError } from "../subscription-settings/utils"
+import { cancellationErrors } from "../../../modules/cancellation/utils/errors"
+import { dunningErrors } from "../../../modules/dunning/utils/errors"
+import { renewalErrors } from "../../../modules/renewal/utils/errors"
+
+const asWorkflowError = (error: Error) => serializeError(error)
+
+const MAPPERS = [
+  {
+    name: "mapDunningAdminRouteError",
+    map: mapDunningAdminRouteError,
+    notFound: dunningErrors.notFound("DunningCase", "dc_missing"),
+    invalidData: dunningErrors.invalidData("DunningCase 'dc_1' is missing renewal_order_id"),
+    conflict: dunningErrors.conflict("DunningCase 'dc_1' can't update retry schedule while its charge awaits"),
+    busyLockMessage:
+      "This dunning case is being updated by a retry or a payment right now; try again in a moment",
+  },
+  {
+    name: "mapRenewalAdminRouteError",
+    map: mapRenewalAdminRouteError,
+    notFound: renewalErrors.notFound("RenewalCycle", "re_missing"),
+    invalidData: renewalErrors.invalidData("Source cart 'cart_1' is missing 'region_id'"),
+    conflict: renewalErrors.conflict("Renewal 're_1' is unpaid, but its payment may still arrive"),
+    busyLockMessage:
+      "This renewal's subscription is being updated by a renewal run or a payment right now; try again in a moment",
+  },
+  {
+    name: "mapCancellationAdminRouteError",
+    map: mapCancellationAdminRouteError,
+    notFound: cancellationErrors.notFound("CancellationCase", "cc_missing"),
+    invalidData: cancellationErrors.invalidData("Cancellation reason update requires a non-empty reason"),
+    conflict: cancellationErrors.conflict("CancellationCase 'cc_1' has an invalid final state"),
+    busyLockMessage:
+      "The subscription is being updated by a renewal or a payment right now; try again in a moment",
+  },
+]
+
+describe.each(MAPPERS)("$name", ({ map, notFound, invalidData, conflict, busyLockMessage }) => {
+  it.each([
+    ["the error itself", (error: Error) => error],
+    ["the plain object a workflow run rethrows", asWorkflowError],
+  ])("answers %s by its type with its own message", (_shape, shape) => {
+    expect(map(shape(notFound))).toEqual({
+      status: 404,
+      type: MedusaError.Types.NOT_FOUND,
+      message: notFound.message,
+    })
+    expect(map(shape(invalidData))).toEqual({
+      status: 400,
+      type: MedusaError.Types.INVALID_DATA,
+      message: invalidData.message,
+    })
+    expect(map(shape(conflict))).toEqual({
+      status: 409,
+      type: MedusaError.Types.CONFLICT,
+      message: conflict.message,
+    })
+  })
+
+  it.each([
+    [MedusaError.Types.NOT_ALLOWED, 409],
+    [MedusaError.Types.PAYMENT_AUTHORIZATION_ERROR, 409],
+    [MedusaError.Types.UNEXPECTED_STATE, 500],
+    [MedusaError.Types.DB_ERROR, 500],
+  ])("answers a workflow error of type %s with %d", (type, status) => {
+    const error = new MedusaError(type, "Session 'payses_1' was not found by the provider")
+
+    expect(map(asWorkflowError(error))).toEqual({ status, type, message: error.message })
+  })
+
+  it("reads the type of a MedusaError another error carries as its cause", () => {
+    const wrapped = Object.assign(new Error("Step failed"), { cause: invalidData })
+
+    expect(map(asWorkflowError(wrapped))).toMatchObject({
+      status: 400,
+      type: MedusaError.Types.INVALID_DATA,
+    })
+  })
+
+  it("answers a busy lock as a conflict, also when the provider raises it as a MedusaError", () => {
+    for (const lockFailure of [
+      new Error("Timed-out acquiring lock."),
+      new MedusaError(MedusaError.Types.CONFLICT, "Timed-out acquiring lock."),
+    ]) {
+      expect(map(asWorkflowError(lockFailure))).toEqual({
+        status: 409,
+        type: MedusaError.Types.CONFLICT,
+        message: busyLockMessage,
+      })
+    }
+  })
+
+  it("answers an error without a MedusaError type from its message", () => {
+    expect(map({ message: "Order 'ord_1' was not found" })).toMatchObject({
+      status: 404,
+      type: MedusaError.Types.NOT_FOUND,
+    })
+    expect(map({ type: "card_error", message: "Your card was declined" })).toMatchObject({
+      status: 409,
+      message: "Your card was declined",
+    })
+  })
+})
+
+describe("mapSubscriptionSettingsAdminRouteError", () => {
+  it.each([
+    [MedusaError.Types.CONFLICT, "SubscriptionSettings version conflict: expected 0, current 1", 409],
+    [MedusaError.Types.INVALID_DATA, "'max_dunning_attempts' must match the number of 'dunning_retry_intervals'", 400],
+    [MedusaError.Types.NOT_FOUND, "SubscriptionSettings 'global' was not found", 404],
+  ])("answers a %s error the settings workflow rethrew as a plain object by its type, with its own message", (type, message, status) => {
+    expect(
+      mapSubscriptionSettingsAdminRouteError(asWorkflowError(new MedusaError(type, message)))
+    ).toEqual({ status, type, message })
+  })
+})

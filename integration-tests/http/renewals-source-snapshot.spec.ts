@@ -4,7 +4,7 @@ import { ContainerRegistrationKeys } from "@medusajs/framework/utils"
 import { RenewalCycleStatus } from "../../src/modules/renewal/types"
 import { SUBSCRIPTION_MODULE } from "../../src/modules/subscription"
 import type SubscriptionModuleService from "../../src/modules/subscription/service"
-import { PlanOfferScope } from "../../src/modules/plan-offer/types"
+import { PlanOfferDiscountType, PlanOfferScope } from "../../src/modules/plan-offer/types"
 import { processRenewalCycleWorkflow } from "../../src/workflows"
 import {
   createRenewalCycleSeed,
@@ -184,7 +184,7 @@ medusaIntegrationTestRunner({
             {
               interval: FrequencyInterval.MONTH,
               value: 1,
-              discount_type: "percentage",
+              discount_type: PlanOfferDiscountType.PERCENTAGE,
               discount_value: 25,
             },
           ],

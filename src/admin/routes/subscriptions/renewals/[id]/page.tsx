@@ -16,6 +16,7 @@ import {
 } from "@medusajs/ui"
 import {
   CheckCircle,
+  CreditCard,
   EllipsisHorizontal,
   ShoppingBag,
   Spinner,
@@ -25,6 +26,8 @@ import {
 import { useMutation, useQueryClient } from "@tanstack/react-query"
 import { ReactNode, useMemo, useState } from "react"
 import { Link, UIMatch, useParams } from "react-router-dom"
+import { ResolveAwaitingPaymentDrawer } from "../../../../components/resolve-awaiting-payment-drawer"
+import { getAdminErrorMessage } from "../../../../lib/admin-error-message"
 import { sdk } from "../../../../lib/client"
 import {
   invalidateAdminRenewalsQueries,
@@ -39,7 +42,9 @@ import {
   RenewalAttemptAdminStatus,
   RenewalCycleAdminDetail,
   RenewalCycleAdminDetailResponse,
+  RenewalAwaitingPaymentAdminResolution,
   RenewalCycleAdminStatus,
+  ResolveAwaitingRenewalPaymentAdminResponse,
 } from "../../../../types/renewal"
 
 const forceableStatuses = new Set<RenewalCycleAdminStatus>([
@@ -49,6 +54,8 @@ const forceableStatuses = new Set<RenewalCycleAdminStatus>([
 
 type DecisionDrawerMode = "approve" | "reject"
 
+const HOUR_MS = 60 * 60 * 1000
+
 const RenewalDetailPage = () => {
   const { id } = useParams()
   const queryClient = useQueryClient()
@@ -57,6 +64,7 @@ const RenewalDetailPage = () => {
   const [decisionMode, setDecisionMode] = useState<DecisionDrawerMode>("approve")
   const [decisionReason, setDecisionReason] = useState("")
   const [decisionError, setDecisionError] = useState<string | null>(null)
+  const [resolveDrawerOpen, setResolveDrawerOpen] = useState(false)
 
   const { data, isLoading, isError, error } = useAdminRenewalDetailQuery(id)
   const renewal = data?.renewal
@@ -150,6 +158,10 @@ const RenewalDetailPage = () => {
     ? renewal.approval.required &&
     renewal.approval.status === RenewalApprovalStatus.PENDING
     : false
+  const canResolvePayment = renewal
+    ? renewal.status === RenewalCycleAdminStatus.AWAITING_PAYMENT ||
+    renewal.awaiting_payment !== null
+    : false
   const isActionPending =
     forceMutation.isPending || approveMutation.isPending || rejectMutation.isPending
 
@@ -181,6 +193,21 @@ const RenewalDetailPage = () => {
     await forceMutation.mutateAsync({
       reason: undefined,
     })
+  }
+
+  const handlePaymentResolved = async (
+    response: ResolveAwaitingRenewalPaymentAdminResponse
+  ) => {
+    await invalidateAdminRenewalsQueries(
+      queryClient,
+      id,
+      renewal?.subscription.subscription_id
+    )
+    toast.success(
+      response.resolution === RenewalAwaitingPaymentAdminResolution.SETTLED
+        ? "Payment resolved: the renewal is settled"
+        : "Payment resolved as failed: dunning has started"
+    )
   }
 
   const openDecisionDrawer = (mode: DecisionDrawerMode) => {
@@ -317,6 +344,18 @@ const RenewalDetailPage = () => {
                       </DropdownMenu.Item>
                     )
                   : null}
+                {canResolvePayment
+                  ? (
+                      <DropdownMenu.Item
+                        className="flex items-center gap-x-2"
+                        disabled={isActionPending}
+                        onClick={() => setResolveDrawerOpen(true)}
+                      >
+                        <CreditCard className="text-ui-fg-subtle" />
+                        <span>Resolve payment…</span>
+                      </DropdownMenu.Item>
+                    )
+                  : null}
                 {canDecideApproval
                   ? (
                       <DropdownMenu.Item
@@ -382,6 +421,20 @@ const RenewalDetailPage = () => {
                   label="Last error"
                   value={renewal.last_error || "No error recorded"}
                 />
+                {renewal.awaiting_payment
+                  ? (
+                      <>
+                        <DetailRow
+                          label="Payment submitted"
+                          value={formatDateTime(renewal.awaiting_payment.submitted_at)}
+                        />
+                        <DetailRow
+                          label="Can be resolved as failed after"
+                          value={formatDateTime(renewal.awaiting_payment.can_fail_after)}
+                        />
+                      </>
+                    )
+                  : null}
               </div>
             </div>
           </Container>
@@ -645,6 +698,14 @@ const RenewalDetailPage = () => {
         </div>
       </div>
 
+      <ResolveAwaitingPaymentDrawer
+        open={resolveDrawerOpen}
+        onOpenChange={setResolveDrawerOpen}
+        endpoint={`/admin/renewals/${renewal.id}/resolve-awaiting-payment`}
+        explanation={describeAwaitingPaymentResolution(renewal.awaiting_payment)}
+        onResolved={handlePaymentResolved}
+      />
+
       <Drawer open={decisionDrawerOpen} onOpenChange={setDecisionDrawerOpen}>
         <Drawer.Content>
           <Drawer.Header>
@@ -753,6 +814,23 @@ function formatDateTime(value: string | null) {
   }).format(new Date(value))
 }
 
+function describeAwaitingPaymentResolution(
+  awaitingPayment: RenewalCycleAdminDetail["awaiting_payment"]
+) {
+  const settles = "Settles the renewal if its order has been paid."
+
+  if (!awaitingPayment) {
+    return `${settles} Otherwise fails it and starts dunning, once the payment has waited long enough.`
+  }
+
+  const waitMs =
+    Date.parse(awaitingPayment.can_fail_after) -
+    Date.parse(awaitingPayment.submitted_at)
+  const minHours = Math.round(waitMs / HOUR_MS)
+
+  return `${settles} Otherwise fails it and starts dunning, once the payment has waited longer than ${minHours} hours (after ${formatDateTime(awaitingPayment.can_fail_after)}); until then an unpaid renewal is left waiting.`
+}
+
 function formatCycleStatus(status: RenewalCycleAdminStatus) {
   switch (status) {
     case RenewalCycleAdminStatus.SCHEDULED:
@@ -763,6 +841,8 @@ function formatCycleStatus(status: RenewalCycleAdminStatus) {
       return "Succeeded"
     case RenewalCycleAdminStatus.FAILED:
       return "Failed"
+    case RenewalCycleAdminStatus.AWAITING_PAYMENT:
+      return "Awaiting payment"
   }
 }
 
@@ -833,6 +913,8 @@ function getCycleStatusColor(status: RenewalCycleAdminStatus) {
       return "green"
     case RenewalCycleAdminStatus.FAILED:
       return "red"
+    case RenewalCycleAdminStatus.AWAITING_PAYMENT:
+      return "orange"
   }
 }
 
@@ -860,42 +942,4 @@ function getApprovalStatusColor(approval: RenewalAdminApprovalSummary) {
     case RenewalApprovalStatus.REJECTED:
       return "red"
   }
-}
-
-function getAdminErrorMessage(error: unknown, fallback: string) {
-  return getNestedErrorMessage(error) ?? fallback
-}
-
-function getNestedErrorMessage(value: unknown): string | null {
-  if (!value) {
-    return null
-  }
-
-  if (typeof value === "string") {
-    return value
-  }
-
-  if (value instanceof Error) {
-    return (
-      getNestedErrorMessage((value as Error & { cause?: unknown }).cause) ??
-      value.message
-    )
-  }
-
-  if (typeof value !== "object") {
-    return null
-  }
-
-  const record = value as Record<string, unknown>
-
-  return (
-    getNestedErrorMessage(record.message) ??
-    getNestedErrorMessage(record.error) ??
-    getNestedErrorMessage(record.details) ??
-    getNestedErrorMessage(record.response) ??
-    getNestedErrorMessage(record.data) ??
-    getNestedErrorMessage(record.body) ??
-    getNestedErrorMessage(record.cause) ??
-    null
-  )
 }

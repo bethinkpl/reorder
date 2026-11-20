@@ -361,6 +361,13 @@ Shape:
   Case is terminal or cannot accept a new offer.
 - `409 offer_out_of_policy`
   Offer payload violates retention policy rules.
+- `409 conflict`
+  A `pause_offer` while a renewal charge is waiting for the payment provider's answer (see
+  `POST /admin/subscriptions/:id/pause`); nothing is recorded. Other offers are not affected.
+- `409 conflict`
+  A renewal run or a payment holds the subscription's `renewal:subscription:<id>` lock, or, for a `pause_offer`, a
+  dunning retry or a payment holds the `dunning:<case_id>` lock of one of its active dunning cases; try again in a
+  moment.
 
 ## 4. Finalize Cancellation
 
@@ -392,6 +399,10 @@ Finalizes the case as `canceled`, updates the subscription lifecycle, computes `
 - `effective_at` supports:
   - `immediately`
   - `end_of_cycle`
+- every active dunning case of the subscription is closed as `unrecovered` with
+  `recovery_reason: "subscription_cancelled_by_customer"`; a retry charge already submitted stays tracked, and a late
+  capture of it is reported once as `subscription.late_payment_captured` for the host app to refund
+- a failure part way through leaves the case, the subscription, its dunning cases and its renewal cycles as they were
 
 ### Success Response
 
@@ -409,6 +420,13 @@ Shape:
   Case is terminal or not eligible for final cancel.
 - `400 invalid_data`
   Reason is missing after resolving body and existing case data.
+- `409 conflict`
+  A renewal run or a payment holds the subscription's `renewal:subscription:<id>` lock, or a dunning retry or a
+  payment holds the `dunning:<case_id>` lock of one of its active dunning cases; nothing was changed.
+- `409 conflict`
+  A dunning case is `retrying` and its latest attempt started less than 10 minutes ago, so its retry may still be
+  waiting for the provider; the message names the case, and nothing was changed. A case left `retrying` for 10 minutes
+  is closed like any other.
 
 ## 5. Update Cancellation Reason
 
@@ -465,3 +483,9 @@ Across the mutation routes, the current runtime exposes domain-aware errors for:
 
 Routes map these to HTTP responses through shared error helpers in:
 - `src/api/admin/cancellations/utils.ts`
+- `src/api/route-errors.ts`
+
+The status comes from the error's `MedusaError` type, also when a workflow run rethrows it as a plain object:
+`not_found` is `404`, `invalid_data` is `400` (for example an empty reason update), `conflict` and `not_allowed`
+are `409`, any other type is `500`; the body carries the error's own message. Errors without a `MedusaError` type
+are mapped from their message.

@@ -6,6 +6,8 @@ import {
   listAdminCancellationCases,
   type ListAdminCancellationCasesInput,
 } from "../../../modules/cancellation/utils/admin-query"
+import { isLockBusyError } from "../../../common/utils/lock-busy-error"
+import { type RouteError, mapMedusaErrorByType } from "../../route-errors"
 
 export function normalizeAdminCancellationsListQuery(
   query: GetAdminCancellationsSchemaType
@@ -95,31 +97,23 @@ function getNestedMessage(value: unknown): string | null {
   return null
 }
 
-export function mapCancellationAdminRouteError(error: unknown) {
-  const errorCause =
-    error instanceof Error ? (error as Error & { cause?: unknown }).cause : null
-  const medusaError =
-    error instanceof MedusaError
-      ? error
-      : errorCause instanceof MedusaError
-        ? errorCause
-        : null
-
-  if (medusaError) {
-    const typeToStatus: Record<string, number> = {
-      [MedusaError.Types.NOT_FOUND]: 404,
-      [MedusaError.Types.INVALID_DATA]: 400,
-      [MedusaError.Types.CONFLICT]: 409,
-    }
-
+export function mapCancellationAdminRouteError(error: unknown): RouteError {
+  if (isLockBusyError(error)) {
     return {
-      status: typeToStatus[medusaError.type] ?? 500,
-      type: medusaError.type,
-      message: medusaError.message,
+      status: 409,
+      type: MedusaError.Types.CONFLICT,
+      message:
+        "The subscription is being updated by a renewal or a payment right now; try again in a moment",
     }
   }
 
   const message = getNestedMessage(error) || "Unexpected cancellation admin error"
+  const byType = mapMedusaErrorByType(error, message)
+
+  if (byType) {
+    return byType
+  }
+
   const normalized = message.toLowerCase()
 
   if (normalized.includes("was not found")) {

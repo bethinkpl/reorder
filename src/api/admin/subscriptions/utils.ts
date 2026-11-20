@@ -1,5 +1,8 @@
 import type { MedusaContainer } from "@medusajs/framework/types"
+import { MedusaError } from "@medusajs/framework/utils"
 import type { GetAdminSubscriptionsSchemaType } from "./validators"
+import { isLockBusyError } from "../../../common/utils/lock-busy-error"
+import { isRenewalPaymentInProgress } from "../../../modules/subscription/utils/errors"
 import {
   getAdminSubscriptionDetail,
   listAdminSubscriptions,
@@ -53,4 +56,26 @@ export async function getAdminSubscriptionsListResponse(
     container,
     normalizeAdminSubscriptionsListQuery(query)
   )
+}
+
+/**
+ * Medusa's error handler would replace both refusals' messages (and answer the busy lock with an
+ * unexpected error), so the routes answer them.
+ */
+export function mapAdminSubscriptionChangeConflict(
+  error: unknown,
+  subscriptionId: string
+) {
+  if (isRenewalPaymentInProgress(error)) {
+    return { type: MedusaError.Types.CONFLICT, message: error.message }
+  }
+
+  if (isLockBusyError(error)) {
+    return {
+      type: MedusaError.Types.CONFLICT,
+      message: `Subscription '${subscriptionId}' is being updated by a renewal or a payment right now; try again in a moment`,
+    }
+  }
+
+  return null
 }

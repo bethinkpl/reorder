@@ -1,5 +1,6 @@
 import { MedusaContainer } from "@medusajs/framework/types"
 import { Modules } from "@medusajs/framework/utils"
+import { isLockBusyError } from "../common/utils/lock-busy-error"
 import {
   reconcilePendingPaymentSubscriptions,
   resolvePendingPaymentBatchSize,
@@ -16,12 +17,6 @@ function getLogger(container: MedusaContainer) {
 
 function getErrorMessage(error: unknown) {
   return error instanceof Error ? error.message : String(error)
-}
-
-function isLockTimeout(message: string) {
-  const lowered = message.toLowerCase()
-
-  return lowered.includes("timed-out acquiring lock") || lowered.includes("timeout")
 }
 
 export default async function reconcilePendingPaymentSubscriptionsJob(
@@ -69,7 +64,7 @@ export default async function reconcilePendingPaymentSubscriptionsJob(
   } catch (error) {
     const message = getErrorMessage(error)
 
-    if (isLockTimeout(message)) {
+    if (isLockBusyError(error)) {
       logger.warn(`[${JOB_NAME}] did not complete: ${message}`)
     } else {
       logger.error(`[${JOB_NAME}] did not complete: ${message}`)

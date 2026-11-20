@@ -12,22 +12,29 @@ import {
   type RenewalAppliedPendingUpdateData,
   RenewalAttemptStatus,
   RenewalCycleStatus,
+  RenewalSettlementSource,
+  RenewalTriggerType,
 } from "../../modules/renewal/types"
 import {
   createRenewalCorrelationId,
   logRenewalEvent,
+  RenewalLogEvents,
 } from "../../modules/renewal/utils/observability"
 import { SUBSCRIPTION_MODULE } from "../../modules/subscription"
 import type SubscriptionModuleService from "../../modules/subscription/service"
-import type {
-  SubscriptionSourceSnapshot,
-  SubscriptionType,
+import {
+  type SubscriptionPendingUpdateData,
+  type SubscriptionSourceSnapshot,
+  SubscriptionStatus,
+  type SubscriptionType,
 } from "../../modules/subscription/types"
 import { addSubscriptionCadence } from "../../modules/subscription/utils/effective-next-renewal"
 import type { FrequencyInterval } from "../../common/types/frequency-interval"
 import { persistSubscriptionLogEvent } from "../steps/create-subscription-log-event"
 import { buildPricingSnapshot } from "../steps/validate-subscription-cart"
 import { toISOStringOrNull } from "./date-output"
+
+export { RenewalSettlementSource }
 
 type RenewalCycleRecord = {
   id: string
@@ -36,6 +43,7 @@ type RenewalCycleRecord = {
   status: RenewalCycleStatus
   generated_order_id: string | null
   applied_pending_update_data: RenewalAppliedPendingUpdateData | null
+  settlement_inputs: Record<string, unknown> | null
   attempt_count: number
   processed_at: Date | string | null
   last_error: string | null
@@ -54,24 +62,88 @@ type RenewalCycleState = {
   last_error: string | null
 }
 
-/** Who paid for the cycle. Recorded on the audit entry the settlement writes. */
-export type RenewalSettlementSource =
-  | "renewal"
-  | "dunning_retry"
-  | "customer_payment"
-
 /**
  * What the renewal workflow knows and a recovery does not: the run that opened the cycle. Passing
  * it keeps the audit entry identical to the one the workflow used to write itself.
  */
 export type RenewalSettlementAudit = {
   correlation_id: string
-  trigger_type: "scheduler" | "manual"
+  trigger_type: `${RenewalTriggerType}`
   triggered_by: string | null
   attempt_no: number
   operation_started_at: number
   scheduled_for: string
   previous_state: RenewalCycleState
+}
+
+export type StoredRenewalSettlementInputs = {
+  attempt_id: string | null
+  audit: RenewalSettlementAudit | null
+  source_snapshot: SubscriptionSourceSnapshot | null
+  consumed_skip_next_cycle: boolean | null
+}
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === "object" && value !== null && !Array.isArray(value)
+}
+
+const RENEWAL_TRIGGER_TYPES = new Set<unknown>(Object.values(RenewalTriggerType))
+
+function isSettlementAudit(value: unknown): value is RenewalSettlementAudit {
+  return (
+    isRecord(value) &&
+    typeof value.correlation_id === "string" &&
+    RENEWAL_TRIGGER_TYPES.has(value.trigger_type) &&
+    typeof value.attempt_no === "number" &&
+    typeof value.operation_started_at === "number" &&
+    typeof value.scheduled_for === "string" &&
+    isRecord(value.previous_state)
+  )
+}
+
+function isSourceSnapshot(value: unknown): value is SubscriptionSourceSnapshot {
+  return (
+    isRecord(value) &&
+    typeof value.product_id === "string" &&
+    typeof value.title === "string" &&
+    typeof value.unit_price === "number"
+  )
+}
+
+export function readStoredSettlementInputs(
+  value: unknown
+): StoredRenewalSettlementInputs {
+  const stored = isRecord(value) ? value : {}
+
+  return {
+    attempt_id: typeof stored.attempt_id === "string" ? stored.attempt_id : null,
+    audit: isSettlementAudit(stored.audit) ? stored.audit : null,
+    source_snapshot: isSourceSnapshot(stored.source_snapshot)
+      ? stored.source_snapshot
+      : null,
+    consumed_skip_next_cycle:
+      typeof stored.consumed_skip_next_cycle === "boolean"
+        ? stored.consumed_skip_next_cycle
+        : null,
+  }
+}
+
+function isSamePendingChange(
+  applied: RenewalAppliedPendingUpdateData,
+  current: SubscriptionPendingUpdateData
+) {
+  if (applied.requested_at) {
+    return current.requested_at === applied.requested_at
+  }
+
+  return (
+    current.variant_id === applied.variant_id &&
+    current.variant_title === applied.variant_title &&
+    (current.sku ?? null) === (applied.sku ?? null) &&
+    current.frequency_interval === applied.frequency_interval &&
+    current.frequency_value === applied.frequency_value &&
+    (current.effective_at ?? null) === (applied.effective_at ?? null)
+  )
 }
 
 export type SettleRenewalCycleSucceededInput = {
@@ -82,15 +154,22 @@ export type SettleRenewalCycleSucceededInput = {
   /** The attempt the caller owns. Without it the settlement records one of its own. */
   attempt_id?: string | null
   source_snapshot?: SubscriptionSourceSnapshot | null
+  consumed_skip_next_cycle?: boolean
   /** Defaults to the scheduled dunning retry: the one caller that settles without saying so. */
   source?: RenewalSettlementSource
   audit?: RenewalSettlementAudit
 }
 
+export const SUBSCRIPTION_CANCELLED_REFUSAL = "subscription_cancelled"
+
 export type SettleRenewalCycleSucceededResult = {
   settled: boolean
   /** Why nothing was written; `null` on the settling run. */
-  reason: "already_succeeded" | "cycle_superseded" | null
+  reason:
+    | "already_succeeded"
+    | "cycle_superseded"
+    | typeof SUBSCRIPTION_CANCELLED_REFUSAL
+    | null
   renewal_cycle: RenewalCycleRecord
   applied_pending_changes: RenewalAppliedPendingUpdateData | null
 }
@@ -128,7 +207,7 @@ export async function settleRenewalCycleSucceeded(
   const renewalModule = container.resolve<RenewalModuleService>(RENEWAL_MODULE)
   const subscriptionModule =
     container.resolve<SubscriptionModuleService>(SUBSCRIPTION_MODULE)
-  const source = input.source ?? "dunning_retry"
+  const source = input.source ?? RenewalSettlementSource.DUNNING_RETRY
 
   const cycle = (await renewalModule.retrieveRenewalCycle(
     input.renewal_cycle_id
@@ -162,6 +241,15 @@ export async function settleRenewalCycleSucceeded(
   const subscription = (await subscriptionModule.retrieveSubscription(
     input.subscription_id
   )) as SubscriptionType
+
+  if (subscription.status === SubscriptionStatus.CANCELLED) {
+    return {
+      settled: false,
+      reason: SUBSCRIPTION_CANCELLED_REFUSAL,
+      renewal_cycle: cycle,
+      applied_pending_changes: appliedPendingChanges,
+    }
+  }
 
   const scheduledAnchor = new Date(cycle.scheduled_for)
   const currentNextRenewalAt = subscription.next_renewal_at
@@ -234,6 +322,19 @@ export async function settleRenewalCycleSucceeded(
       }
     : subscription.product_snapshot
 
+  const storedInputs = readStoredSettlementInputs(cycle.settlement_inputs)
+  const sourceSnapshot = input.source_snapshot ?? storedInputs.source_snapshot
+  // A cycle can be settled long after it ran (a charge confirmed later, a dunning recovery), after the
+  // customer skipped a delivery or scheduled another plan change. Inputs stored before the skip was
+  // recorded still reset it.
+  const consumedSkip =
+    input.consumed_skip_next_cycle ?? storedInputs.consumed_skip_next_cycle ?? true
+  const consumedPendingChange = Boolean(
+    appliedPendingChanges &&
+    subscription.pending_update_data &&
+    isSamePendingChange(appliedPendingChanges, subscription.pending_update_data)
+  )
+
   // A plan change re-negotiates the deal: the frozen pricing snapshot must
   // be rebuilt from the live plan config for the NEW variant and frequency,
   // or the signup discount would keep applying to the new plan's price on
@@ -264,11 +365,9 @@ export async function settleRenewalCycleSucceeded(
     pricing_snapshot: nextPricingSnapshot,
     next_renewal_at: nextRenewalAt,
     last_renewal_at: finishedAt,
-    skip_next_cycle: false,
-    pending_update_data: appliedPendingChanges
-      ? null
-      : subscription.pending_update_data,
-    ...(input.source_snapshot ? { source_snapshot: input.source_snapshot } : {}),
+    ...(consumedSkip ? { skip_next_cycle: false } : {}),
+    ...(consumedPendingChange ? { pending_update_data: null } : {}),
+    ...(sourceSnapshot ? { source_snapshot: sourceSnapshot } : {}),
   })
 
   const updatedCycle = (await renewalModule.updateRenewalCycles({
@@ -321,7 +420,7 @@ export async function settleRenewalCycleSucceeded(
   }
 
   logRenewalEvent(logger, "info", {
-    event: "renewal.execution",
+    event: RenewalLogEvents.EXECUTION,
     outcome: "succeeded",
     correlation_id: correlationId,
     renewal_cycle_id: cycle.id,
@@ -344,7 +443,7 @@ export async function settleRenewalCycleSucceeded(
     customer_id: subscription.customer_id,
     event_type: ActivityLogEventType.RENEWAL_SUCCEEDED,
     actor_type: audit
-      ? audit.trigger_type === "manual"
+      ? audit.trigger_type === RenewalTriggerType.MANUAL
         ? ActivityLogActorType.USER
         : ActivityLogActorType.SCHEDULER
       : ActivityLogActorType.SYSTEM,
@@ -369,7 +468,7 @@ export async function settleRenewalCycleSucceeded(
     },
     metadata: {
       source: audit
-        ? audit.trigger_type === "manual"
+        ? audit.trigger_type === RenewalTriggerType.MANUAL
           ? "admin"
           : "scheduler"
         : source,

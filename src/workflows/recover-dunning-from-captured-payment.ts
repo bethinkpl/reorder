@@ -11,12 +11,13 @@ import {
   recoverDunningFromCapturedPaymentStep,
   type RecoverDunningFromCapturedPaymentStepInput,
 } from "./steps/recover-dunning-from-captured-payment"
+import { dunningCaseLockKey } from "../modules/dunning/utils/lock-key"
 
 export const recoverDunningFromCapturedPaymentWorkflow = createWorkflow(
   "recover-dunning-from-captured-payment",
   function (input: RecoverDunningFromCapturedPaymentStepInput) {
     const lockKey = transform({ input }, function ({ input }) {
-      return `dunning:${input.dunning_case_id}`
+      return dunningCaseLockKey(input.dunning_case_id)
     })
 
     // Waits longer than the scheduled retry does: this runs off a payment the customer already

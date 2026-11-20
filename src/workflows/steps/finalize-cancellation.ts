@@ -112,6 +112,24 @@ async function loadSubscription(
   return (await subscriptionModule.retrieveSubscription(id)) as SubscriptionRecord
 }
 
+async function restoreCancelledSubscription(
+  container: { resolve(key: string): unknown },
+  previous: SubscriptionRecord
+) {
+  const subscriptionModule =
+    container.resolve(SUBSCRIPTION_MODULE) as SubscriptionModuleService
+
+  await subscriptionModule.updateSubscriptions({
+    id: previous.id,
+    status: previous.status,
+    cancelled_at: previous.cancelled_at,
+    cancel_effective_at: previous.cancel_effective_at,
+    next_renewal_at: previous.next_renewal_at,
+    skip_next_cycle: previous.skip_next_cycle,
+    metadata: previous.metadata,
+  })
+}
+
 function validateCaseState(cancellationCase: CancellationCaseRecord) {
   if (cancellationCase.finalized_at) {
     throw cancellationErrors.alreadyFinalized(
@@ -304,29 +322,34 @@ export const finalizeCancellationStep = createStep(
       ),
     })
 
-    await cancellationModule.updateCancellationCases({
-      id: cancellationCase.id,
-      status: CancellationCaseStatus.CANCELED,
-      reason,
-      reason_category: reasonCategory,
-      notes: input.notes ?? cancellationCase.notes ?? null,
-      final_outcome: CancellationFinalOutcome.CANCELED,
-      finalized_at: finalizedAt,
-      finalized_by: input.finalized_by ?? null,
-      cancellation_effective_at: cancelEffectiveAt,
-      metadata: buildCaseFinalizeMetadata(
-        cancellationCase,
-        input,
-        reason,
-        reasonCategory,
-        cancelEffectiveAt,
-        finalizedAt
-      ),
-    } as any)
+    let updatedCase: CancellationCaseRecord
 
-    const updatedCase = (await cancellationModule.retrieveCancellationCase(
-      cancellationCase.id
-    )) as CancellationCaseRecord
+    // A step that throws is not compensated, so it undoes its own first write.
+    try {
+      updatedCase = (await cancellationModule.updateCancellationCases({
+        id: cancellationCase.id,
+        status: CancellationCaseStatus.CANCELED,
+        reason,
+        reason_category: reasonCategory,
+        notes: input.notes ?? cancellationCase.notes ?? null,
+        final_outcome: CancellationFinalOutcome.CANCELED,
+        finalized_at: finalizedAt,
+        finalized_by: input.finalized_by ?? null,
+        cancellation_effective_at: cancelEffectiveAt,
+        metadata: buildCaseFinalizeMetadata(
+          cancellationCase,
+          input,
+          reason,
+          reasonCategory,
+          cancelEffectiveAt,
+          finalizedAt
+        ),
+      } as any)) as CancellationCaseRecord
+    } catch (error) {
+      await restoreCancelledSubscription(container, subscription)
+
+      throw error
+    }
 
     return new StepResponse<
       FinalizeCancellationStepOutput,
@@ -355,12 +378,8 @@ export const finalizeCancellationStep = createStep(
 
     const cancellationModule =
       container.resolve<CancellationModuleService>(CANCELLATION_MODULE)
-    const subscriptionModule =
-      container.resolve<SubscriptionModuleService>(SUBSCRIPTION_MODULE)
 
-    await cancellationModule.updateCancellationCases(compensation.previous_case as any)
-    await subscriptionModule.updateSubscriptions(
-      compensation.previous_subscription as any
-    )
+    await cancellationModule.updateCancellationCases(compensation.previous_case)
+    await restoreCancelledSubscription(container, compensation.previous_subscription)
   }
 )

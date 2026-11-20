@@ -3,6 +3,8 @@ import {
   transform,
   WorkflowResponse,
 } from "@medusajs/framework/workflows-sdk"
+import { acquireLockStep, releaseLockStep } from "@medusajs/medusa/core-flows"
+import { assertNoRenewalPaymentInProgressStep } from "./steps/assert-no-renewal-payment-in-progress"
 import { createSubscriptionLogEventStep } from "./steps/create-subscription-log-event"
 import { ensureNextRenewalCycleStep } from "./steps/ensure-next-renewal-cycle"
 import {
@@ -15,10 +17,29 @@ import {
   ActivityLogEventType,
 } from "../modules/activity-log/types"
 import { toISOStringOrNull } from "./utils/date-output"
+import { renewalSubscriptionLockKey } from "../modules/renewal/utils/lock-key"
 
 export const pauseSubscriptionWorkflow = createWorkflow(
   "pause-subscription",
   function (input: PauseSubscriptionStepInput) {
+    const renewalLockKey = transform({ input }, function ({ input }) {
+      return renewalSubscriptionLockKey(input.id)
+    })
+
+    acquireLockStep({
+      key: renewalLockKey,
+      timeout: 5,
+      ttl: 120,
+      executeOnSubWorkflow: true,
+    }).config({
+      name: "acquire-pause-subscription-renewal-lock",
+    })
+
+    const dunningLocks = assertNoRenewalPaymentInProgressStep({
+      subscription_id: input.id,
+      action: "be paused",
+    })
+
     const subscriptionChange = pauseSubscriptionStep(input)
     const logInput = transform(
       { subscriptionChange, input },
@@ -68,6 +89,21 @@ export const pauseSubscriptionWorkflow = createWorkflow(
       }
     })
     const renewal_cycle = ensureNextRenewalCycleStep(ensureInput)
+
+    releaseLockStep({
+      key: dunningLocks.keys,
+      ownerId: dunningLocks.owner_id,
+      executeOnSubWorkflow: true,
+    }).config({
+      name: "release-pause-subscription-dunning-locks",
+    })
+
+    releaseLockStep({
+      key: renewalLockKey,
+      executeOnSubWorkflow: true,
+    }).config({
+      name: "release-pause-subscription-renewal-lock",
+    })
 
     return new WorkflowResponse({
       subscription: subscriptionChange.current,

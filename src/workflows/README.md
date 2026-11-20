@@ -78,6 +78,22 @@ export async function GET(
 }
 ```
 
+## `processRenewalCycleWorkflow` result
+
+A run that does not throw resolves `{ outcome, renewal_cycle, subscription_id, attempt_id,
+generated_order_id }`. `outcome` is one of `RenewalRunOutcome` (exported from
+`@bethinkpl/reorder/workflows`), decided while the run still holds the renewal lock:
+
+- `succeeded` — the cycle is settled; `renewal_cycle` is the settled cycle.
+- `awaiting_payment` — the provider answers later; `renewal_cycle` is the parked cycle.
+- `park_failed` — the charge was submitted but the cycle could not be parked, so it stays
+  `processing` (an alertable log says so); `renewal_cycle` is `null`.
+- `failed` — the charge's failure was reported while the run was still waiting on it, and the
+  cycle had already failed; or the charge went through only after the subscription had been
+  cancelled (the run's lock lapsed), so the cycle was ended as a cancellation ends an awaiting one
+  and the capture reconciled as a late payment (`subscription.late_payment_captured`).
+  `renewal_cycle` is that cycle.
+
 ## Extensibility Hooks
 
 ### `processRenewalCycleWorkflow` — `setPaymentSessionData`
@@ -149,9 +165,15 @@ processRenewalCycleWorkflow.hooks.applyRenewalCredits(
   idempotent: skip credits the order already carries.
 - A thrown error fails the renewal before any charge — the workflow reverts and the cycle plus
   its attempt are marked FAILED (retryable). The order stays on the cycle for the retry.
-- `run-dunning-retry` doesn't call it; it collects whatever is still owed on the same order. The
-  scheduler's daily retry of a FAILED cycle does call it, and that retry keeps running while a
-  dunning case is open, so the handler can apply credits to an order that is already in dunning.
+- `run-dunning-retry` doesn't call it; it charges only what is still owed on the same order
+  (`summary.pending_difference`).
+- The scheduler's daily re-run of a FAILED cycle calls it only while no dunning case is active for
+  the subscription. Once a charge is declined and dunning opens, neither the scheduler nor a forced
+  run touches that cycle again, so the hook is not called for its order while the case is open:
+  credits the customer gains in the meantime are not applied by the plugin. To use them, add the
+  credit lines to the renewal order from the host app; the next retry then charges only the rest,
+  and an order they cover in full is recovered without a charge by the
+  `reconcile-paid-dunning-cases` sweep (every 30 minutes).
 
 ### `processRenewalCycleWorkflow` — `resolveRenewalAdjustments`
 

@@ -1,10 +1,37 @@
 import type { FrequencyInterval } from "../../../common/types/frequency-interval"
+import type { ReportedPaymentFailure } from "../../../common/types/reported-payment-failure"
 
 export enum RenewalCycleStatus {
   SCHEDULED = "scheduled",
   PROCESSING = "processing",
   SUCCEEDED = "succeeded",
   FAILED = "failed",
+  AWAITING_PAYMENT = "awaiting_payment",
+}
+
+export const CLOSED_RENEWAL_CYCLE_STATUSES: readonly RenewalCycleStatus[] = [
+  RenewalCycleStatus.SUCCEEDED,
+  RenewalCycleStatus.FAILED,
+]
+
+export type ChargeInFlightRenewalCycleStatus =
+  | RenewalCycleStatus.AWAITING_PAYMENT
+  | RenewalCycleStatus.PROCESSING
+
+export const CHARGE_IN_FLIGHT_RENEWAL_CYCLE_STATUSES: readonly RenewalCycleStatus[] = [
+  RenewalCycleStatus.AWAITING_PAYMENT,
+  RenewalCycleStatus.PROCESSING,
+] satisfies ChargeInFlightRenewalCycleStatus[]
+
+export enum RenewalTriggerType {
+  SCHEDULER = "scheduler",
+  MANUAL = "manual",
+}
+
+export enum RenewalSettlementSource {
+  RENEWAL = "renewal",
+  DUNNING_RETRY = "dunning_retry",
+  CUSTOMER_PAYMENT = "customer_payment",
 }
 
 export enum RenewalAttemptStatus {
@@ -34,6 +61,7 @@ export type RenewalAppliedPendingUpdateData = {
   frequency_interval: FrequencyInterval
   frequency_value: number
   effective_at: string | null
+  requested_at?: string | null
 }
 
 export type RenewalCycleData = RenewalApprovalSummary & {
@@ -63,6 +91,7 @@ export type RenewalAttemptData = {
   error_message: string | null
   payment_reference: string | null
   order_id: string | null
+  reported_payment_failure: ReportedPaymentFailure | null
   metadata: Record<string, unknown> | null
   created_at: string
   updated_at: string

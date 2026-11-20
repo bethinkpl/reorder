@@ -205,6 +205,26 @@ medusaIntegrationTestRunner({
         ).rejects.toMatchObject({
           response: {
             status: 409,
+            data: {
+              type: "conflict",
+              message: `Renewal '${cycle.id}' approval decision has already been made`,
+            },
+          },
+        })
+      })
+
+      it("answers a forced run of an unknown renewal with a 404 naming it", async () => {
+        const headers = await createAdminAuthHeaders(getContainer())
+
+        await expect(
+          api.post("/admin/renewals/re_missing/force", {}, { headers })
+        ).rejects.toMatchObject({
+          response: {
+            status: 404,
+            data: {
+              type: "not_found",
+              message: "RenewalCycle 're_missing' was not found",
+            },
           },
         })
       })

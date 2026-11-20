@@ -1277,6 +1277,7 @@ async function handOverUnappliedRecovery(
     await reconcileRetryCapture(container, {
       dunningCase,
       paymentId: input.paymentId,
+      correlationId: input.correlationId,
     })
   }
 
@@ -1299,15 +1300,40 @@ async function handOverUnappliedRecovery(
   }
 }
 
+/**
+ * Never throws: the step's catch would write the case back to where the retry found it, reopening
+ * a case a cancellation closed. A capture left unreconciled keeps its attempt processing on its
+ * session, which the paid-case sweep delivers again.
+ */
 async function reconcileRetryCapture(
   container: MedusaContainer,
-  input: { dunningCase: DunningCaseRecord, paymentId: string }
+  input: { dunningCase: DunningCaseRecord, paymentId: string, correlationId: string }
 ) {
-  const { data: payments } = await container.resolve(ContainerRegistrationKeys.QUERY).graph({
-    entity: "payment",
-    fields: ["id", "payment_collection_id", "payment_session.id", "payment_session.context"],
-    filters: { id: input.paymentId },
-  })
+  let payments: unknown[]
+
+  try {
+    payments = (
+      await container.resolve(ContainerRegistrationKeys.QUERY).graph({
+        entity: "payment",
+        fields: ["id", "payment_collection_id", "payment_session.id", "payment_session.context"],
+        filters: { id: input.paymentId },
+      })
+    ).data
+  } catch (error) {
+    logDunningEvent(container.resolve("logger"), "error", {
+      event: DunningLogEvents.RETRY,
+      outcome: "failed",
+      correlation_id: input.correlationId,
+      dunning_case_id: input.dunningCase.id,
+      subscription_id: input.dunningCase.subscription_id,
+      renewal_cycle_id: input.dunningCase.renewal_cycle_id,
+      alertable: true,
+      message: `Payment '${input.paymentId}' of DunningCase '${input.dunningCase.id}' could not be reconciled as a late capture; the paid-case sweep delivers it again: ${getDunningErrorMessage(error)}`,
+    })
+
+    return
+  }
+
   const payment = payments[0] as
     | {
       payment_collection_id: string

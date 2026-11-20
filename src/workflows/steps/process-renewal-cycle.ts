@@ -1994,40 +1994,37 @@ export const finalizeRenewalCycleStep = createStep(
     const { context, order_result, authorization } = input
     const generatedOrderId = order_result.generated_order_id
 
-    try {
-      const settlement = await settleRenewalCycleSucceeded(
-        container,
-        {
-          renewal_cycle_id: context.renewal_cycle_id,
-          subscription_id: context.subscription_id,
-          order_id: generatedOrderId,
-          finished_at: new Date(),
-          attempt_id: context.attempt_id,
-          source_snapshot: order_result.resolved_source_snapshot,
-          consumed_skip_next_cycle: context.subscription.skip_next_cycle,
-          source: RenewalSettlementSource.RENEWAL,
-          audit: buildRenewalSettlementAudit(context),
-        }
-      )
-      const cancelled = settlement.reason === SUBSCRIPTION_CANCELLED_REFUSAL
-
-      return new StepResponse({
-        outcome: cancelled ? RenewalRunOutcome.FAILED : RenewalRunOutcome.SUCCEEDED,
-        renewal_cycle: cancelled
-          ? await endRenewalCycleOfCancelledSubscription(
-              container,
-              context,
-              order_result,
-              authorization.charge_submitted ? null : authorization.payment_session_id
-            )
-          : settlement.renewal_cycle,
-        subscription_id: context.subscription_id,
-        attempt_id: context.attempt_id,
-        generated_order_id: generatedOrderId,
-      })
-    } catch (error) {
+    const settlement = await settleRenewalCycleSucceeded(container, {
+      renewal_cycle_id: context.renewal_cycle_id,
+      subscription_id: context.subscription_id,
+      order_id: generatedOrderId,
+      finished_at: new Date(),
+      attempt_id: context.attempt_id,
+      source_snapshot: order_result.resolved_source_snapshot,
+      consumed_skip_next_cycle: context.subscription.skip_next_cycle,
+      source: RenewalSettlementSource.RENEWAL,
+      audit: buildRenewalSettlementAudit(context),
+    }).catch(async (error: unknown) => {
       await recordRenewalFailure(container, context, error)
       throw error
-    }
+    })
+    const cancelled = settlement.reason === SUBSCRIPTION_CANCELLED_REFUSAL
+
+    // Kept out of the failure recording above: it fails the attempt, and the awaiting-payment sweep
+    // only delivers again the capture of an attempt still processing.
+    return new StepResponse({
+      outcome: cancelled ? RenewalRunOutcome.FAILED : RenewalRunOutcome.SUCCEEDED,
+      renewal_cycle: cancelled
+        ? await endRenewalCycleOfCancelledSubscription(
+            container,
+            context,
+            order_result,
+            authorization.charge_submitted ? null : authorization.payment_session_id
+          )
+        : settlement.renewal_cycle,
+      subscription_id: context.subscription_id,
+      attempt_id: context.attempt_id,
+      generated_order_id: generatedOrderId,
+    })
   }
 )

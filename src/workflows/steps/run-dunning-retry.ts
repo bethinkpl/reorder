@@ -410,6 +410,13 @@ export async function loadOrderAmounts(
   }
 }
 
+export async function isOrderPaid(
+  container: MedusaContainer,
+  orderId: string | null | undefined
+): Promise<boolean> {
+  return orderId ? (await loadOrderAmounts(container, orderId)).pending <= 0 : false
+}
+
 async function settleNonRetryableCase(
   dunningModule: DunningModuleService,
   dunningCase: DunningCaseRecord,

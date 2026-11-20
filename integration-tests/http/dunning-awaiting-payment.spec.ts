@@ -559,6 +559,29 @@ medusaIntegrationTestRunner({
         )
       })
 
+      it("leaves a case whose order the customer paid meanwhile for the sweep to recover, rescheduling nothing", async () => {
+        const container = getContainer()
+        const seeded = await seedDunningCase(container, "SUB-DUN-FAIL-PAID-ELSEWHERE")
+        const customer = await createPaymentSessionFixture(container, { amount: RENEWAL_AMOUNT })
+
+        await captureOnOrder(container, seeded.order.id, customer.session.id, { linkCollection: true })
+
+        const before = await readDunningState(container, seeded.dunningCase.id)
+        const events = watchEvents(container)
+
+        await deliverFailure(container, seeded.attempts[0].session.id, { reason: "insufficient_funds" })
+
+        expect(await readDunningState(container, seeded.dunningCase.id)).toEqual(before)
+        expect(events(DunningEvents.ATTEMPT_FAILED)).toHaveLength(0)
+
+        await reconcilePaidDunningCases(container)
+
+        expect((await readDunningState(container, seeded.dunningCase.id)).dunningCase).toMatchObject({
+          status: DunningCaseStatus.RECOVERED,
+          recovery_reason: DunningRecoveryReason.CUSTOMER_PAYMENT,
+        })
+      })
+
       it("raises one overdue alert for a case awaiting its retry's payment past the limit, however many sweeps see it", async () => {
         const container = getContainer()
         const seeded = await seedDunningCase(container, "SUB-DUN-AWAIT-OVERDUE")

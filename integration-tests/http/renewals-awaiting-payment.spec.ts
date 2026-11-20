@@ -34,6 +34,7 @@ import {
 import { loadOrderAmounts } from "../../src/workflows/steps/run-dunning-retry"
 import { recordOrderCaptureTransactions } from "../../src/workflows/utils/record-order-capture-transactions"
 import {
+  AWAITING_ORDER_TOTAL,
   type SeededAwaitingRenewal,
   failRenewalLockReleaseOnce,
   oneMonthAfter,
@@ -788,6 +789,30 @@ medusaIntegrationTestRunner({
         expect(replayed.subscription.status).toEqual(SubscriptionStatus.PAST_DUE)
         expect(replayed.failedLogs).toHaveLength(1)
         expect(emitted(DunningEvents.STARTED)).toHaveLength(1)
+      })
+
+      it("leaves a cycle whose order was paid another way meanwhile for the sweep to settle, failing nothing and opening no dunning", async () => {
+        const container = getContainer()
+        const seeded = await seedAwaitingRenewal(container, { reference: "SUB-FAIL-PAID-ELSEWHERE" })
+        const customer = await createPaymentSessionFixture(container, { amount: AWAITING_ORDER_TOTAL })
+
+        await captureOnOrder(container, seeded.order.id, customer.session.id, { linkCollection: true })
+
+        const before = await readRenewalState(container, seeded)
+        const emitted = watchEvents(container)
+
+        await deliverFailure(container, seeded.session.id, { reason: "declined" })
+
+        expect(await readRenewalState(container, seeded)).toEqual(before)
+        expect(emitted(DunningEvents.STARTED)).toHaveLength(0)
+
+        await reconcileAwaitingRenewalCycles(container)
+
+        const settled = await readRenewalState(container, seeded)
+
+        expect(settled.cycle.status).toEqual(RenewalCycleStatus.SUCCEEDED)
+        expect(settled.cases).toHaveLength(0)
+        expect(settled.subscription.status).toEqual(SubscriptionStatus.ACTIVE)
       })
 
       it("fails the cycle but opens no dunning case when the subscription is paused", async () => {

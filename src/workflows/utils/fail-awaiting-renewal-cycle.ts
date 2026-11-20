@@ -38,7 +38,7 @@ import {
 } from "../../modules/subscription/types"
 import { startDunningWorkflow } from "../start-dunning"
 import { persistSubscriptionLogEvent } from "../steps/create-subscription-log-event"
-import { loadOrderAmounts } from "../steps/run-dunning-retry"
+import { isOrderPaid } from "../steps/run-dunning-retry"
 import { toISOStringOrNull } from "./date-output"
 import {
   type RenewalSessionSignal,
@@ -240,9 +240,7 @@ export async function applyRecordedRenewalPaymentFailureUnderLock(
 
   const cycle = await loadCycle(renewalModule, attempt.renewal_cycle_id)
   const orderId = cycle?.generated_order_id ?? attempt.order_id
-  const orderPaid = orderId
-    ? (await loadOrderAmounts(container, orderId)).pending <= 0
-    : false
+  const orderPaid = await isOrderPaid(container, orderId)
   const applied =
     !orderPaid &&
     (await applyRenewalPaymentFailureUnderLock(container, {
@@ -338,6 +336,13 @@ export async function failAwaitingRenewalCycleUnderLock(
     return false
   }
 
+  const orderId = cycle.generated_order_id ?? attempt.order_id
+
+  // Paid some other way meanwhile: the awaiting-payment sweep settles the cycle.
+  if (await isOrderPaid(container, orderId)) {
+    return false
+  }
+
   const subscription = (await subscriptionModule.retrieveSubscription(
     cycle.subscription_id
   )) as SubscriptionType
@@ -350,7 +355,6 @@ export async function failAwaitingRenewalCycleUnderLock(
       ? `Payment provider reported the renewal payment as '${input.action}' (${input.reason})`
       : `Payment provider reported the renewal payment as '${input.action}'`)
   const failureKind = classifyRenewalFailure(message)
-  const orderId = cycle.generated_order_id ?? attempt.order_id
   const { audit } = readStoredSettlementInputs(cycle.settlement_inputs)
   const correlationId =
     audit?.correlation_id ?? createRenewalCorrelationId("renewal-payment-failure")

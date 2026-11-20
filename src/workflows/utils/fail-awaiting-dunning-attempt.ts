@@ -27,7 +27,7 @@ import { emitDunningEvent } from "../steps/emit-dunning-event"
 import {
   classifyReportedPaymentFailure,
   loadDunningCase,
-  loadOrderAmounts,
+  isOrderPaid,
   type RunDunningRetryStepOutput,
   settleDeclinedRetryAttempt,
 } from "../steps/run-dunning-retry"
@@ -276,9 +276,7 @@ export async function applyRecordedDunningPaymentFailureUnderLock(
   }
 
   const [dunningCase] = await dunningModule.listDunningCases({ id: attempt.dunning_case_id })
-  const orderPaid = dunningCase?.renewal_order_id
-    ? (await loadOrderAmounts(container, dunningCase.renewal_order_id)).pending <= 0
-    : false
+  const orderPaid = await isOrderPaid(container, dunningCase?.renewal_order_id)
   const application = orderPaid
     ? { applied: false, output: null }
     : await applyDunningPaymentFailureUnderLock(container, {
@@ -347,6 +345,11 @@ export async function failAwaitingDunningAttemptUnderLock(
   const halfFailed = latest.status === DunningAttemptStatus.FAILED && onThisSession
 
   if (!inFlight && !halfFailed) {
+    return null
+  }
+
+  // Paid some other way meanwhile: the paid-case sweep recovers the case.
+  if (await isOrderPaid(container, dunningCase.renewal_order_id)) {
     return null
   }
 

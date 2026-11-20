@@ -18,6 +18,11 @@ import {
 } from "../../../../../modules/subscription/types"
 import { getEffectiveNextRenewalAt } from "../../../../../modules/subscription/utils/effective-next-renewal"
 import {
+  isLockAcquisitionFailure,
+  isRenewalPaymentInProgress,
+  RENEWAL_PAYMENT_IN_PROGRESS,
+} from "../../../../../modules/subscription/utils/errors"
+import {
   computeSubscriptionDiscountAmount,
   roundCurrency,
 } from "../../../../../workflows/utils/subscription-discount"
@@ -360,6 +365,16 @@ export function mapPaymentStatus(
   return "ok"
 }
 
+/**
+ * Storefronts know a retry charge in flight only as `retry_in_progress`, so a charge awaiting the
+ * provider's answer is reported the same way; the admin keeps the distinction.
+ */
+function toStoreRetryBlockedReason<T extends RetryBlockedReason | null>(reason: T) {
+  return reason === RetryBlockedReason.PAYMENT_IN_PROGRESS
+    ? RetryBlockedReason.RETRY_IN_PROGRESS
+    : reason
+}
+
 function mapPaymentRecovery(
   dunningCase: DunningCaseRecord | null,
   latestAttempt: DunningAttemptRecord | null,
@@ -393,7 +408,7 @@ function mapPaymentRecovery(
         ? DunningCaseStatus.RETRYING
         : dunningCase.status,
     retry_eligible: eligibility.eligible,
-    retry_blocked_reason: eligibility.blocked_reason,
+    retry_blocked_reason: toStoreRetryBlockedReason(eligibility.blocked_reason),
     attempt_count: dunningCase.attempt_count,
     max_attempts: dunningCase.max_attempts,
     next_retry_at: toIsoStringOrNull(dunningCase.next_retry_at),
@@ -813,11 +828,13 @@ export class StoreRetryNotEligibleError extends MedusaError {
   readonly blocked_reason: RetryBlockedReason
 
   constructor(subscriptionId: string, blockedReason: RetryBlockedReason) {
+    const storeReason = toStoreRetryBlockedReason(blockedReason)
+
     super(
       MedusaError.Types.CONFLICT,
-      `Subscription '${subscriptionId}' is not eligible for payment retry (${blockedReason}).`
+      `Subscription '${subscriptionId}' is not eligible for payment retry (${storeReason}).`
     )
-    this.blocked_reason = blockedReason
+    this.blocked_reason = storeReason
   }
 }
 
@@ -947,4 +964,30 @@ export async function getStoreProductSubscriptionOfferResponse(
 
 export function sendStoreJson(res: MedusaResponse, body: unknown, status = 200) {
   return res.status(status).json(body)
+}
+
+/**
+ * The refusals of a pause or resume the storefront can act on. Medusa's error handler would answer
+ * both with its generic conflict text (and an unexpected error for the lock), so the routes answer
+ * them in the shape of its 409 instead.
+ */
+export function mapStoreSubscriptionChangeConflict(error: unknown) {
+  if (isRenewalPaymentInProgress(error)) {
+    return {
+      type: MedusaError.Types.CONFLICT,
+      code: RENEWAL_PAYMENT_IN_PROGRESS,
+      message:
+        "A payment for this subscription is being processed. Please try again once it has completed.",
+    }
+  }
+
+  if (isLockAcquisitionFailure(error)) {
+    return {
+      type: MedusaError.Types.CONFLICT,
+      message:
+        "This subscription is already being updated. Please try again in a moment.",
+    }
+  }
+
+  return null
 }

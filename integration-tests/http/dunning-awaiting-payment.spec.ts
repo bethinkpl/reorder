@@ -12,10 +12,14 @@ import { DUNNING_MODULE } from "../../src/modules/dunning"
 import { DunningEvents } from "../../src/modules/dunning/events"
 import type DunningModuleService from "../../src/modules/dunning/service"
 import { DunningAttemptStatus, DunningCaseStatus } from "../../src/modules/dunning/types"
+import { RetryBlockedReason } from "../../src/modules/dunning/utils/retry-eligibility"
 import { RENEWAL_MODULE } from "../../src/modules/renewal"
 import type RenewalModuleService from "../../src/modules/renewal/service"
 import { RenewalAttemptStatus, RenewalCycleStatus } from "../../src/modules/renewal/types"
-import { DEFAULT_AWAITING_PAYMENT_ALERT_HOURS } from "../../src/modules/renewal/utils/awaiting-payment-age"
+import {
+  DEFAULT_AWAITING_PAYMENT_ALERT_HOURS,
+  DEFAULT_AWAITING_PAYMENT_RESOLVE_MIN_HOURS,
+} from "../../src/modules/renewal/utils/awaiting-payment-age"
 import { SUBSCRIPTION_MODULE } from "../../src/modules/subscription"
 import {
   LatePaymentCapturedReason,
@@ -168,7 +172,7 @@ medusaIntegrationTestRunner({
         const storeUrl = `/store/customers/me/subscriptions/${subscriptionId}`
 
         await expect(api.post(`${storeUrl}/retry-payment`, {}, store)).rejects.toMatchObject({
-          response: { status: 409, data: { blocked_reason: "payment_in_progress" } },
+          response: { status: 409, data: { blocked_reason: RetryBlockedReason.RETRY_IN_PROGRESS } },
         })
         expect((await api.get(storeUrl, store)).data.subscription).toMatchObject({
           payment_status: "recovery_required",
@@ -176,7 +180,7 @@ medusaIntegrationTestRunner({
             dunning_case_id: caseId,
             state: DunningCaseStatus.RETRYING,
             retry_eligible: false,
-            retry_blocked_reason: "payment_in_progress",
+            retry_blocked_reason: RetryBlockedReason.RETRY_IN_PROGRESS,
           },
         })
         await expect(
@@ -190,7 +194,15 @@ medusaIntegrationTestRunner({
             { reason: "shorter cadence", intervals: [60, 120, 240], max_attempts: 3 },
             admin
           )
-        ).rejects.toMatchObject({ response: { status: 409 } })
+        ).rejects.toMatchObject({
+          response: {
+            status: 409,
+            data: {
+              type: "conflict",
+              message: `DunningCase '${caseId}' can't update retry schedule while retry is in flight`,
+            },
+          },
+        })
 
         const laterCycle = await createRenewalCycleSeed(container, {
           subscription_id: subscriptionId,
@@ -234,6 +246,48 @@ medusaIntegrationTestRunner({
           recovery_reason: "subscription_cancelled_by_customer",
           closed_at: expect.anything(),
         })
+      })
+
+      it("never shows the storefront the admin's payment_in_progress reason: the list, the detail and the retry refusal all report a retry in progress", async () => {
+        const container = getContainer()
+        const customerId = "cus_dunning_awaiting_store_vocabulary"
+        const seeded = await seedDunningCase(container, "SUB-DUN-AWAIT-STORE-VOCAB", {
+          customer_id: customerId,
+        })
+        const admin = { headers: await createAdminAuthHeaders(container) }
+        const store = { headers: await createStoreCustomerHeaders(container, customerId) }
+        const storeUrl = `/store/customers/me/subscriptions/${seeded.subscription.id}`
+        const retryInProgress = {
+          state: DunningCaseStatus.RETRYING,
+          retry_eligible: false,
+          retry_blocked_reason: RetryBlockedReason.RETRY_IN_PROGRESS,
+        }
+
+        const list = await api.get("/store/customers/me/subscriptions", store)
+        const detail = await api.get(storeUrl, store)
+        const refusal = await api
+          .post(`${storeUrl}/retry-payment`, {}, store)
+          .catch((error: { response: { status: number, data: Record<string, unknown> } }) => error.response)
+
+        expect(list.data.subscriptions).toEqual([
+          expect.objectContaining({ payment_recovery: expect.objectContaining(retryInProgress) }),
+        ])
+        expect(detail.data.subscription.payment_recovery).toMatchObject(retryInProgress)
+        expect(refusal).toMatchObject({
+          status: 409,
+          data: {
+            blocked_reason: RetryBlockedReason.RETRY_IN_PROGRESS,
+            message: expect.stringContaining(`(${RetryBlockedReason.RETRY_IN_PROGRESS})`),
+          },
+        })
+
+        for (const body of [list.data, detail.data, refusal.data]) {
+          expect(JSON.stringify(body)).not.toMatch(/"payment_in_progress"|\(payment_in_progress\)/)
+        }
+
+        expect(
+          (await api.get(`/admin/dunning/${seeded.dunningCase.id}`, admin)).data.dunning_case
+        ).toMatchObject({ retry_blocked_reason: RetryBlockedReason.PAYMENT_IN_PROGRESS })
       })
 
       it.each([
@@ -795,13 +849,13 @@ medusaIntegrationTestRunner({
         const sweepAt = (offsetMs: number) =>
           atTime(submittedAt + offsetMs, () => reconcilePaidDunningCases(container))
 
-        expect(await sweepAt((DEFAULT_AWAITING_PAYMENT_ALERT_HOURS - 1) * HOUR_MS)).toMatchObject({
+        expect(await sweepAt((DEFAULT_AWAITING_PAYMENT_RESOLVE_MIN_HOURS - 1) * HOUR_MS)).toMatchObject({
           stale_attempts_closed: 0,
         })
-        expect(await sweepAt((DEFAULT_AWAITING_PAYMENT_ALERT_HOURS + 1) * HOUR_MS)).toMatchObject({
+        expect(await sweepAt((DEFAULT_AWAITING_PAYMENT_RESOLVE_MIN_HOURS + 1) * HOUR_MS)).toMatchObject({
           stale_attempts_closed: 1,
         })
-        expect(await sweepAt((DEFAULT_AWAITING_PAYMENT_ALERT_HOURS + 2) * HOUR_MS)).toMatchObject({
+        expect(await sweepAt((DEFAULT_AWAITING_PAYMENT_RESOLVE_MIN_HOURS + 2) * HOUR_MS)).toMatchObject({
           stale_attempts_closed: 0,
         })
 
@@ -940,7 +994,7 @@ medusaIntegrationTestRunner({
         ]
         const events = watchEvents(container)
 
-        await ageInFlightAttempt(container, young, DEFAULT_AWAITING_PAYMENT_ALERT_HOURS - 1)
+        await ageInFlightAttempt(container, young, DEFAULT_AWAITING_PAYMENT_RESOLVE_MIN_HOURS - 1)
         before[0] = await readDunningState(container, young.dunningCase.id)
 
         await expect(api.post(route(young.dunningCase.id), {})).rejects.toMatchObject({
@@ -964,7 +1018,7 @@ medusaIntegrationTestRunner({
             data: {
               type: "conflict",
               message: expect.stringMatching(
-                new RegExp(`payment may still arrive.*${DEFAULT_AWAITING_PAYMENT_ALERT_HOURS} hours`)
+                new RegExp(`payment may still arrive.*${DEFAULT_AWAITING_PAYMENT_RESOLVE_MIN_HOURS} hours`)
               ),
             },
           },
@@ -1041,7 +1095,7 @@ medusaIntegrationTestRunner({
           const seeded = await seedDunningCase(container, reference, seed)
           const { attempt, session } = seeded.attempts[0]
 
-          await ageInFlightAttempt(container, seeded, DEFAULT_AWAITING_PAYMENT_ALERT_HOURS + 1)
+          await ageInFlightAttempt(container, seeded, DEFAULT_AWAITING_PAYMENT_RESOLVE_MIN_HOURS + 1)
 
           const events = watchEvents(container)
           const response = await api.post(

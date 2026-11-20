@@ -8,6 +8,7 @@ import {
 } from "../../../modules/dunning/utils/admin-query"
 import { getDunningErrorMessage } from "../../../modules/dunning/utils/observability"
 import { isLockBusyError } from "../../../common/utils/lock-busy-error"
+import { type AdminRouteError, mapMedusaErrorByType } from "../route-errors"
 
 export function normalizeAdminDunningCasesListQuery(
   query: GetAdminDunningCasesSchemaType
@@ -61,15 +62,26 @@ export async function getAdminDunningCasesListResponse(
   )
 }
 
-export function mapDunningAdminRouteError(error: unknown) {
-  // A workflow rethrows its step's error as a serialised plain object, not an Error.
-  const message = isLockBusyError(error)
-    ? "This dunning case is being updated by a retry or a payment right now; try again in a moment"
-    : getDunningErrorMessage(error)
-  const normalized = message.toLowerCase()
-  const errorType = MedusaError.isMedusaError(error) ? error.type : null
+export function mapDunningAdminRouteError(error: unknown): AdminRouteError {
+  if (isLockBusyError(error)) {
+    return {
+      status: 409,
+      type: MedusaError.Types.CONFLICT,
+      message:
+        "This dunning case is being updated by a retry or a payment right now; try again in a moment",
+    }
+  }
 
-  if (errorType === MedusaError.Types.NOT_FOUND || normalized.includes("was not found")) {
+  const message = getDunningErrorMessage(error)
+  const byType = mapMedusaErrorByType(error, message)
+
+  if (byType) {
+    return byType
+  }
+
+  const normalized = message.toLowerCase()
+
+  if (normalized.includes("was not found")) {
     return {
       status: 404,
       type: MedusaError.Types.NOT_FOUND,

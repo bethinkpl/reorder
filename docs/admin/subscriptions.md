@@ -117,6 +117,9 @@ Action availability depends on the subscription status:
 - `paused` -> `Resume`, `Cancel`
 - `cancelled` -> no further lifecycle mutation actions
 
+The server refuses `Pause` and `Resume` while a renewal charge or a dunning retry charge is waiting for the payment
+provider's answer, with a message naming the renewal or dunning case.
+
 ### Row Navigation
 
 Clicking a row opens the detail page for that subscription.

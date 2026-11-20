@@ -361,6 +361,11 @@ Shape:
   Case is terminal or cannot accept a new offer.
 - `409 offer_out_of_policy`
   Offer payload violates retention policy rules.
+- `409 conflict`
+  A `pause_offer` while a renewal charge is waiting for the payment provider's answer (see
+  `POST /admin/subscriptions/:id/pause`); nothing is recorded. Other offers are not affected.
+- `409 conflict`
+  A renewal run or a payment holds the subscription's `renewal:subscription:<id>` lock; try again in a moment.
 
 ## 4. Finalize Cancellation
 
@@ -465,3 +470,9 @@ Across the mutation routes, the current runtime exposes domain-aware errors for:
 
 Routes map these to HTTP responses through shared error helpers in:
 - `src/api/admin/cancellations/utils.ts`
+- `src/api/admin/route-errors.ts`
+
+The status comes from the error's `MedusaError` type, also when a workflow run rethrows it as a plain object:
+`not_found` is `404`, `invalid_data` is `400` (for example an empty reason update), `conflict` and `not_allowed`
+are `409`, any other type is `500`; the body carries the error's own message. Errors without a `MedusaError` type
+are mapped from their message.

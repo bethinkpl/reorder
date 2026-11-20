@@ -105,6 +105,8 @@ function settlementInputsOfSubmittedAttempt(
       },
     },
     source_snapshot: null,
+    // A run with the skip flag set charges nothing, so one that submitted a charge skipped nothing.
+    consumed_skip_next_cycle: false,
   }
 }
 
@@ -165,6 +167,7 @@ export async function settleAwaitingRenewalCycleUnderLock(
     attempt_id: stored.attempt_id,
     audit: stored.audit ?? undefined,
     source_snapshot: stored.source_snapshot,
+    consumed_skip_next_cycle: stored.consumed_skip_next_cycle ?? undefined,
     source: "renewal",
   })
 

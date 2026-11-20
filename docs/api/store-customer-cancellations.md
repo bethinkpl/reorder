@@ -192,7 +192,11 @@ Request body:
 
 Response:
 - refreshed subscription detail payload
-- route returns `409` if there is no retry-eligible payment recovery case
+- route returns `409` if there is no retry-eligible payment recovery case; the body carries the reason as `blocked_reason`
+  (the same value as `payment_recovery.retry_blocked_reason`)
+- a retry whose charge is still running, or is waiting for the payment provider's answer, is reported as
+  `retry_in_progress` in both places, with `payment_recovery.state: "retrying"`; the admin API tells the two apart
+  (`payment_in_progress` for the latter)
 
 ### `POST /store/customers/me/subscriptions/:id/cancellation`
 

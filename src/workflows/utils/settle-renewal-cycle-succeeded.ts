@@ -20,6 +20,7 @@ import {
 import { SUBSCRIPTION_MODULE } from "../../modules/subscription"
 import type SubscriptionModuleService from "../../modules/subscription/service"
 import type {
+  SubscriptionPendingUpdateData,
   SubscriptionSourceSnapshot,
   SubscriptionType,
 } from "../../modules/subscription/types"
@@ -79,6 +80,8 @@ export type StoredRenewalSettlementInputs = {
   attempt_id: string | null
   audit: RenewalSettlementAudit | null
   source_snapshot: SubscriptionSourceSnapshot | null
+  /** Whether the run had `skip_next_cycle` set; `null` on inputs stored before it was recorded. */
+  consumed_skip_next_cycle: boolean | null
 }
 
 function isRecord(value: unknown): value is Record<string, unknown> {
@@ -117,7 +120,29 @@ export function readStoredSettlementInputs(
     source_snapshot: isSourceSnapshot(stored.source_snapshot)
       ? stored.source_snapshot
       : null,
+    consumed_skip_next_cycle:
+      typeof stored.consumed_skip_next_cycle === "boolean"
+        ? stored.consumed_skip_next_cycle
+        : null,
   }
+}
+
+function isSamePendingChange(
+  applied: RenewalAppliedPendingUpdateData,
+  current: SubscriptionPendingUpdateData
+) {
+  if (applied.requested_at) {
+    return current.requested_at === applied.requested_at
+  }
+
+  return (
+    current.variant_id === applied.variant_id &&
+    current.variant_title === applied.variant_title &&
+    (current.sku ?? null) === (applied.sku ?? null) &&
+    current.frequency_interval === applied.frequency_interval &&
+    current.frequency_value === applied.frequency_value &&
+    (current.effective_at ?? null) === (applied.effective_at ?? null)
+  )
 }
 
 export type SettleRenewalCycleSucceededInput = {
@@ -128,6 +153,8 @@ export type SettleRenewalCycleSucceededInput = {
   /** The attempt the caller owns. Without it the settlement records one of its own. */
   attempt_id?: string | null
   source_snapshot?: SubscriptionSourceSnapshot | null
+  /** Whether the run had `skip_next_cycle` set. Defaults to what the cycle's settlement inputs recorded. */
+  consumed_skip_next_cycle?: boolean
   /** Defaults to the scheduled dunning retry: the one caller that settles without saying so. */
   source?: RenewalSettlementSource
   audit?: RenewalSettlementAudit
@@ -280,14 +307,23 @@ export async function settleRenewalCycleSucceeded(
       }
     : subscription.product_snapshot
 
+  const storedInputs = readStoredSettlementInputs(cycle.settlement_inputs)
+  const sourceSnapshot = input.source_snapshot ?? storedInputs.source_snapshot
+  // A cycle can be settled long after it ran (a charge confirmed later, a dunning recovery), and
+  // the customer may have skipped a delivery or scheduled another plan change since. Only what this
+  // cycle consumed is cleared; inputs stored before the skip was recorded reset it, as they always did.
+  const consumedSkip =
+    input.consumed_skip_next_cycle ?? storedInputs.consumed_skip_next_cycle ?? true
+  const consumedPendingChange = Boolean(
+    appliedPendingChanges &&
+    subscription.pending_update_data &&
+    isSamePendingChange(appliedPendingChanges, subscription.pending_update_data)
+  )
+
   // A plan change re-negotiates the deal: the frozen pricing snapshot must
   // be rebuilt from the live plan config for the NEW variant and frequency,
   // or the signup discount would keep applying to the new plan's price on
   // every future cycle.
-  const sourceSnapshot =
-    input.source_snapshot ??
-    readStoredSettlementInputs(cycle.settlement_inputs).source_snapshot
-
   let nextPricingSnapshot = subscription.pricing_snapshot
 
   if (appliedPendingChanges) {
@@ -314,10 +350,8 @@ export async function settleRenewalCycleSucceeded(
     pricing_snapshot: nextPricingSnapshot,
     next_renewal_at: nextRenewalAt,
     last_renewal_at: finishedAt,
-    skip_next_cycle: false,
-    pending_update_data: appliedPendingChanges
-      ? null
-      : subscription.pending_update_data,
+    ...(consumedSkip ? { skip_next_cycle: false } : {}),
+    ...(consumedPendingChange ? { pending_update_data: null } : {}),
     ...(sourceSnapshot ? { source_snapshot: sourceSnapshot } : {}),
   })
 

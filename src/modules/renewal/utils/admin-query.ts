@@ -8,6 +8,7 @@ import {
   RenewalAdminSubscriptionSummary,
   RenewalAttemptAdminRecord,
   RenewalAttemptAdminStatus,
+  RenewalAwaitingPaymentAdminSummary,
   RenewalCycleAdminDetail,
   RenewalCycleAdminDetailResponse,
   RenewalCycleAdminListItem,
@@ -21,6 +22,10 @@ import {
   RenewalCycleStatus,
 } from "../types"
 import { getEffectiveNextRenewalAt } from "../../subscription/utils/effective-next-renewal"
+import {
+  awaitingPaymentLimitEndsAt,
+  resolveAwaitingPaymentResolveMinHours,
+} from "./awaiting-payment-age"
 import { renewalErrors } from "./errors"
 import type { FrequencyInterval } from "../../../common/types/frequency-interval"
 
@@ -632,6 +637,37 @@ export async function listRenewalAttemptsForCycle(
   }))
 }
 
+const CHARGE_AWAITING_CYCLE_STATUSES: readonly string[] = [
+  RenewalCycleStatus.AWAITING_PAYMENT,
+  RenewalCycleStatus.PROCESSING,
+]
+
+/**
+ * Judges the latest attempt, as `POST /admin/renewals/:id/resolve-awaiting-payment` does, so
+ * `can_fail_after` never disagrees with that route's answer.
+ */
+function mapAwaitingPayment(
+  cycleStatus: RenewalCycleRecord["status"],
+  attempts: RenewalAttemptAdminRecord[]
+): RenewalAwaitingPaymentAdminSummary | null {
+  const latest = attempts[attempts.length - 1]
+
+  if (
+    !CHARGE_AWAITING_CYCLE_STATUSES.includes(cycleStatus) ||
+    latest?.status !== RenewalAttemptAdminStatus.PROCESSING
+  ) {
+    return null
+  }
+
+  return {
+    submitted_at: new Date(latest.started_at).toISOString(),
+    can_fail_after: awaitingPaymentLimitEndsAt(
+      latest.started_at,
+      resolveAwaitingPaymentResolveMinHours()
+    ).toISOString(),
+  }
+}
+
 export async function listAdminRenewals(
   container: MedusaContainer,
   input: ListAdminRenewalsInput
@@ -751,6 +787,7 @@ export async function getAdminRenewalDetail(
     last_error: record.last_error,
     pending_changes: mapPendingChanges(record.applied_pending_update_data),
     attempts,
+    awaiting_payment: mapAwaitingPayment(record.status, attempts),
     metadata: record.metadata ?? null,
   }
 

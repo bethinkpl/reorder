@@ -7,6 +7,7 @@ import { resumeSubscriptionWorkflow } from "../../../../../../../workflows"
 import {
   getOwnedSubscriptionForAction,
   getStoreSubscriptionDetailResponse,
+  mapStoreSubscriptionChangeConflict,
   requireStoreCustomer,
   sendStoreJson,
 } from "../../utils"
@@ -17,13 +18,23 @@ export const POST = async (
 ) => {
   await getOwnedSubscriptionForAction(req, req.params.id)
 
-  await resumeSubscriptionWorkflow(req.scope).run({
-    input: {
-      id: req.params.id,
-      triggered_by: req.auth_context.actor_id,
-      ...req.validatedBody,
-    },
-  })
+  try {
+    await resumeSubscriptionWorkflow(req.scope).run({
+      input: {
+        id: req.params.id,
+        triggered_by: req.auth_context.actor_id,
+        ...req.validatedBody,
+      },
+    })
+  } catch (error) {
+    const conflict = mapStoreSubscriptionChangeConflict(error)
+
+    if (!conflict) {
+      throw error
+    }
+
+    return sendStoreJson(res, conflict, 409)
+  }
 
   const customerId = await requireStoreCustomer(req)
   const response = await getStoreSubscriptionDetailResponse(req.scope, {

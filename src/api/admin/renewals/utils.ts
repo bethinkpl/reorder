@@ -7,6 +7,7 @@ import {
   type ListAdminRenewalsInput,
 } from "../../../modules/renewal/utils/admin-query"
 import { getRenewalErrorMessage } from "../../../modules/renewal/utils/observability"
+import { type AdminRouteError, mapMedusaErrorByType } from "../route-errors"
 
 export function normalizeAdminRenewalsListQuery(
   query: GetAdminRenewalsSchemaType
@@ -56,8 +57,14 @@ export async function getAdminRenewalsListResponse(
   )
 }
 
-export function mapRenewalAdminRouteError(error: unknown) {
+export function mapRenewalAdminRouteError(error: unknown): AdminRouteError {
   const message = getRenewalErrorMessage(error)
+  const byType = mapMedusaErrorByType(error, message)
+
+  if (byType) {
+    return byType
+  }
+
   const normalized = message.toLowerCase()
 
   if (normalized.includes("was not found")) {

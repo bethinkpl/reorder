@@ -27,6 +27,8 @@ import {
   forceRenewalCycleWorkflow,
   processRenewalCycleWorkflow,
   RenewalRunOutcome,
+  scheduleSubscriptionPlanChangeWorkflow,
+  skipNextDeliveryWorkflow,
 } from "../../src/workflows"
 import { loadOrderAmounts } from "../../src/workflows/steps/run-dunning-retry"
 import { recordOrderCaptureTransactions } from "../../src/workflows/utils/record-order-capture-transactions"
@@ -54,6 +56,7 @@ import {
   runRenewal,
 } from "../helpers/renewal-charge-fixtures"
 import {
+  createProductWithVariant,
   createRenewalAttemptSeed,
   createRenewalCycleSeed,
   createSubscriptionSeed,
@@ -223,6 +226,7 @@ medusaIntegrationTestRunner({
             },
           },
           source_snapshot: null,
+          consumed_skip_next_cycle: false,
         })
         expect(state.otherCycles).toHaveLength(0)
         expect(state.subscription).toMatchObject({
@@ -268,6 +272,7 @@ medusaIntegrationTestRunner({
             source_snapshot: sourceSnapshot(oldVariantId, "Old Variant", 5000, "OLD-SKU"),
           },
         })
+        const requestedAt = new Date().toISOString()
         await subscriptions().updateSubscriptions({
           id: seeded.subscription.id,
           pending_update_data: {
@@ -277,7 +282,7 @@ medusaIntegrationTestRunner({
             frequency_interval: FrequencyInterval.MONTH,
             frequency_value: 1,
             effective_at: null,
-            requested_at: new Date().toISOString(),
+            requested_at: requestedAt,
             requested_by: null,
           },
         })
@@ -289,8 +294,10 @@ medusaIntegrationTestRunner({
 
         expect(state.cycle).toMatchObject({
           status: RenewalCycleStatus.AWAITING_PAYMENT,
+          applied_pending_update_data: { variant_id: newVariantId, requested_at: requestedAt },
           settlement_inputs: {
             source_snapshot: { product_id, variant_id, title, quantity, unit_price, sku },
+            consumed_skip_next_cycle: false,
           },
         })
         expect(state.subscription).toMatchObject({
@@ -462,6 +469,108 @@ medusaIntegrationTestRunner({
             }),
           })
         )
+      })
+
+      describe("a plan change and a skip the customer requested while the charge was pending", () => {
+        async function seedAwaitingPlanChange(reference: string) {
+          const container = getContainer()
+          const { product, variant } = await createProductWithVariant(container)
+
+          await createPlanOfferSeed(container, {
+            name: `Awaiting newer requests ${reference}`,
+            scope: PlanOfferScope.VARIANT,
+            product_id: product.id,
+            variant_id: variant.id,
+            is_enabled: true,
+            allowed_frequencies: [
+              { interval: FrequencyInterval.MONTH, value: 3 },
+              { interval: FrequencyInterval.MONTH, value: 6 },
+            ],
+          })
+          const seeded = await seedAwaitingRenewal(container, { reference })
+          const applied = {
+            variant_id: variant.id,
+            variant_title: variant.title,
+            sku: variant.sku ?? null,
+            frequency_interval: FrequencyInterval.MONTH,
+            frequency_value: 3,
+            effective_at: null,
+            requested_at: new Date(Date.now() - DAY_MS).toISOString(),
+          }
+
+          await subscriptions().updateSubscriptions({
+            id: seeded.subscription.id,
+            product_id: product.id,
+            variant_id: variant.id,
+            pending_update_data: { ...applied, requested_by: null },
+          })
+          await renewals().updateRenewalCycles({
+            id: seeded.cycle.id,
+            applied_pending_update_data: applied,
+          })
+
+          return { seeded, variant }
+        }
+
+        async function requestWhileAwaiting(subscriptionId: string) {
+          await scheduleSubscriptionPlanChangeWorkflow(getContainer()).run({
+            input: {
+              id: subscriptionId,
+              variant_id: (await subscriptions().retrieveSubscription(subscriptionId)).variant_id,
+              frequency_interval: FrequencyInterval.MONTH,
+              frequency_value: 6,
+            },
+          })
+          await skipNextDeliveryWorkflow(getContainer()).run({ input: { id: subscriptionId } })
+
+          return (await subscriptions().retrieveSubscription(subscriptionId)).pending_update_data
+        }
+
+        async function settleOnCapture(seeded: SeededAwaitingRenewal) {
+          const payment = await captureOnOrder(getContainer(), seeded.order.id, seeded.session.id)
+
+          await deliverCapture(getContainer(), payment.id)
+
+          return await readRenewalState(getContainer(), seeded)
+        }
+
+        it("applies the cycle's own plan change and keeps the newer change and the skip for the next cycle", async () => {
+          const { seeded, variant } = await seedAwaitingPlanChange("SUB-AWAIT-NEWER-REQUESTS")
+          const newerChange = await requestWhileAwaiting(seeded.subscription.id)
+
+          const state = await settleOnCapture(seeded)
+
+          expect(newerChange).toMatchObject({ frequency_value: 6 })
+          expect(state.cycle.status).toEqual(RenewalCycleStatus.SUCCEEDED)
+          expect(state.subscription).toMatchObject({
+            variant_id: variant.id,
+            frequency_interval: FrequencyInterval.MONTH,
+            frequency_value: 3,
+            skip_next_cycle: true,
+            pending_update_data: newerChange,
+          })
+        })
+
+        it("clears the change the cycle applied and resets a skip when its inputs predate the skip record", async () => {
+          const { seeded } = await seedAwaitingPlanChange("SUB-AWAIT-LEGACY-INPUTS")
+          const { consumed_skip_next_cycle: _recorded, ...legacyInputs } = (
+            await renewals().retrieveRenewalCycle(seeded.cycle.id)
+          ).settlement_inputs as Record<string, unknown>
+
+          // An update merges into the stored JSON, so clear it before writing it back without the record.
+          await renewals().updateRenewalCycles({ id: seeded.cycle.id, settlement_inputs: null })
+          await renewals().updateRenewalCycles({ id: seeded.cycle.id, settlement_inputs: legacyInputs })
+          await skipNextDeliveryWorkflow(getContainer()).run({ input: { id: seeded.subscription.id } })
+
+          const state = await settleOnCapture(seeded)
+
+          expect(state.cycle.status).toEqual(RenewalCycleStatus.SUCCEEDED)
+          expect(state.subscription).toMatchObject({
+            frequency_value: 3,
+            skip_next_cycle: false,
+            pending_update_data: null,
+          })
+        })
       })
 
       it("leaves the cycle awaiting until the order is paid up", async () => {

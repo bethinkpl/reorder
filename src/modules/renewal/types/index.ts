@@ -1,4 +1,5 @@
 import type { FrequencyInterval } from "../../../common/types/frequency-interval"
+import type { ReportedPaymentFailure } from "../../../common/types/reported-payment-failure"
 
 export enum RenewalCycleStatus {
   SCHEDULED = "scheduled",
@@ -70,6 +71,7 @@ export type RenewalAttemptData = {
   error_message: string | null
   payment_reference: string | null
   order_id: string | null
+  reported_payment_failure: ReportedPaymentFailure | null
   metadata: Record<string, unknown> | null
   created_at: string
   updated_at: string

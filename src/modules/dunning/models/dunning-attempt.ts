@@ -17,6 +17,7 @@ const DunningAttempt = model
     error_code: model.text().nullable(),
     error_message: model.text().nullable(),
     payment_reference: model.text().nullable(),
+    reported_payment_failure: model.json().nullable(),
     metadata: model.json().nullable(),
   })
   .indexes([

@@ -2,6 +2,7 @@ import { randomUUID } from "crypto"
 import { setTimeout as delay } from "node:timers/promises"
 import type { MedusaContainer } from "@medusajs/framework/types"
 import { Modules } from "@medusajs/framework/utils"
+import { isLockBusyError } from "../../common/utils/lock-busy-error"
 
 const RETRY_INTERVAL_MS = 300
 
@@ -36,5 +37,40 @@ export async function runUnderLock<T>(
     return await job()
   } finally {
     await locking.release(key, { ownerId })
+  }
+}
+
+export type LockedRun<T> =
+  | { acquired: true, result: T }
+  | { acquired: false, error: unknown }
+
+/** `runUnderLock` that answers instead of throwing when another owner kept the lock all along. */
+export async function tryUnderLock<T>(
+  container: MedusaContainer,
+  key: string,
+  job: () => Promise<T>,
+  options: { wait_seconds: number, hold_seconds: number }
+): Promise<LockedRun<T>> {
+  let acquired = false
+
+  try {
+    const result = await runUnderLock(
+      container,
+      key,
+      () => {
+        acquired = true
+
+        return job()
+      },
+      options
+    )
+
+    return { acquired: true, result }
+  } catch (error) {
+    if (!acquired && isLockBusyError(error)) {
+      return { acquired: false, error }
+    }
+
+    throw error
   }
 }

@@ -9,6 +9,7 @@ import { FrequencyInterval } from "../../src/common/types/frequency-interval"
 import processDunningRetriesJob from "../../src/jobs/process-dunning-retries"
 import processRenewalCyclesJob from "../../src/jobs/process-renewal-cycles"
 import { reconcileAwaitingRenewalCycles } from "../../src/jobs/reconcile-awaiting-renewal-cycles"
+import { reconcilePaidDunningCases } from "../../src/jobs/reconcile-paid-dunning-cases"
 import { ACTIVITY_LOG_MODULE } from "../../src/modules/activity-log"
 import type ActivityLogModuleService from "../../src/modules/activity-log/service"
 import { ActivityLogEventType } from "../../src/modules/activity-log/types"
@@ -563,34 +564,131 @@ medusaIntegrationTestRunner({
       await expectNewerAttemptStillInFlight()
     })
 
-    it("rejects a failure that arrives while a run holds the renewal lock after a non-alertable entry, so the bus delivers it again, and fails the cycle on a delivery after the lock is free", async () => {
-      const container = getContainer()
-      const seeded = await seedAwaitingRenewal(container, { reference: "SUB-FAILURE-WHILE-LOCKED" })
-      const logs = watchLogs(container)
-      const alerts = watchAlerts(container)
+    describe("a failure that arrives while another holder keeps the lock", () => {
+      it("records a renewal failure on its attempt with a non-alertable entry, however often it is delivered, and the sweep fails the cycle into dunning once the lock is free", async () => {
+        const container = getContainer()
+        const seeded = await seedAwaitingRenewal(container, { reference: "SUB-FAILURE-WHILE-LOCKED" })
+        const logs = watchLogs(container)
+        const alerts = watchAlerts(container)
 
-      await whileRenewalLockHeld(container, seeded.subscription.id, async () => {
-        await expect(
-          deliverFailure(container, seeded.session.id, { reason: "declined" })
-        ).rejects.toThrow(/acquire lock/i)
+        await whileRenewalLockHeld(container, seeded.subscription.id, async () => {
+          await deliverFailure(container, seeded.session.id, { reason: "declined" })
+          await deliverFailure(container, seeded.session.id, { reason: "declined" })
+        })
+
+        expect(alerts(seeded.cycle.id)).toHaveLength(0)
+        expect(
+          logs({ event: "renewal.payment_failure_recorded", alertable: false, renewal_cycle_id: seeded.cycle.id })
+        ).toHaveLength(2)
+
+        const recorded = await readRenewalState(container, seeded)
+
+        expect(recorded.cycle.status).toEqual(RenewalCycleStatus.AWAITING_PAYMENT)
+        expect(recorded.attempts).toEqual([
+          expect.objectContaining({
+            id: seeded.attempt.id,
+            status: RenewalAttemptStatus.PROCESSING,
+            reported_payment_failure: expect.objectContaining({
+              session_id: seeded.session.id,
+              action: "failed",
+              reason: "declined",
+            }),
+          }),
+        ])
+        expect(emitted(DunningEvents.STARTED)).toHaveLength(0)
+
+        expect(await reconcileAwaitingRenewalCycles(container)).toMatchObject({
+          recorded_failures_applied: 1,
+          failed: 0,
+        })
+        expect(await reconcileAwaitingRenewalCycles(container)).toMatchObject({
+          recorded_failures_applied: 0,
+        })
+
+        await expectFailedIntoDunning(seeded, {
+          id: seeded.attempt.id,
+          reported_payment_failure: null,
+        })
       })
 
-      expect(alerts(seeded.cycle.id, seeded.session.id)).toHaveLength(0)
-      expect(
-        logs().filter(
-          (entry) =>
-            entry.alertable === false &&
-            entry.renewal_cycle_id === seeded.cycle.id &&
-            entry.payment_session_id === seeded.session.id
+      it("drops a recorded renewal failure once the renewal order has been paid, settling the cycle instead", async () => {
+        const container = getContainer()
+        const seeded = await seedAwaitingRenewal(container, {
+          reference: "SUB-RECORDED-FAILURE-THEN-PAID",
+        })
+
+        await whileRenewalLockHeld(container, seeded.subscription.id, async () => {
+          await deliverFailure(container, seeded.session.id, { reason: "declined" })
+        })
+        await captureOnOrder(container, seeded.order.id, seeded.session.id)
+
+        expect(await reconcileAwaitingRenewalCycles(container)).toMatchObject({
+          recorded_failures_applied: 0,
+          settled: 1,
+          failed: 0,
+        })
+
+        expect(await readRenewalState(container, seeded)).toMatchObject({
+          cycle: { status: RenewalCycleStatus.SUCCEEDED },
+          attempts: [
+            { id: seeded.attempt.id, status: RenewalAttemptStatus.SUCCEEDED, reported_payment_failure: null },
+          ],
+          cases: [],
+        })
+      })
+
+      it("records a retry failure on its attempt and the dunning sweep reschedules the case once when the lock is free", async () => {
+        const container = getContainer()
+        const { dunningCase } = await seedDunningCase(
+          container,
+          "SUB-RETRY-FAILURE-WHILE-LOCKED",
+          DUE_FOR_RETRY
         )
-      ).toHaveLength(1)
-      expect((await readRenewalState(container, seeded)).cycle.status).toEqual(
-        RenewalCycleStatus.AWAITING_PAYMENT
-      )
+        const sessions = routeRetrySessionsToFixture(container)
 
-      await deliverFailure(container, seeded.session.id, { reason: "declined" })
+        answerAuthorizationWithNull(container)
+        await runRetry(container, dunningCase.id)
 
-      await expectFailedIntoDunning(seeded, { id: seeded.attempt.id })
+        const logs = watchLogs(container)
+        const alerts = watchAlerts(container)
+        const ownerId = "dunning-holder"
+
+        await locking().acquire(dunningLockKey(dunningCase.id), { ownerId, expire: 60 })
+
+        try {
+          await deliverFailure(container, sessions[0].id, { reason: "insufficient_funds" })
+          await deliverFailure(container, sessions[0].id, { reason: "insufficient_funds" })
+        } finally {
+          await locking().release(dunningLockKey(dunningCase.id), { ownerId })
+        }
+
+        expect(alerts(dunningCase.id)).toHaveLength(0)
+        expect(
+          logs({ event: "dunning.payment_failure_recorded", alertable: false, dunning_case_id: dunningCase.id })
+        ).toHaveLength(2)
+        expect(await readDunningState(container, dunningCase.id)).toMatchObject({
+          dunningCase: { status: DunningCaseStatus.AWAITING_PAYMENT },
+          attempts: [
+            {
+              status: DunningAttemptStatus.PROCESSING,
+              reported_payment_failure: expect.objectContaining({ session_id: sessions[0].id }),
+            },
+          ],
+        })
+
+        expect(await reconcilePaidDunningCases(container)).toMatchObject({
+          recorded_failures_applied: 1,
+          failed: 0,
+        })
+        expect(await reconcilePaidDunningCases(container)).toMatchObject({
+          recorded_failures_applied: 0,
+        })
+
+        await expectRetryRescheduledOnce(dunningCase.id, sessions[0].id)
+        expect(
+          (await readDunningState(container, dunningCase.id)).attempts[0].reported_payment_failure
+        ).toBeNull()
+      })
     })
 
     describe("a capture that arrives while another holder has the renewal lock", () => {

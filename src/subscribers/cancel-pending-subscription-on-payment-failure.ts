@@ -7,6 +7,8 @@ import {
   PaymentActions,
   PaymentWebhookEvents,
 } from "@medusajs/framework/utils"
+import { getDunningErrorMessage } from "../modules/dunning/utils/observability"
+import { getRenewalErrorMessage } from "../modules/renewal/utils/observability"
 import { SubscriptionStatus } from "../modules/subscription/types"
 import { cancelAbandonedSubscription } from "../modules/subscription/utils/cancel-abandoned-subscription"
 import { findSubscriptionIdForPaymentCollection } from "../modules/subscription/utils/find-subscription-for-payment"
@@ -84,7 +86,9 @@ async function reportingFailure(
       domain: "subscriptions",
       ...context,
       alertable,
-      message: error instanceof Error ? error.message : String(error),
+      message: context.renewal_cycle_id
+        ? getRenewalErrorMessage(error)
+        : getDunningErrorMessage(error),
     })
 
     if (alertable) {

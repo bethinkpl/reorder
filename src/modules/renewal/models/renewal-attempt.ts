@@ -18,6 +18,7 @@ const RenewalAttempt = model
     error_message: model.text().nullable(),
     payment_reference: model.text().nullable(),
     order_id: model.text().nullable(),
+    reported_payment_failure: model.json().nullable(),
     metadata: model.json().nullable(),
   })
   .indexes([

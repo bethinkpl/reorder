@@ -145,7 +145,7 @@ describe("reconcilePaidDunningCases", () => {
     expect(recoverRun).toHaveBeenCalledWith({
       input: { dunning_case_id: "dun_1", payment_id: null },
     })
-    expect(result).toEqual({ scanned: 1, recovered: 1, unpaid: 0, failed: 0, late_captures: 0, stale_attempts_closed: 0 })
+    expect(result).toEqual({ scanned: 1, recovered: 1, unpaid: 0, failed: 0, late_captures: 0, stale_attempts_closed: 0, recorded_failures_applied: 0 })
   })
 
   it("leaves a case whose order still owes money alone", async () => {
@@ -157,7 +157,7 @@ describe("reconcilePaidDunningCases", () => {
     const result = await reconcilePaidDunningCases(container)
 
     expect(recoverRun).not.toHaveBeenCalled()
-    expect(result).toEqual({ scanned: 1, recovered: 0, unpaid: 1, failed: 0, late_captures: 0, stale_attempts_closed: 0 })
+    expect(result).toEqual({ scanned: 1, recovered: 0, unpaid: 1, failed: 0, late_captures: 0, stale_attempts_closed: 0, recorded_failures_applied: 0 })
   })
 
   it("scans the oldest open cases only", async () => {
@@ -192,7 +192,7 @@ describe("reconcilePaidDunningCases", () => {
 
     const result = await reconcilePaidDunningCases(container)
 
-    expect(result).toEqual({ scanned: 2, recovered: 1, unpaid: 0, failed: 1, late_captures: 0, stale_attempts_closed: 0 })
+    expect(result).toEqual({ scanned: 2, recovered: 1, unpaid: 0, failed: 1, late_captures: 0, stale_attempts_closed: 0, recorded_failures_applied: 0 })
     expect(JSON.parse(errorLogs[0])).toMatchObject({
       dunning_case_id: "dun_1",
       alertable: true,
@@ -208,7 +208,7 @@ describe("reconcilePaidDunningCases", () => {
     const result = await reconcilePaidDunningCases(container)
 
     expect(recoverRun).not.toHaveBeenCalled()
-    expect(result).toEqual({ scanned: 1, recovered: 0, unpaid: 0, failed: 0, late_captures: 0, stale_attempts_closed: 0 })
+    expect(result).toEqual({ scanned: 1, recovered: 0, unpaid: 0, failed: 0, late_captures: 0, stale_attempts_closed: 0, recorded_failures_applied: 0 })
   })
 
   it("raises the overdue alert for every unpaid awaiting case, past the first page as well", async () => {

@@ -391,6 +391,15 @@
           "nullable": true,
           "mappedType": "text"
         },
+        "reported_payment_failure": {
+          "name": "reported_payment_failure",
+          "type": "jsonb",
+          "unsigned": false,
+          "autoincrement": false,
+          "primary": false,
+          "nullable": true,
+          "mappedType": "json"
+        },
         "metadata": {
           "name": "metadata",
           "type": "jsonb",

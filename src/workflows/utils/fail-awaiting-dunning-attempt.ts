@@ -1,5 +1,9 @@
 import type { MedusaContainer } from "@medusajs/framework/types"
 import { ContainerRegistrationKeys } from "@medusajs/framework/utils"
+import {
+  readReportedPaymentFailure,
+  type ReportedPaymentFailure,
+} from "../../common/types/reported-payment-failure"
 import { DUNNING_MODULE } from "../../modules/dunning"
 import { DunningEvents } from "../../modules/dunning/events"
 import type DunningModuleService from "../../modules/dunning/service"
@@ -19,10 +23,11 @@ import { emitDunningEvent } from "../steps/emit-dunning-event"
 import {
   classifyReportedPaymentFailure,
   loadDunningCase,
+  loadOrderAmounts,
   type RunDunningRetryStepOutput,
   settleDeclinedRetryAttempt,
 } from "../steps/run-dunning-retry"
-import { runUnderLock } from "./run-under-lock"
+import { tryUnderLock } from "./run-under-lock"
 
 const RUN_LOCK_WAIT_SECONDS = 5
 const LOCK_HOLD_SECONDS = 120
@@ -88,12 +93,12 @@ async function loadCaseStatus(
 async function failAttemptOfClosedCaseUnderLock(
   container: MedusaContainer,
   input: FailAwaitingDunningAttemptInput & RetryMarkers
-): Promise<void> {
+): Promise<boolean> {
   const dunningModule = container.resolve<DunningModuleService>(DUNNING_MODULE)
   const status = await loadCaseStatus(dunningModule, input.dunning_case_id)
 
   if (!status || !CLOSED_DUNNING_CASE_STATUSES.includes(status)) {
-    return
+    return false
   }
 
   const [attempt] = await dunningModule.listDunningAttempts({
@@ -106,7 +111,7 @@ async function failAttemptOfClosedCaseUnderLock(
     !attempt ||
     (attempt.payment_reference !== null && attempt.payment_reference !== input.session_id)
   ) {
-    return
+    return false
   }
 
   const outcome = classifyReportedPaymentFailure({
@@ -135,51 +140,176 @@ async function failAttemptOfClosedCaseUnderLock(
     message,
     metadata: { attempt_id: attempt.id, payment_session_id: input.session_id },
   })
+
+  return true
 }
 
+export type DunningPaymentFailureHandling = "applied" | "recorded" | "ignored"
+
+/**
+ * Applies a provider's failure report for a retry charge under the case's lock. When another
+ * holder keeps the lock for the whole wait, the report is recorded on the attempt instead, for the
+ * dunning sweep to apply: the bus would only redeliver it within seconds, and nothing else keeps a
+ * failure.
+ */
 export async function failAwaitingDunningAttempt(
   container: MedusaContainer,
   input: FailAwaitingDunningAttemptInput
-): Promise<void> {
+): Promise<DunningPaymentFailureHandling> {
   const markers = await readRetryMarkers(container, input.session_id)
 
   if (!markers) {
-    return
+    return "ignored"
   }
 
   const dunningModule = container.resolve<DunningModuleService>(DUNNING_MODULE)
   const status = await loadCaseStatus(dunningModule, markers.dunning_case_id)
-  const lockKey = `dunning:${markers.dunning_case_id}`
-  const lockOptions = { wait_seconds: RUN_LOCK_WAIT_SECONDS, hold_seconds: LOCK_HOLD_SECONDS }
 
-  if (status && CLOSED_DUNNING_CASE_STATUSES.includes(status)) {
-    await runUnderLock(
-      container,
-      lockKey,
-      () => failAttemptOfClosedCaseUnderLock(container, { ...input, ...markers }),
-      lockOptions
-    )
-
-    return
+  if (
+    !status ||
+    (!CLOSED_DUNNING_CASE_STATUSES.includes(status) &&
+      !CHARGE_IN_FLIGHT_DUNNING_CASE_STATUSES.includes(status))
+  ) {
+    return "ignored"
   }
 
-  if (!status || !CHARGE_IN_FLIGHT_DUNNING_CASE_STATUSES.includes(status)) {
-    return
-  }
-
-  const output = await runUnderLock(
+  const run = await tryUnderLock(
     container,
-    lockKey,
-    () =>
-      failAwaitingDunningAttemptUnderLock(container, {
-        ...input,
-        ...markers,
-      }),
-    lockOptions
+    `dunning:${markers.dunning_case_id}`,
+    () => applyDunningPaymentFailureUnderLock(container, { ...input, ...markers }),
+    { wait_seconds: RUN_LOCK_WAIT_SECONDS, hold_seconds: LOCK_HOLD_SECONDS }
   )
 
-  if (output) {
-    await emitDunningAttemptOutcomeEvents(container, output)
+  if (run.acquired) {
+    if (run.result.output) {
+      await emitDunningAttemptOutcomeEvents(container, run.result.output)
+    }
+
+    return run.result.applied ? "applied" : "ignored"
+  }
+
+  if (!(await recordDunningPaymentFailure(container, { ...input, ...markers }))) {
+    throw run.error
+  }
+
+  return "recorded"
+}
+
+/**
+ * Written without the lock, so it touches the one column nothing else writes but the sweep that
+ * applies and clears it under the lock.
+ */
+async function recordDunningPaymentFailure(
+  container: MedusaContainer,
+  input: FailAwaitingDunningAttemptInput & RetryMarkers
+): Promise<boolean> {
+  const dunningModule = container.resolve<DunningModuleService>(DUNNING_MODULE)
+  const [attempt] = await dunningModule.listDunningAttempts({
+    id: input.dunning_attempt_id,
+    dunning_case_id: input.dunning_case_id,
+  })
+
+  if (!attempt) {
+    return false
+  }
+
+  const failure: ReportedPaymentFailure = {
+    session_id: input.session_id,
+    action: input.action,
+    reason: input.reason,
+    received_at: new Date().toISOString(),
+  }
+
+  await dunningModule.updateDunningAttempts({
+    id: attempt.id,
+    reported_payment_failure: failure,
+  })
+
+  logDunningEvent(container.resolve("logger"), "info", {
+    event: "dunning.payment_failure_recorded",
+    correlation_id: createDunningCorrelationId("dunning-payment-failure"),
+    dunning_case_id: input.dunning_case_id,
+    attempt_no: attempt.attempt_no,
+    alertable: false,
+    message: `The dunning case's lock stayed taken, so the '${input.action}' reported for payment session '${input.session_id}' was recorded on its attempt for the dunning sweep to apply`,
+    metadata: { attempt_id: attempt.id, payment_session_id: input.session_id },
+  })
+
+  return true
+}
+
+export type DunningPaymentFailureApplication = {
+  applied: boolean
+  /** The outcome whose events the caller emits once it has let go of the lock. */
+  output: RunDunningRetryStepOutput | null
+}
+
+/**
+ * Applies a failure report to the attempt it names: a closed case only has the attempt closed, an
+ * open one is rescheduled or settled. The caller holds `dunning:<case_id>`.
+ */
+export async function applyDunningPaymentFailureUnderLock(
+  container: MedusaContainer,
+  input: FailAwaitingDunningAttemptInput & RetryMarkers
+): Promise<DunningPaymentFailureApplication> {
+  const status = await loadCaseStatus(
+    container.resolve<DunningModuleService>(DUNNING_MODULE),
+    input.dunning_case_id
+  )
+
+  if (status && CLOSED_DUNNING_CASE_STATUSES.includes(status)) {
+    return { applied: await failAttemptOfClosedCaseUnderLock(container, input), output: null }
+  }
+
+  const output = await failAwaitingDunningAttemptUnderLock(container, input)
+
+  return { applied: output !== null, output }
+}
+
+export type RecordedDunningFailureOutcome = "applied" | "order_paid" | "stale"
+
+/**
+ * Applies the failure recorded on an attempt while its case's lock was busy, unless the renewal
+ * order has been paid since (a capture wins), and clears it either way. The caller holds
+ * `dunning:<case_id>` and emits the returned outcome's events.
+ */
+export async function applyRecordedDunningPaymentFailureUnderLock(
+  container: MedusaContainer,
+  attemptId: string
+): Promise<{
+  outcome: RecordedDunningFailureOutcome
+  output: RunDunningRetryStepOutput | null
+} | null> {
+  const dunningModule = container.resolve<DunningModuleService>(DUNNING_MODULE)
+  const [attempt] = await dunningModule.listDunningAttempts({ id: attemptId })
+  const failure = readReportedPaymentFailure(attempt?.reported_payment_failure)
+
+  if (!attempt || !failure) {
+    return null
+  }
+
+  const [dunningCase] = await dunningModule.listDunningCases({ id: attempt.dunning_case_id })
+  const orderPaid = dunningCase?.renewal_order_id
+    ? (await loadOrderAmounts(container, dunningCase.renewal_order_id)).pending <= 0
+    : false
+  const application = orderPaid
+    ? { applied: false, output: null }
+    : await applyDunningPaymentFailureUnderLock(container, {
+        dunning_case_id: attempt.dunning_case_id,
+        dunning_attempt_id: attempt.id,
+        session_id: failure.session_id,
+        action: failure.action,
+        reason: failure.reason,
+      })
+
+  await dunningModule.updateDunningAttempts({
+    id: attempt.id,
+    reported_payment_failure: null,
+  })
+
+  return {
+    outcome: application.applied ? "applied" : orderPaid ? "order_paid" : "stale",
+    output: application.output,
   }
 }
 

@@ -1,5 +1,9 @@
 import type { MedusaContainer } from "@medusajs/framework/types"
 import {
+  readReportedPaymentFailure,
+  type ReportedPaymentFailure,
+} from "../../common/types/reported-payment-failure"
+import {
   ActivityLogActorType,
   ActivityLogEventType,
 } from "../../modules/activity-log/types"
@@ -27,12 +31,13 @@ import {
 } from "../../modules/subscription/types"
 import { startDunningWorkflow } from "../start-dunning"
 import { persistSubscriptionLogEvent } from "../steps/create-subscription-log-event"
+import { loadOrderAmounts } from "../steps/run-dunning-retry"
 import { toISOStringOrNull } from "./date-output"
 import {
   type RenewalSessionSignal,
   signalNamesAttempt,
 } from "./renewal-session-marker"
-import { runUnderLock } from "./run-under-lock"
+import { tryUnderLock } from "./run-under-lock"
 import { readStoredSettlementInputs } from "./settle-renewal-cycle-succeeded"
 
 const RUN_LOCK_WAIT_SECONDS = 5
@@ -117,42 +122,157 @@ async function findAttemptForSession(
     : null
 }
 
+export type RenewalPaymentFailureHandling = "applied" | "recorded" | "ignored"
+
+/**
+ * Applies a provider's failure report under the subscription's renewal lock. When another holder
+ * keeps the lock for the whole wait, the report is recorded on the attempt it names instead, for
+ * the awaiting-payment sweep to apply: the bus would only redeliver it within seconds, and nothing
+ * else keeps a failure.
+ */
 export async function failAwaitingRenewalCycle(
   container: MedusaContainer,
-  input: FailAwaitingRenewalCycleInput
-): Promise<void> {
+  input: FailAwaitingRenewalCycleInput & { session_id: string }
+): Promise<RenewalPaymentFailureHandling> {
   const renewalModule = container.resolve<RenewalModuleService>(RENEWAL_MODULE)
 
   const cycle = await loadCycle(renewalModule, input.renewal_cycle_id)
 
-  if (!cycle) {
-    return
+  if (
+    !cycle ||
+    (!CLOSED_RENEWAL_CYCLE_STATUSES.includes(cycle.status) &&
+      !LOCK_WORTHY_STATUSES.includes(cycle.status))
+  ) {
+    return "ignored"
   }
 
-  const lockKey = `renewal:subscription:${cycle.subscription_id}`
-  const lockOptions = { wait_seconds: RUN_LOCK_WAIT_SECONDS, hold_seconds: LOCK_HOLD_SECONDS }
-
-  if (CLOSED_RENEWAL_CYCLE_STATUSES.includes(cycle.status)) {
-    await runUnderLock(
-      container,
-      lockKey,
-      () => failAttemptOfClosedCycleUnderLock(container, input),
-      lockOptions
-    )
-
-    return
-  }
-
-  if (!LOCK_WORTHY_STATUSES.includes(cycle.status)) {
-    return
-  }
-
-  await runUnderLock(
+  const run = await tryUnderLock(
     container,
-    lockKey,
-    () => failAwaitingRenewalCycleUnderLock(container, input),
-    lockOptions
+    `renewal:subscription:${cycle.subscription_id}`,
+    () => applyRenewalPaymentFailureUnderLock(container, input),
+    { wait_seconds: RUN_LOCK_WAIT_SECONDS, hold_seconds: LOCK_HOLD_SECONDS }
   )
+
+  if (run.acquired) {
+    return run.result ? "applied" : "ignored"
+  }
+
+  if (!(await recordRenewalPaymentFailure(container, cycle, input))) {
+    throw run.error
+  }
+
+  return "recorded"
+}
+
+/**
+ * Written without the lock, so it touches the one column nothing else writes but the sweep that
+ * applies and clears it under the lock.
+ */
+async function recordRenewalPaymentFailure(
+  container: MedusaContainer,
+  cycle: RenewalCycleRecord,
+  input: FailAwaitingRenewalCycleInput & { session_id: string }
+): Promise<boolean> {
+  const renewalModule = container.resolve<RenewalModuleService>(RENEWAL_MODULE)
+  const attempts = await renewalModule.listRenewalAttempts({ renewal_cycle_id: cycle.id })
+  const attempt = attempts.find((candidate) =>
+    signalNamesAttempt(candidate, {
+      session_id: input.session_id,
+      attempt_id: input.attempt_id,
+    })
+  )
+
+  if (!attempt) {
+    return false
+  }
+
+  const failure: ReportedPaymentFailure = {
+    session_id: input.session_id,
+    action: input.action,
+    reason: input.reason,
+    received_at: new Date().toISOString(),
+  }
+
+  await renewalModule.updateRenewalAttempts({
+    id: attempt.id,
+    reported_payment_failure: failure,
+  })
+
+  logRenewalEvent(container.resolve("logger"), "info", {
+    event: "renewal.payment_failure_recorded",
+    correlation_id: createRenewalCorrelationId("renewal-payment-failure"),
+    renewal_cycle_id: cycle.id,
+    subscription_id: cycle.subscription_id,
+    alertable: false,
+    message: `The renewal lock stayed taken, so the '${input.action}' reported for payment session '${input.session_id}' was recorded on its attempt for the awaiting-payment sweep to apply`,
+    metadata: { attempt_id: attempt.id, payment_session_id: input.session_id },
+  })
+
+  return true
+}
+
+/**
+ * Applies a failure report to the cycle it names. The caller holds the subscription's renewal
+ * lock. Answers whether anything was failed.
+ */
+export async function applyRenewalPaymentFailureUnderLock(
+  container: MedusaContainer,
+  input: FailAwaitingRenewalCycleInput
+): Promise<boolean> {
+  const cycle = await loadCycle(
+    container.resolve<RenewalModuleService>(RENEWAL_MODULE),
+    input.renewal_cycle_id
+  )
+
+  if (!cycle) {
+    return false
+  }
+
+  return CLOSED_RENEWAL_CYCLE_STATUSES.includes(cycle.status)
+    ? await failAttemptOfClosedCycleUnderLock(container, input)
+    : await failAwaitingRenewalCycleUnderLock(container, input)
+}
+
+export type RecordedRenewalFailureOutcome = "applied" | "order_paid" | "stale"
+
+/**
+ * Applies the failure recorded on an attempt while its lock was busy, unless the renewal order has
+ * been paid since (a capture wins), and clears it either way. The caller holds the subscription's
+ * renewal lock.
+ */
+export async function applyRecordedRenewalPaymentFailureUnderLock(
+  container: MedusaContainer,
+  attemptId: string
+): Promise<RecordedRenewalFailureOutcome | null> {
+  const renewalModule = container.resolve<RenewalModuleService>(RENEWAL_MODULE)
+  const [attempt] = await renewalModule.listRenewalAttempts({ id: attemptId })
+  const failure = readReportedPaymentFailure(attempt?.reported_payment_failure)
+
+  if (!attempt || !failure) {
+    return null
+  }
+
+  const cycle = await loadCycle(renewalModule, attempt.renewal_cycle_id)
+  const orderId = cycle?.generated_order_id ?? attempt.order_id
+  const orderPaid = orderId
+    ? (await loadOrderAmounts(container, orderId)).pending <= 0
+    : false
+  const applied =
+    !orderPaid &&
+    (await applyRenewalPaymentFailureUnderLock(container, {
+      renewal_cycle_id: attempt.renewal_cycle_id,
+      session_id: failure.session_id,
+      attempt_id: attempt.id,
+      action: failure.action,
+      reason: failure.reason,
+    }))
+
+  await renewalModule.updateRenewalAttempts({
+    id: attempt.id,
+    reported_payment_failure: null,
+  })
+
+  return applied ? "applied" : orderPaid ? "order_paid" : "stale"
 }
 
 /**
@@ -162,12 +282,12 @@ export async function failAwaitingRenewalCycle(
 async function failAttemptOfClosedCycleUnderLock(
   container: MedusaContainer,
   input: FailAwaitingRenewalCycleInput
-): Promise<void> {
+): Promise<boolean> {
   const renewalModule = container.resolve<RenewalModuleService>(RENEWAL_MODULE)
   const cycle = await loadCycle(renewalModule, input.renewal_cycle_id)
 
   if (!cycle || !CLOSED_RENEWAL_CYCLE_STATUSES.includes(cycle.status)) {
-    return
+    return false
   }
 
   const attempts = await renewalModule.listRenewalAttempts({
@@ -182,7 +302,7 @@ async function failAttemptOfClosedCycleUnderLock(
   )
 
   if (!attempt) {
-    return
+    return false
   }
 
   const message = input.reason
@@ -207,6 +327,8 @@ async function failAttemptOfClosedCycleUnderLock(
     message,
     metadata: { attempt_id: attempt.id, payment_session_id: input.session_id },
   })
+
+  return true
 }
 
 export async function failAwaitingRenewalCycleUnderLock(

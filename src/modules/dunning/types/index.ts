@@ -1,3 +1,5 @@
+import type { ReportedPaymentFailure } from "../../../common/types/reported-payment-failure"
+
 export enum DunningCaseStatus {
   OPEN = "open",
   RETRY_SCHEDULED = "retry_scheduled",
@@ -65,6 +67,7 @@ export type DunningAttemptData = {
   error_code: string | null
   error_message: string | null
   payment_reference: string | null
+  reported_payment_failure: ReportedPaymentFailure | null
   metadata: Record<string, unknown> | null
   created_at: string
   updated_at: string

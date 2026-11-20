@@ -79,6 +79,8 @@ function buildContainer(options: {
       : []
   const errorLogs: string[] = []
   const warnLogs: string[] = []
+  const acquire = jest.fn(async () => undefined)
+  const release = jest.fn(async () => true)
 
   const graph = jest.fn(async ({ filters }: { filters: { id: string[] } }) => {
     const orderId = filters.id[0]
@@ -116,9 +118,7 @@ function buildContainer(options: {
       }
 
       if (key === "locking") {
-        return {
-          execute: async (_key: string, job: () => Promise<unknown>) => await job(),
-        }
+        return { acquire, release }
       }
 
       if (key === "logger") {
@@ -137,7 +137,7 @@ function buildContainer(options: {
     },
   } as unknown as MedusaContainer
 
-  return { container, listDunningCases, errorLogs, warnLogs, graph }
+  return { container, listDunningCases, errorLogs, warnLogs, graph, acquire, release }
 }
 
 describe("reconcilePaidDunningCases", () => {

@@ -1,5 +1,4 @@
 import type { MedusaContainer } from "@medusajs/framework/types"
-import { Modules } from "@medusajs/framework/utils"
 import { RENEWAL_MODULE } from "../../modules/renewal"
 import type RenewalModuleService from "../../modules/renewal/service"
 import {
@@ -23,7 +22,7 @@ import {
   type RenewalSessionSignal,
   signalNamesAttempt,
 } from "./renewal-session-marker"
-import { tryUnderLock } from "./run-under-lock"
+import { runUnderLock, tryUnderLock } from "./run-under-lock"
 import {
   readStoredSettlementInputs,
   settleRenewalCycleSucceeded,
@@ -32,7 +31,7 @@ import {
 import { renewalSubscriptionLockKey } from "../../modules/renewal/utils/lock-key"
 
 const RENEWAL_LOCK_TIMEOUT_SECONDS = 30
-const PROCESSING_LOCK_HOLD_SECONDS = 120
+const RENEWAL_LOCK_HOLD_SECONDS = 120
 
 type SettleOptions = { processing_signal?: RenewalSessionSignal }
 
@@ -236,9 +235,10 @@ export async function settleAwaitingRenewalCycle(
     settleAwaitingRenewalCycleUnderLock(container, renewalCycleId, options)
 
   if (cycle.status === RenewalCycleStatus.AWAITING_PAYMENT) {
-    return await container
-      .resolve(Modules.LOCKING)
-      .execute(lockKey, settle, { timeout: RENEWAL_LOCK_TIMEOUT_SECONDS })
+    return await runUnderLock(container, lockKey, settle, {
+      wait_seconds: RENEWAL_LOCK_TIMEOUT_SECONDS,
+      hold_seconds: RENEWAL_LOCK_HOLD_SECONDS,
+    })
   }
 
   if (
@@ -250,7 +250,7 @@ export async function settleAwaitingRenewalCycle(
 
   const run = await tryUnderLock(container, lockKey, settle, {
     wait_seconds: 0,
-    hold_seconds: PROCESSING_LOCK_HOLD_SECONDS,
+    hold_seconds: RENEWAL_LOCK_HOLD_SECONDS,
   })
 
   if (run.acquired) {

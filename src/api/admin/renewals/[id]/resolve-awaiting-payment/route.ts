@@ -3,7 +3,6 @@ import type {
   MedusaResponse,
 } from "@medusajs/framework/http"
 import type { MedusaContainer } from "@medusajs/framework/types"
-import { Modules } from "@medusajs/framework/utils"
 import { RenewalAwaitingPaymentAdminResolution } from "../../../../../admin/types/renewal"
 import { PaymentAttemptErrorCode } from "../../../../../common/types/payment-attempt-error-code"
 import { RENEWAL_MODULE } from "../../../../../modules/renewal"
@@ -30,8 +29,10 @@ import {
 } from "../../utils"
 import type { PostAdminResolveAwaitingRenewalPaymentSchemaType } from "../../validators"
 import { renewalSubscriptionLockKey } from "../../../../../modules/renewal/utils/lock-key"
+import { runUnderLock } from "../../../../../workflows/utils/run-under-lock"
 
 const RENEWAL_LOCK_TIMEOUT_SECONDS = 30
+const RENEWAL_LOCK_HOLD_SECONDS = 120
 
 type LatestRenewalAttempt = Awaited<
   ReturnType<RenewalModuleService["listRenewalAttempts"]>
@@ -144,13 +145,12 @@ async function resolveAwaitingPayment(
     throw notAwaitingPayment(cycle.id)
   }
 
-  const resolution = await container
-    .resolve(Modules.LOCKING)
-    .execute(
-      renewalSubscriptionLockKey(cycle.subscription_id),
-      () => resolveUnderLock(container, input),
-      { timeout: RENEWAL_LOCK_TIMEOUT_SECONDS }
-    )
+  const resolution = await runUnderLock(
+    container,
+    renewalSubscriptionLockKey(cycle.subscription_id),
+    () => resolveUnderLock(container, input),
+    { wait_seconds: RENEWAL_LOCK_TIMEOUT_SECONDS, hold_seconds: RENEWAL_LOCK_HOLD_SECONDS }
+  )
 
   logRenewalEvent(container.resolve("logger"), "info", {
     event: RenewalLogEvents.AWAITING_PAYMENT_RESOLVED,

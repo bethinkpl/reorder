@@ -1,5 +1,4 @@
 import { MedusaContainer } from "@medusajs/framework/types"
-import { Modules } from "@medusajs/framework/utils"
 import { PaymentAttemptErrorCode } from "../common/types/payment-attempt-error-code"
 import { isLockBusyError } from "../common/utils/lock-busy-error"
 import { DUNNING_MODULE } from "../modules/dunning"
@@ -42,11 +41,17 @@ import {
 } from "../workflows/utils/fail-awaiting-dunning-attempt"
 import { closeDunningCasesOnCancellation } from "../workflows/utils/close-dunning-cases-on-cancellation"
 import { findCapturedPaymentId } from "../workflows/utils/late-payment-capture"
-import { tryUnderLock } from "../workflows/utils/run-under-lock"
+import { runUnderLock, tryUnderLock } from "../workflows/utils/run-under-lock"
 import { dunningCaseLockKey } from "../modules/dunning/utils/lock-key"
 
 const JOB_NAME = "reconcile-paid-dunning-cases"
 const JOB_LOCK_KEY = "jobs:reconcile-paid-dunning-cases"
+/**
+ * The lock is not renewed while held, so it lasts as long as a sweep realistically can, and expires
+ * before the next scheduled run: a crashed run skips at most one tick, and a sweep that overruns it
+ * only overlaps the next one, whose writes the per-case locks still serialise.
+ */
+const JOB_LOCK = { wait_seconds: 1, hold_seconds: 25 * 60 }
 const BATCH_SIZE = 200
 const ALERT_LOCK_TIMEOUT_SECONDS = 5
 const CASE_LOCK_HOLD_SECONDS = 120
@@ -129,49 +134,39 @@ async function raiseOverdueAlertOnce(
 ): Promise<boolean> {
   const dunningModule = container.resolve<DunningModuleService>(DUNNING_MODULE)
 
-  try {
-    return await container.resolve(Modules.LOCKING).execute(
-      dunningCaseLockKey(caseId),
-      async () => {
-        const due = await findDueOverdueAlert(dunningModule, caseId, input)
+  const raised = await underCaseLock(container, caseId, async () => {
+    const due = await findDueOverdueAlert(dunningModule, caseId, input)
 
-        if (!due) {
-          return false
-        }
-
-        await dunningModule.updateDunningCases({
-          id: caseId,
-          metadata: withOverdueAlertMarker(due.dunningCase.metadata, due.alertKey),
-        })
-
-        logDunningEvent(container.resolve("logger"), "warn", {
-          event: DunningLogEvents.AWAITING_PAYMENT_OVERDUE,
-          outcome: "awaiting_payment",
-          correlation_id: input.correlationId,
-          dunning_case_id: caseId,
-          subscription_id: due.dunningCase.subscription_id,
-          renewal_cycle_id: due.dunningCase.renewal_cycle_id,
-          job_name: JOB_NAME,
-          alertable: true,
-          message: `DunningCase '${caseId}' has awaited the payment of its retry for more than ${input.alertHours} hours`,
-          metadata: {
-            submitted_at: due.submittedAt,
-            alert_hours: input.alertHours,
-            payment_session_id: due.paymentSessionId,
-          },
-        })
-
-        return true
-      },
-      { timeout: ALERT_LOCK_TIMEOUT_SECONDS }
-    )
-  } catch (error) {
-    if (isLockBusyError(error)) {
+    if (!due) {
       return false
     }
 
-    throw error
-  }
+    await dunningModule.updateDunningCases({
+      id: caseId,
+      metadata: withOverdueAlertMarker(due.dunningCase.metadata, due.alertKey),
+    })
+
+    logDunningEvent(container.resolve("logger"), "warn", {
+      event: DunningLogEvents.AWAITING_PAYMENT_OVERDUE,
+      outcome: "awaiting_payment",
+      correlation_id: input.correlationId,
+      dunning_case_id: caseId,
+      subscription_id: due.dunningCase.subscription_id,
+      renewal_cycle_id: due.dunningCase.renewal_cycle_id,
+      job_name: JOB_NAME,
+      alertable: true,
+      message: `DunningCase '${caseId}' has awaited the payment of its retry for more than ${input.alertHours} hours`,
+      metadata: {
+        submitted_at: due.submittedAt,
+        alert_hours: input.alertHours,
+        payment_session_id: due.paymentSessionId,
+      },
+    })
+
+    return true
+  })
+
+  return raised === true
 }
 
 function reportCaseFailure(
@@ -638,20 +633,14 @@ async function reconcileAttemptsOfClosedCases(
           continue
         }
 
-        const closed = await container.resolve(Modules.LOCKING).execute(
-          dunningCaseLockKey(dunningCase.id),
-          () => failStaleAttemptUnderLock(container, attempt.id, { ...input, minHours }),
-          { timeout: ALERT_LOCK_TIMEOUT_SECONDS }
+        const closed = await underCaseLock(container, dunningCase.id, () =>
+          failStaleAttemptUnderLock(container, attempt.id, { ...input, minHours })
         )
 
         if (closed) {
           result.stale_attempts_closed += 1
         }
       } catch (error) {
-        if (isLockBusyError(error)) {
-          continue
-        }
-
         result.failed += 1
         reportCaseFailure(container, dunningCase, error)
       }
@@ -770,11 +759,11 @@ export default async function reconcilePaidDunningCasesJob(
   container: MedusaContainer
 ) {
   const logger = container.resolve("logger")
-  const locking = container.resolve(Modules.LOCKING)
   const startedAt = Date.now()
 
   try {
-    await locking.execute(
+    await runUnderLock(
+      container,
       JOB_LOCK_KEY,
       async () => {
         const result = await reconcilePaidDunningCases(container)
@@ -783,9 +772,7 @@ export default async function reconcilePaidDunningCasesJob(
           `[${JOB_NAME}] scanned ${result.scanned} open dunning case(s), recovered ${result.recovered}, still unpaid ${result.unpaid}, closed for a cancelled subscription ${result.ended_cancelled}, late captures redelivered ${result.late_captures}, stale attempts closed ${result.stale_attempts_closed}, recorded payment failures applied ${result.recorded_failures_applied}, stale retries now awaiting their payment ${result.stale_retries_reparked}, stale retries parked ${result.stale_retries_parked}, failed ${result.failed} (batch ${BATCH_SIZE}) in ${Date.now() - startedAt}ms`
         )
       },
-      {
-        timeout: 1,
-      }
+      JOB_LOCK
     )
   } catch (error) {
     const message = getDunningErrorMessage(error)

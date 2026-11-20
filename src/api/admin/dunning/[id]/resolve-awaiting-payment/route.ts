@@ -3,7 +3,6 @@ import type {
   MedusaResponse,
 } from "@medusajs/framework/http"
 import type { MedusaContainer } from "@medusajs/framework/types"
-import { Modules } from "@medusajs/framework/utils"
 import { DunningAwaitingPaymentAdminResolution } from "../../../../../admin/types/dunning"
 import { PaymentAttemptErrorCode } from "../../../../../common/types/payment-attempt-error-code"
 import { DUNNING_MODULE } from "../../../../../modules/dunning"
@@ -36,8 +35,10 @@ import {
 } from "../../utils"
 import type { PostAdminResolveAwaitingDunningPaymentSchemaType } from "../../validators"
 import { dunningCaseLockKey } from "../../../../../modules/dunning/utils/lock-key"
+import { runUnderLock } from "../../../../../workflows/utils/run-under-lock"
 
 const DUNNING_LOCK_TIMEOUT_SECONDS = 30
+const DUNNING_LOCK_HOLD_SECONDS = 120
 
 type ResolveAwaitingPaymentInput = {
   dunning_case_id: string
@@ -176,13 +177,12 @@ async function resolveAwaitingPayment(
     throw notAwaitingPayment(dunningCase.id)
   }
 
-  const resolution = await container
-    .resolve(Modules.LOCKING)
-    .execute(
-      dunningCaseLockKey(dunningCase.id),
-      () => resolveUnderLock(container, input),
-      { timeout: DUNNING_LOCK_TIMEOUT_SECONDS }
-    )
+  const resolution = await runUnderLock(
+    container,
+    dunningCaseLockKey(dunningCase.id),
+    () => resolveUnderLock(container, input),
+    { wait_seconds: DUNNING_LOCK_TIMEOUT_SECONDS, hold_seconds: DUNNING_LOCK_HOLD_SECONDS }
+  )
 
   logDunningEvent(container.resolve("logger"), "info", {
     event: DunningLogEvents.AWAITING_PAYMENT_RESOLVED,

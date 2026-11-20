@@ -294,7 +294,7 @@ Returns the refreshed `dunning_case` detail payload.
 ### Common Errors
 
 - `400 invalid_data`
-  The case has no renewal order or retry schedule, or its subscription has no saved payment method.
+  The case has no renewal order or no retry schedule.
 - `404 not_found`
   The case does not exist.
 - `409 conflict`
@@ -420,7 +420,7 @@ The admin dunning route layer answers a domain error with its own message and a 
 - `404`
   for `not_found`
 - `400`
-  for `invalid_data` (for example a retry of a case without a renewal order or a saved payment method)
+  for `invalid_data` (for example a retry of a case without a renewal order)
 - `409`
   for `conflict` and `not_allowed` (domain conflicts and illegal transitions), and for a payment the provider refused
 - `500`

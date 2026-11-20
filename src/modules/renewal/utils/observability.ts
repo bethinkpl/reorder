@@ -20,6 +20,7 @@ export const RenewalLogEvents = {
   AWAITING_PAYMENT_SETTLEMENT: "renewal.awaiting_payment_settlement",
   AWAITING_PAYMENT_RESOLVED: "renewal.awaiting_payment_resolved",
   AWAITING_PAYMENT_OVERDUE: "renewal.awaiting_payment_overdue",
+  AWAITING_PAYMENT_SESSION_MISSING: "renewal.awaiting_payment_session_missing",
   PROCESSING_SETTLEMENT: "renewal.processing_settlement",
   PAYMENT_FAILURE_RECORDED: "renewal.payment_failure_recorded",
   RECORDED_PAYMENT_FAILURE: "renewal.recorded_payment_failure",

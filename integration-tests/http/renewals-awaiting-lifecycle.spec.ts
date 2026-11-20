@@ -1,6 +1,7 @@
 import { medusaIntegrationTestRunner } from "@medusajs/test-utils"
 import path from "path"
-import { MedusaError } from "@medusajs/framework/utils"
+import type { IPaymentModuleService } from "@medusajs/framework/types"
+import { MedusaError, Modules } from "@medusajs/framework/utils"
 import { PaymentAttemptErrorCode } from "../../src/common/types/payment-attempt-error-code"
 import { createStep, createWorkflow, type WorkflowData, WorkflowResponse } from "@medusajs/framework/workflows-sdk"
 import { DateTime } from "luxon"
@@ -646,6 +647,32 @@ medusaIntegrationTestRunner({
         expect(state.cycle.status).toEqual(RenewalCycleStatus.AWAITING_PAYMENT)
         expect(state.attempts).toEqual([expect.objectContaining({ status: RenewalAttemptStatus.PROCESSING })])
         expect(state.cases).toHaveLength(0)
+      })
+    })
+
+    describe("an awaiting charge whose payment session is gone", () => {
+      it("raises an alertable entry on each sweep while nothing was captured on it, and changes nothing", async () => {
+        const container = getContainer()
+        const seeded = await seedAwaitingRenewal(container, { reference: "SUB-AWL-SESSION-GONE" })
+        const entries = watchLogs(container)
+        const missing = () => entries({ event: RenewalLogEvents.AWAITING_PAYMENT_SESSION_MISSING })
+
+        expect(await reconcileAwaitingRenewalCycles(container)).toMatchObject({ session_missing: 0 })
+        expect(missing()).toHaveLength(0)
+
+        await container.resolve<IPaymentModuleService>(Modules.PAYMENT).deletePaymentSession(seeded.session.id)
+
+        const before = await readRenewalState(container, seeded)
+
+        expect(await reconcileAwaitingRenewalCycles(container)).toMatchObject({ order_unpaid: 1, session_missing: 1 })
+        expect(missing()).toEqual([
+          expect.objectContaining({
+            renewal_cycle_id: seeded.cycle.id,
+            alertable: true,
+            metadata: expect.objectContaining({ payment_session_id: seeded.session.id }),
+          }),
+        ])
+        expect(await readRenewalState(container, seeded)).toEqual(before)
       })
     })
 

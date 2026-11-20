@@ -1,6 +1,6 @@
 import { medusaIntegrationTestRunner } from "@medusajs/test-utils"
 import path from "path"
-import type { MedusaContainer } from "@medusajs/framework/types"
+import type { IPaymentModuleService, MedusaContainer } from "@medusajs/framework/types"
 import { Modules, PaymentActions } from "@medusajs/framework/utils"
 import { PaymentAttemptErrorCode } from "../../src/common/types/payment-attempt-error-code"
 import processDunningRetriesJob from "../../src/jobs/process-dunning-retries"
@@ -580,6 +580,32 @@ medusaIntegrationTestRunner({
           status: DunningCaseStatus.RECOVERED,
           recovery_reason: DunningRecoveryReason.CUSTOMER_PAYMENT,
         })
+      })
+
+      it("raises an alertable entry on each sweep while the payment session of an awaiting retry is gone with nothing captured on it, changing nothing", async () => {
+        const container = getContainer()
+        const seeded = await seedDunningCase(container, "SUB-DUN-SESSION-GONE")
+        const logs = watchLogs(container)
+        const missing = () => logs({ event: DunningLogEvents.AWAITING_PAYMENT_SESSION_MISSING })
+
+        expect(await reconcilePaidDunningCases(container)).toMatchObject({ session_missing: 0 })
+        expect(missing()).toHaveLength(0)
+
+        await container
+          .resolve<IPaymentModuleService>(Modules.PAYMENT)
+          .deletePaymentSession(seeded.attempts[0].session.id)
+
+        const before = await readDunningState(container, seeded.dunningCase.id)
+
+        expect(await reconcilePaidDunningCases(container)).toMatchObject({ unpaid: 1, session_missing: 1 })
+        expect(missing()).toEqual([
+          expect.objectContaining({
+            dunning_case_id: seeded.dunningCase.id,
+            alertable: true,
+            metadata: expect.objectContaining({ payment_session_id: seeded.attempts[0].session.id }),
+          }),
+        ])
+        expect(await readDunningState(container, seeded.dunningCase.id)).toEqual(before)
       })
 
       it("raises one overdue alert for a case awaiting its retry's payment past the limit, however many sweeps see it", async () => {

@@ -40,7 +40,10 @@ import {
   emitDunningAttemptOutcomeEvents,
 } from "../workflows/utils/fail-awaiting-dunning-attempt"
 import { closeDunningCasesOnCancellation } from "../workflows/utils/close-dunning-cases-on-cancellation"
-import { findCapturedPaymentId } from "../workflows/utils/late-payment-capture"
+import {
+  findCapturedPaymentId,
+  isSubmittedSessionGone,
+} from "../workflows/utils/late-payment-capture"
 import { runUnderLock, tryUnderLock } from "../workflows/utils/run-under-lock"
 import { dunningCaseLockKey } from "../modules/dunning/utils/lock-key"
 
@@ -82,6 +85,7 @@ export type ReconcilePaidDunningCasesResult = {
   unpaid: number
   failed: number
   ended_cancelled: number
+  session_missing: number
   late_captures: number
   stale_attempts_closed: number
   recorded_failures_applied: number
@@ -167,6 +171,41 @@ async function raiseOverdueAlertOnce(
   })
 
   return raised === true
+}
+
+async function reportMissingSession(
+  container: MedusaContainer,
+  dunningCase: Pick<DunningCaseRecord, "id" | "subscription_id">,
+  correlationId: string
+): Promise<boolean> {
+  const latest = await findLatestAttempt(
+    container.resolve<DunningModuleService>(DUNNING_MODULE),
+    dunningCase.id
+  )
+  const sessionId = latest?.payment_reference
+
+  if (
+    latest?.status !== DunningAttemptStatus.PROCESSING ||
+    !sessionId ||
+    !(await isSubmittedSessionGone(container, sessionId))
+  ) {
+    return false
+  }
+
+  logDunningEvent(container.resolve("logger"), "error", {
+    event: DunningLogEvents.AWAITING_PAYMENT_SESSION_MISSING,
+    outcome: "awaiting_payment",
+    correlation_id: correlationId,
+    dunning_case_id: dunningCase.id,
+    subscription_id: dunningCase.subscription_id,
+    attempt_no: latest.attempt_no,
+    job_name: JOB_NAME,
+    alertable: true,
+    message: `DunningCase '${dunningCase.id}' awaits a retry charge whose payment session '${sessionId}' no longer exists and has nothing captured on it, so its result can't arrive; resolve it once it may be failed`,
+    metadata: { attempt_id: latest.id, payment_session_id: sessionId },
+  })
+
+  return true
 }
 
 function reportCaseFailure(
@@ -656,6 +695,7 @@ async function reconcileAttemptsOfClosedCases(
 
 async function recoverPaidIdleCases(
   container: MedusaContainer,
+  input: OverdueAlertInput,
   result: ReconcilePaidDunningCasesResult
 ): Promise<void> {
   const dunningModule = container.resolve<DunningModuleService>(DUNNING_MODULE)
@@ -693,6 +733,13 @@ async function recoverPaidIdleCases(
 
         if (pending > 0) {
           result.unpaid += 1
+
+          if (
+            dunningCase.status === DunningCaseStatus.AWAITING_PAYMENT &&
+            (await reportMissingSession(container, dunningCase, input.correlationId))
+          ) {
+            result.session_missing += 1
+          }
 
           continue
         }
@@ -739,6 +786,7 @@ export async function reconcilePaidDunningCases(
     unpaid: 0,
     failed: 0,
     ended_cancelled: 0,
+    session_missing: 0,
     late_captures: 0,
     stale_attempts_closed: 0,
     recorded_failures_applied: 0,
@@ -748,7 +796,7 @@ export async function reconcilePaidDunningCases(
 
   await applyRecordedPaymentFailures(container, alertInput, result)
   await settleStaleRetries(container, alertInput, result)
-  await recoverPaidIdleCases(container, result)
+  await recoverPaidIdleCases(container, alertInput, result)
   await alertOverdueAwaitingCases(container, alertInput, result)
   await reconcileAttemptsOfClosedCases(container, alertInput, result)
 
@@ -769,7 +817,7 @@ export default async function reconcilePaidDunningCasesJob(
         const result = await reconcilePaidDunningCases(container)
 
         logger.info(
-          `[${JOB_NAME}] scanned ${result.scanned} open dunning case(s), recovered ${result.recovered}, still unpaid ${result.unpaid}, closed for a cancelled subscription ${result.ended_cancelled}, late captures redelivered ${result.late_captures}, stale attempts closed ${result.stale_attempts_closed}, recorded payment failures applied ${result.recorded_failures_applied}, stale retries now awaiting their payment ${result.stale_retries_reparked}, stale retries parked ${result.stale_retries_parked}, failed ${result.failed} (batch ${BATCH_SIZE}) in ${Date.now() - startedAt}ms`
+          `[${JOB_NAME}] scanned ${result.scanned} open dunning case(s), recovered ${result.recovered}, still unpaid ${result.unpaid} (payment session gone ${result.session_missing}), closed for a cancelled subscription ${result.ended_cancelled}, late captures redelivered ${result.late_captures}, stale attempts closed ${result.stale_attempts_closed}, recorded payment failures applied ${result.recorded_failures_applied}, stale retries now awaiting their payment ${result.stale_retries_reparked}, stale retries parked ${result.stale_retries_parked}, failed ${result.failed} (batch ${BATCH_SIZE}) in ${Date.now() - startedAt}ms`
         )
       },
       JOB_LOCK

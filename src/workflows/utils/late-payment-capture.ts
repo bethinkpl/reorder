@@ -134,6 +134,21 @@ export async function findCapturedPaymentId(
   return payments.find((payment) => payment.captured_at)?.id ?? null
 }
 
+/**
+ * A submitted charge whose payment session is gone with nothing captured on it: creating a new
+ * session on a payment collection deletes its other sessions, so its result can no longer arrive.
+ */
+export async function isSubmittedSessionGone(
+  container: MedusaContainer,
+  sessionId: string
+): Promise<boolean> {
+  const [session] = await container
+    .resolve<IPaymentModuleService>(Modules.PAYMENT)
+    .listPaymentSessions({ id: sessionId }, { select: ["id"] })
+
+  return !session && !(await findCapturedPaymentId(container, sessionId))
+}
+
 function readMarker(attempt: AttemptRecord | null): LateCaptureMarker | null {
   const marker = attempt?.metadata?.[LATE_CAPTURE_METADATA_KEY]
 

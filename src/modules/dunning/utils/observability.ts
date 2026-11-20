@@ -19,6 +19,7 @@ export const DunningLogEvents = {
   CUSTOMER_RECOVERY: "dunning.customer_recovery",
   AWAITING_PAYMENT_RESOLVED: "dunning.awaiting_payment_resolved",
   AWAITING_PAYMENT_OVERDUE: "dunning.awaiting_payment_overdue",
+  AWAITING_PAYMENT_SESSION_MISSING: "dunning.awaiting_payment_session_missing",
   PAYMENT_FAILURE_RECORDED: "dunning.payment_failure_recorded",
   RECORDED_PAYMENT_FAILURE: "dunning.recorded_payment_failure",
   LATE_PAYMENT_FAILURE: "dunning.late_payment_failure",

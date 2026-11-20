@@ -30,7 +30,10 @@ import { loadOrderAmounts } from "../workflows/steps/run-dunning-retry"
 import { endAwaitingRenewalCyclesOnCancellation } from "../workflows/utils/end-awaiting-renewal-cycle-on-cancellation"
 import { runUnderLock, tryUnderLock } from "../workflows/utils/run-under-lock"
 import { applyRecordedRenewalPaymentFailureUnderLock } from "../workflows/utils/fail-awaiting-renewal-cycle"
-import { findCapturedPaymentId } from "../workflows/utils/late-payment-capture"
+import {
+  findCapturedPaymentId,
+  isSubmittedSessionGone,
+} from "../workflows/utils/late-payment-capture"
 import { isLockBusyError } from "../common/utils/lock-busy-error"
 import {
   settleAwaitingRenewalCycle,
@@ -67,6 +70,7 @@ export type ReconcileAwaitingRenewalCyclesResult = Record<
   | "overdue"
   | "processing_overdue"
   | "ended_cancelled"
+  | "session_missing"
   | "late_captures"
   | "stale_attempts_closed"
   | "recorded_failures_applied"
@@ -165,6 +169,42 @@ async function raiseOverdueAlertOnce(
   )
 
   return run.acquired && run.result
+}
+
+async function reportMissingSession(
+  container: MedusaContainer,
+  cycle: { id: string, subscription_id: string },
+  input: OverdueAlertInput
+): Promise<boolean> {
+  const [latest] = await container
+    .resolve<RenewalModuleService>(RENEWAL_MODULE)
+    .listRenewalAttempts(
+      { renewal_cycle_id: cycle.id },
+      { order: { attempt_no: "DESC" }, take: 1 }
+    )
+  const sessionId = latest?.payment_reference
+
+  if (
+    latest?.status !== RenewalAttemptStatus.PROCESSING ||
+    !sessionId ||
+    !(await isSubmittedSessionGone(container, sessionId))
+  ) {
+    return false
+  }
+
+  logRenewalEvent(container.resolve("logger"), "error", {
+    event: RenewalLogEvents.AWAITING_PAYMENT_SESSION_MISSING,
+    outcome: "awaiting_payment",
+    correlation_id: input.correlationId,
+    renewal_cycle_id: cycle.id,
+    subscription_id: cycle.subscription_id,
+    job_name: JOB_NAME,
+    alertable: true,
+    message: `RenewalCycle '${cycle.id}' awaits a charge whose payment session '${sessionId}' no longer exists and has nothing captured on it, so its result can't arrive; resolve it once it may be failed`,
+    metadata: { attempt_id: latest.id, payment_session_id: sessionId },
+  })
+
+  return true
 }
 
 function reportCycleFailure(
@@ -583,6 +623,7 @@ export async function reconcileAwaitingRenewalCycles(
     overdue: 0,
     processing_overdue: 0,
     ended_cancelled: 0,
+    session_missing: 0,
     late_captures: 0,
     stale_attempts_closed: 0,
     recorded_failures_applied: 0,
@@ -619,14 +660,21 @@ export async function reconcileAwaitingRenewalCycles(
 
         result[outcome] += 1
 
+        if (outcome !== "order_unpaid") {
+          continue
+        }
+
+        if (await reportMissingSession(container, cycle, alertInput)) {
+          result.session_missing += 1
+        }
+
         if (
-          outcome === "order_unpaid" &&
-          (await raiseOverdueAlertOnce(
+          await raiseOverdueAlertOnce(
             container,
             cycle,
             RenewalCycleStatus.AWAITING_PAYMENT,
             alertInput
-          ))
+          )
         ) {
           result.overdue += 1
         }
@@ -663,7 +711,7 @@ export default async function reconcileAwaitingRenewalCyclesJob(
         const result = await reconcileAwaitingRenewalCycles(container)
 
         logger.info(
-          `[${JOB_NAME}] scanned ${result.scanned} awaiting renewal cycle(s), settled ${result.settled}, closed without moving dates ${result.closed_superseded}, still unpaid ${result.order_unpaid} (overdue ${result.overdue}), processing cycles settled on a paid order ${result.processing_settled}, submitted charges overdue while processing ${result.processing_overdue}, terminal subscription ${result.subscription_terminal}, ended for a cancelled subscription ${result.ended_cancelled}, late captures redelivered ${result.late_captures}, stale attempts closed ${result.stale_attempts_closed}, recorded payment failures applied ${result.recorded_failures_applied}, no longer awaiting ${result.not_awaiting}, failed ${result.failed} in ${Date.now() - startedAt}ms`
+          `[${JOB_NAME}] scanned ${result.scanned} awaiting renewal cycle(s), settled ${result.settled}, closed without moving dates ${result.closed_superseded}, still unpaid ${result.order_unpaid} (overdue ${result.overdue}, payment session gone ${result.session_missing}), processing cycles settled on a paid order ${result.processing_settled}, submitted charges overdue while processing ${result.processing_overdue}, terminal subscription ${result.subscription_terminal}, ended for a cancelled subscription ${result.ended_cancelled}, late captures redelivered ${result.late_captures}, stale attempts closed ${result.stale_attempts_closed}, recorded payment failures applied ${result.recorded_failures_applied}, no longer awaiting ${result.not_awaiting}, failed ${result.failed} in ${Date.now() - startedAt}ms`
         )
       },
       JOB_LOCK

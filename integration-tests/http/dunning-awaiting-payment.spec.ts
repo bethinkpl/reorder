@@ -773,6 +773,61 @@ medusaIntegrationTestRunner({
         expect(events(DunningEvents.RECOVERED)).toHaveLength(0)
       })
 
+      it.each([
+        { submitted: "with its charge's session recorded", recorded: true },
+        { submitted: "before recording its charge's session", recorded: false },
+      ])(
+        "closes a case its retry left retrying $submitted when the customer cancels, keeping that charge tracked so its capture is reported once for a refund",
+        async ({ recorded }) => {
+          const container = getContainer()
+          const dunningModule = container.resolve<DunningModuleService>(DUNNING_MODULE)
+          const seeded = await seedDunningCase(container, `SUB-DUN-CANCEL-RETRYING-${recorded}`, {
+            status: DunningCaseStatus.RETRYING,
+          })
+          const caseId = seeded.dunningCase.id
+          const [{ attempt, session }] = seeded.attempts
+
+          if (!recorded) {
+            await dunningModule.updateDunningAttempts({ id: attempt.id, payment_reference: null })
+          }
+
+          await cancelByCustomer(container, seeded)
+
+          const cancelled = await readDunningState(container, caseId)
+          const payment = await captureOnOrder(container, seeded.order.id, session.id)
+          const events = watchEvents(container)
+
+          await deliverCapture(container, payment.id)
+          await deliverCapture(container, payment.id)
+
+          expect(cancelled.dunningCase).toMatchObject({
+            status: DunningCaseStatus.UNRECOVERED,
+            closed_at: expect.any(Date),
+          })
+          expect(cancelled.attempts).toEqual([
+            expect.objectContaining({
+              id: attempt.id,
+              status: DunningAttemptStatus.PROCESSING,
+              payment_reference: recorded ? session.id : null,
+            }),
+          ])
+          expect((await readDunningState(container, caseId)).attempts).toEqual([
+            expect.objectContaining({
+              id: attempt.id,
+              status: DunningAttemptStatus.SUCCEEDED,
+              error_code: PaymentAttemptErrorCode.CAPTURED_AFTER_CLOSE,
+            }),
+          ])
+          expect(events(SubscriptionEvents.LATE_PAYMENT_CAPTURED).map((message) => message.data)).toEqual([
+            expect.objectContaining({
+              payment_id: payment.id,
+              dunning_attempt_id: attempt.id,
+              reason: LatePaymentCapturedReason.SUBSCRIPTION_TERMINAL,
+            }),
+          ])
+        }
+      )
+
       it("closes the attempt as failed, with no reschedule and no event, when the charge of a case the customer cancelled fails afterwards", async () => {
         const container = getContainer()
         const seeded = await seedDunningCase(container, "SUB-DUN-CANCEL-LATE-FAIL")

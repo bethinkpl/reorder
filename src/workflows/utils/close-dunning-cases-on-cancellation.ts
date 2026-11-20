@@ -3,7 +3,6 @@ import { isActiveDunningCase } from "../../modules/cancellation/utils/retention-
 import { DUNNING_MODULE } from "../../modules/dunning"
 import type DunningModuleService from "../../modules/dunning/service"
 import { DunningCaseStatus, DunningRecoveryReason } from "../../modules/dunning/types"
-import { dunningErrors } from "../../modules/dunning/utils/errors"
 import { dunningCaseLockKey } from "../../modules/dunning/utils/lock-key"
 import { runUnderLock } from "./run-under-lock"
 
@@ -50,8 +49,10 @@ function appendAuditMetadata(
 
 /**
  * Closes the subscription's active dunning cases as unrecovered, each under its own
- * `dunning:<case_id>` lock. An attempt with a charge in flight is left processing, so its late
- * signal still finds it. A throw restores the cases closed before it.
+ * `dunning:<case_id>` lock. A retry run holds that lock until it writes its outcome, so a case
+ * still `retrying` here belongs to a run that died or failed to park it, and is closed too. An
+ * attempt with a charge in flight is left processing, so its late signal still finds it. A throw
+ * restores the cases closed before it.
  */
 export async function closeDunningCasesOnCancellation(
   container: MedusaContainer,
@@ -76,13 +77,6 @@ export async function closeDunningCasesOnCancellation(
 
           if (!isActiveDunningCase(current.status)) {
             return
-          }
-
-          if (current.status === DunningCaseStatus.RETRYING) {
-            throw dunningErrors.retryInFlightTransitionBlocked(
-              current.id,
-              "be closed for subscription cancellation"
-            )
           }
 
           closed.push(current)

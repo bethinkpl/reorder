@@ -5,6 +5,7 @@ import {
 } from "@medusajs/framework/workflows-sdk"
 import { acquireLockStep, releaseLockStep } from "@medusajs/medusa/core-flows"
 import { createSubscriptionLogEventStep } from "./steps/create-subscription-log-event"
+import { endAwaitingRenewalCyclesStep } from "./steps/end-awaiting-renewal-cycles"
 import { ensureNextRenewalCycleStep } from "./steps/ensure-next-renewal-cycle"
 import {
   cancelSubscriptionStep,
@@ -34,6 +35,19 @@ export const cancelSubscriptionWorkflow = createWorkflow(
     })
 
     const subscriptionChange = cancelSubscriptionStep(input)
+    const endAwaitingInput = transform(
+      { subscriptionChange, input },
+      function ({ subscriptionChange, input }) {
+        return {
+          subscription: subscriptionChange.previous,
+          cancelled_at: subscriptionChange.current.cancelled_at ?? new Date(),
+          actor_id: input.triggered_by ?? null,
+          reason: input.reason ?? null,
+          source: "admin" as const,
+        }
+      }
+    )
+    endAwaitingRenewalCyclesStep(endAwaitingInput)
     const logInput = transform(
       { subscriptionChange, input },
       function ({ subscriptionChange, input }) {

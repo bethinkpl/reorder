@@ -7,6 +7,7 @@ import { acquireLockStep, releaseLockStep } from "@medusajs/medusa/core-flows"
 import type { CancellationReasonCategory } from "../modules/cancellation/types"
 import { closeSubscriptionDunningStep } from "./steps/close-subscription-dunning"
 import { createSubscriptionLogEventStep } from "./steps/create-subscription-log-event"
+import { endAwaitingRenewalCyclesStep } from "./steps/end-awaiting-renewal-cycles"
 import { ensureNextRenewalCycleStep } from "./steps/ensure-next-renewal-cycle"
 import { finalizeCancellationStep } from "./steps/finalize-cancellation"
 import {
@@ -115,6 +116,20 @@ export const cancelSubscriptionByCustomerWorkflow = createWorkflow(
       }
     )
     const finalizeResult = finalizeCancellationStep(finalizeInput)
+
+    const endAwaitingInput = transform(
+      { finalizeResult, input },
+      function ({ finalizeResult, input }) {
+        return {
+          subscription: finalizeResult.subscription,
+          cancelled_at: finalizeResult.current.finalized_at ?? new Date(),
+          actor_id: input.triggered_by ?? null,
+          reason: finalizeResult.current.reason,
+          source: CUSTOMER_LOG_SOURCE,
+        }
+      }
+    )
+    endAwaitingRenewalCyclesStep(endAwaitingInput)
 
     const finalizeLogInput = transform(
       { finalizeResult, input },

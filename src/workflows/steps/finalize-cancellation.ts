@@ -13,15 +13,9 @@ import type SubscriptionModuleService from "../../modules/subscription/service"
 import { CANCELLABLE_SUBSCRIPTION_STATUSES, SubscriptionStatus } from "../../modules/subscription/types"
 import { subscriptionErrors } from "../../modules/subscription/utils/errors"
 import {
-  endAwaitingRenewalCyclesOnCancellation,
-  type EndedAwaitingRenewalCycle,
-  restoreAwaitingRenewalCycles,
-} from "../utils/end-awaiting-renewal-cycle-on-cancellation"
-import {
   CancellationSubscriptionDisplayRecord,
   type CancellationLogSource,
 } from "./shared-cancellation-log"
-import { withoutPaymentContext } from "./pause-subscription"
 
 const FINALIZABLE_CANCELLATION_CASE_STATUSES = new Set<CancellationCaseStatus>([
   CancellationCaseStatus.REQUESTED,
@@ -90,7 +84,6 @@ type FinalizeCancellationStepOutput = {
 type FinalizeCancellationCompensation = {
   previous_case: CancellationCaseRecord
   previous_subscription: SubscriptionRecord
-  ended_awaiting_renewals: EndedAwaitingRenewalCycle[]
 }
 
 async function loadCancellationCase(
@@ -117,6 +110,25 @@ async function loadSubscription(
     container.resolve(SUBSCRIPTION_MODULE) as SubscriptionModuleService
 
   return (await subscriptionModule.retrieveSubscription(id)) as SubscriptionRecord
+}
+
+/** Puts back exactly the fields the finalize step writes on the subscription. */
+async function restoreCancelledSubscription(
+  container: { resolve(key: string): unknown },
+  previous: SubscriptionRecord
+) {
+  const subscriptionModule =
+    container.resolve(SUBSCRIPTION_MODULE) as SubscriptionModuleService
+
+  await subscriptionModule.updateSubscriptions({
+    id: previous.id,
+    status: previous.status,
+    cancelled_at: previous.cancelled_at,
+    cancel_effective_at: previous.cancel_effective_at,
+    next_renewal_at: previous.next_renewal_at,
+    skip_next_cycle: previous.skip_next_cycle,
+    metadata: previous.metadata,
+  })
 }
 
 function validateCaseState(cancellationCase: CancellationCaseRecord) {
@@ -311,36 +323,32 @@ export const finalizeCancellationStep = createStep(
       ),
     })
 
-    await cancellationModule.updateCancellationCases({
-      id: cancellationCase.id,
-      status: CancellationCaseStatus.CANCELED,
-      reason,
-      reason_category: reasonCategory,
-      notes: input.notes ?? cancellationCase.notes ?? null,
-      final_outcome: CancellationFinalOutcome.CANCELED,
-      finalized_at: finalizedAt,
-      finalized_by: input.finalized_by ?? null,
-      cancellation_effective_at: cancelEffectiveAt,
-      metadata: buildCaseFinalizeMetadata(
-        cancellationCase,
-        input,
+    // A step that throws is not compensated, so it undoes its own first write.
+    try {
+      await cancellationModule.updateCancellationCases({
+        id: cancellationCase.id,
+        status: CancellationCaseStatus.CANCELED,
         reason,
-        reasonCategory,
-        cancelEffectiveAt,
-        finalizedAt
-      ),
-    } as any)
+        reason_category: reasonCategory,
+        notes: input.notes ?? cancellationCase.notes ?? null,
+        final_outcome: CancellationFinalOutcome.CANCELED,
+        finalized_at: finalizedAt,
+        finalized_by: input.finalized_by ?? null,
+        cancellation_effective_at: cancelEffectiveAt,
+        metadata: buildCaseFinalizeMetadata(
+          cancellationCase,
+          input,
+          reason,
+          reasonCategory,
+          cancelEffectiveAt,
+          finalizedAt
+        ),
+      } as any)
+    } catch (error) {
+      await restoreCancelledSubscription(container, subscription)
 
-    const endedAwaitingRenewals = await endAwaitingRenewalCyclesOnCancellation(
-      container,
-      {
-        subscription,
-        cancelled_at: finalizedAt,
-        actor_id: input.finalized_by ?? null,
-        reason,
-        source: input.source ?? "admin",
-      }
-    )
+      throw error
+    }
 
     const updatedCase = (await cancellationModule.retrieveCancellationCase(
       cancellationCase.id
@@ -363,7 +371,6 @@ export const finalizeCancellationStep = createStep(
       {
         previous_case: cancellationCase,
         previous_subscription: subscription,
-        ended_awaiting_renewals: endedAwaitingRenewals,
       }
     )
   },
@@ -374,16 +381,8 @@ export const finalizeCancellationStep = createStep(
 
     const cancellationModule =
       container.resolve<CancellationModuleService>(CANCELLATION_MODULE)
-    const subscriptionModule =
-      container.resolve<SubscriptionModuleService>(SUBSCRIPTION_MODULE)
 
-    await restoreAwaitingRenewalCycles(
-      container,
-      compensation.ended_awaiting_renewals
-    )
-    await cancellationModule.updateCancellationCases(compensation.previous_case as any)
-    await subscriptionModule.updateSubscriptions(
-      withoutPaymentContext(compensation.previous_subscription) as any
-    )
+    await cancellationModule.updateCancellationCases(compensation.previous_case)
+    await restoreCancelledSubscription(container, compensation.previous_subscription)
   }
 )

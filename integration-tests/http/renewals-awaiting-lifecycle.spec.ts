@@ -1,10 +1,16 @@
 import { medusaIntegrationTestRunner } from "@medusajs/test-utils"
 import path from "path"
 import { MedusaError } from "@medusajs/framework/utils"
-import { createStep, createWorkflow, type StepFunction, type WorkflowData, WorkflowResponse } from "@medusajs/framework/workflows-sdk"
+import { createStep, createWorkflow, type WorkflowData, WorkflowResponse } from "@medusajs/framework/workflows-sdk"
 import { DateTime } from "luxon"
 import processRenewalCyclesJob from "../../src/jobs/process-renewal-cycles"
 import { reconcileAwaitingRenewalCycles } from "../../src/jobs/reconcile-awaiting-renewal-cycles"
+import { ACTIVITY_LOG_MODULE } from "../../src/modules/activity-log"
+import type ActivityLogModuleService from "../../src/modules/activity-log/service"
+import { ActivityLogEventType } from "../../src/modules/activity-log/types"
+import { CANCELLATION_MODULE } from "../../src/modules/cancellation"
+import type CancellationModuleService from "../../src/modules/cancellation/service"
+import { CancellationCaseStatus } from "../../src/modules/cancellation/types"
 import { DunningEvents } from "../../src/modules/dunning/events"
 import { DunningCaseStatus } from "../../src/modules/dunning/types"
 import { RENEWAL_MODULE } from "../../src/modules/renewal"
@@ -24,8 +30,6 @@ import {
   forceRenewalCycleWorkflow,
   processRenewalCycleWorkflow,
 } from "../../src/workflows"
-import { cancelSubscriptionStep } from "../../src/workflows/steps/cancel-subscription"
-import { finalizeCancellationStep } from "../../src/workflows/steps/finalize-cancellation"
 import {
   type RenewalRefs,
   readRenewalState,
@@ -84,9 +88,9 @@ const failingStep = createStep(
   }
 )
 
-function failingAfter(name: string, step: StepFunction<CancellationInput, unknown>) {
+function failingAfter(name: string, run: (input: CancellationInput) => WorkflowData) {
   return createWorkflow(`awaiting-lifecycle-${name}-then-fail`, function (input: CancellationInput) {
-    step(input)
+    run(input)
     failingStep(input)
 
     return new WorkflowResponse(undefined)
@@ -94,8 +98,14 @@ function failingAfter(name: string, step: StepFunction<CancellationInput, unknow
 }
 
 const STEPS_THEN_FAIL = [
-  { name: "cancel-subscription", workflow: failingAfter("cancel", cancelSubscriptionStep) },
-  { name: "finalize-cancellation", workflow: failingAfter("finalize", finalizeCancellationStep) },
+  {
+    name: "cancel-subscription",
+    workflow: failingAfter("cancel", (input) => cancelSubscriptionWorkflow.runAsStep({ input })),
+  },
+  {
+    name: "finalize-cancellation",
+    workflow: failingAfter("finalize", (input) => finalizeCancellationWorkflow.runAsStep({ input })),
+  },
 ]
 
 function asStep(name: string, run: (input: CancellationInput) => WorkflowData) {
@@ -226,7 +236,7 @@ medusaIntegrationTestRunner({
       )
 
       it.each(STEPS_THEN_FAIL)(
-        "the $name step restores the awaiting cycle and attempt when a later step fails",
+        "the $name workflow restores the awaiting cycle and attempt when a later step fails",
         async ({ name, workflow }) => {
           const container = getContainer()
           const seeded = await seedAwaitingRenewal(container, { reference: `SUB-AWL-ROLLBACK-${name}` })
@@ -271,6 +281,110 @@ medusaIntegrationTestRunner({
         expect(afterCancel.cycle).toEqual(before.cycle)
         expect(afterCancel.attempts).toEqual(before.attempts)
         expect(afterCancel.failedLogs).toHaveLength(0)
+      })
+
+      describe("when a write inside the cancellation fails", () => {
+        const RENEWAL_LOG_FAILURE = { message: "the renewal log could not be written" }
+        const CASE_WRITE_FAILURE = { message: "the cancellation case could not be written" }
+
+        function failRenewalLogOnce() {
+          const activityLog = getContainer().resolve<ActivityLogModuleService>(ACTIVITY_LOG_MODULE)
+          const create = activityLog.createSubscriptionLogs.bind(activityLog)
+          let failed = false
+
+          jest.spyOn(activityLog, "createSubscriptionLogs").mockImplementation(((data: { event_type?: string }) => {
+            if (!failed && data?.event_type === ActivityLogEventType.RENEWAL_FAILED) {
+              failed = true
+
+              return Promise.reject(new Error(RENEWAL_LOG_FAILURE.message))
+            }
+
+            return create(data as never)
+          }) as never)
+
+          return RENEWAL_LOG_FAILURE
+        }
+
+        function failCaseFinalizeOnce() {
+          const cancellationModule = getContainer().resolve<CancellationModuleService>(CANCELLATION_MODULE)
+          const update = cancellationModule.updateCancellationCases.bind(cancellationModule)
+          let failed = false
+
+          jest.spyOn(cancellationModule, "updateCancellationCases").mockImplementation(((data: { status?: string }) => {
+            if (!failed && data?.status === CancellationCaseStatus.CANCELED) {
+              failed = true
+
+              return Promise.reject(new Error(CASE_WRITE_FAILURE.message))
+            }
+
+            return update(data as never)
+          }) as never)
+
+          return CASE_WRITE_FAILURE
+        }
+
+        const cancelBy = {
+          admin: (input: CancellationInput) =>
+            cancelSubscriptionWorkflow(getContainer()).run({ input: { id: input.id, reason: input.reason } }),
+          finalize: (input: CancellationInput) =>
+            finalizeCancellationWorkflow(getContainer()).run({
+              input: { cancellation_case_id: input.cancellation_case_id },
+            }),
+          customer: (input: CancellationInput) =>
+            cancelSubscriptionByCustomerWorkflow(getContainer()).run({
+              input: { subscription_id: input.subscription_id, reason: input.reason },
+            }),
+        }
+
+        async function cancellationLogs(subscriptionId: string) {
+          const activityLog = getContainer().resolve<ActivityLogModuleService>(ACTIVITY_LOG_MODULE)
+
+          return await activityLog.listSubscriptionLogs({
+            subscription_id: subscriptionId,
+            event_type: [
+              ActivityLogEventType.SUBSCRIPTION_CANCELED,
+              ActivityLogEventType.CANCELLATION_CASE_STARTED,
+              ActivityLogEventType.CANCELLATION_FINALIZED,
+            ],
+          })
+        }
+
+        it.each([
+          { flow: "admin" as const, fails: "the ended cycle's renewal log", inject: failRenewalLogOnce },
+          { flow: "finalize" as const, fails: "the ended cycle's renewal log", inject: failRenewalLogOnce },
+          { flow: "finalize" as const, fails: "the cancellation case", inject: failCaseFinalizeOnce },
+          { flow: "customer" as const, fails: "the ended cycle's renewal log", inject: failRenewalLogOnce },
+          { flow: "customer" as const, fails: "the cancellation case", inject: failCaseFinalizeOnce },
+        ])(
+          "leaves nothing changed when the $flow cancellation fails writing $fails, and a second attempt cancels",
+          async ({ flow, fails, inject }) => {
+            const container = getContainer()
+            const seeded = await seedAwaitingRenewal(container, {
+              reference: `SUB-AWL-INSIDE-${flow}-${fails.length}`,
+            })
+            const input = await cancellationInputFor(seeded)
+            const before = await readRenewalState(container, seeded)
+            const failure = inject()
+
+            await expect(cancelBy[flow](input)).rejects.toMatchObject(failure)
+
+            const after = await readRenewalState(container, seeded)
+
+            expect(after.subscription).toEqual({ ...before.subscription, updated_at: expect.any(Date) })
+            expect(after.cycle).toEqual({ ...before.cycle, updated_at: expect.any(Date) })
+            expect(after.attempts).toEqual([{ ...before.attempts[0], updated_at: expect.any(Date) }])
+            expect(after.failedLogs).toHaveLength(0)
+            expect(await cancellationLogs(seeded.subscription.id)).toEqual([])
+
+            await cancelBy[flow](input)
+
+            const cancelled = await readRenewalState(container, seeded)
+
+            expect(cancelled.subscription.status).toEqual(SubscriptionStatus.CANCELLED)
+            expect(cancelled.cycle.status).toEqual(RenewalCycleStatus.FAILED)
+            expect(cancelled.failedLogs).toHaveLength(1)
+          }
+        )
       })
 
       it.each([

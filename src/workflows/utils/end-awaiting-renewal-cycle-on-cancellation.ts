@@ -38,9 +38,13 @@ export type EndedAwaitingRenewalCycle = {
   subscription_log_id: string | null
 }
 
+type RenewalCycleRecord = Awaited<
+  ReturnType<RenewalModuleService["listRenewalCycles"]>
+>[number]
+
 export type EndAwaitingRenewalCyclesOnCancellationInput = {
   subscription: CancellationSubscriptionDisplayRecord
-  cancelled_at: Date
+  cancelled_at: Date | string
   actor_id: string | null
   reason: string | null
   source: CancellationLogSource
@@ -55,102 +59,125 @@ export async function endAwaitingRenewalCyclesOnCancellation(
   input: EndAwaitingRenewalCyclesOnCancellationInput
 ): Promise<EndedAwaitingRenewalCycle[]> {
   const renewalModule = container.resolve<RenewalModuleService>(RENEWAL_MODULE)
-  const { subscription } = input
-  const finishedAt = input.cancelled_at
-  const message = `Renewal ended unpaid: subscription '${subscription.id}' was cancelled while the renewal awaited its payment`
 
   const cycles = await renewalModule.listRenewalCycles({
-    subscription_id: subscription.id,
+    subscription_id: input.subscription.id,
     status: RenewalCycleStatus.AWAITING_PAYMENT,
   })
   const ended: EndedAwaitingRenewalCycle[] = []
 
-  for (const cycle of cycles) {
-    const attempts = await renewalModule.listRenewalAttempts({
-      renewal_cycle_id: cycle.id,
-      status: RenewalAttemptStatus.PROCESSING,
-    })
-
-    for (const attempt of attempts) {
-      await renewalModule.updateRenewalAttempts({
-        id: attempt.id,
-        status: RenewalAttemptStatus.FAILED,
-        finished_at: finishedAt,
-        error_code: CANCELLATION_ERROR_CODE,
-        error_message: message,
-      })
-    }
-
-    await renewalModule.updateRenewalCycles({
-      id: cycle.id,
-      status: RenewalCycleStatus.FAILED,
-      processed_at: finishedAt,
-      last_error: message,
-    })
-
-    const log = await persistSubscriptionLogEvent(
-      container,
-      normalizeActivityLogEvent({
-        subscription_id: subscription.id,
-        customer_id: subscription.customer_id,
-        event_type: ActivityLogEventType.RENEWAL_FAILED,
-        actor_type: ActivityLogActorType.USER,
-        actor_id: input.actor_id,
-        display: {
-          subscription_reference: subscription.reference,
-          customer_name: subscription.customer_snapshot?.full_name ?? null,
-          product_title: subscription.product_snapshot?.product_title ?? null,
-          variant_title: subscription.product_snapshot?.variant_title ?? null,
-        },
-        previous_state: {
+  try {
+    for (const cycle of cycles) {
+      const entry: EndedAwaitingRenewalCycle = {
+        cycle: {
+          id: cycle.id,
           status: cycle.status,
-          attempt_count: cycle.attempt_count,
           processed_at: toISOStringOrNull(cycle.processed_at),
-          generated_order_id: cycle.generated_order_id,
           last_error: cycle.last_error,
         },
-        new_state: {
-          status: RenewalCycleStatus.FAILED,
-          attempt_count: cycle.attempt_count,
-          processed_at: toISOStringOrNull(finishedAt),
-          generated_order_id: cycle.generated_order_id,
-          last_error: message,
-        },
-        reason: input.reason,
-        metadata: {
-          source: input.source,
-          renewal_cycle_id: cycle.id,
-          order_id: cycle.generated_order_id,
-          reason_code: CANCELLATION_ERROR_CODE,
-          scheduled_for: toISOStringOrNull(cycle.scheduled_for),
-        },
-        dedupe: {
-          scope: "renewal",
-          target_id: cycle.id,
-          qualifier: toISOStringOrNull(finishedAt),
-        },
-      })
-    )
+        attempts: [],
+        subscription_log_id: null,
+      }
 
-    ended.push({
-      cycle: {
-        id: cycle.id,
-        status: cycle.status,
-        processed_at: toISOStringOrNull(cycle.processed_at),
-        last_error: cycle.last_error,
-      },
-      attempts: attempts.map((attempt) => ({
-        id: attempt.id,
-        status: attempt.status,
-        finished_at: toISOStringOrNull(attempt.finished_at),
-        error_code: attempt.error_code,
-        error_message: attempt.error_message,
-      })),
-      subscription_log_id: log.action === "created" ? log.record.id : null,
-    })
+      // Recorded before its writes, so a throw half way through still restores this cycle.
+      ended.push(entry)
+      await endCycle(container, input, cycle, entry)
+    }
+  } catch (error) {
+    await restoreAwaitingRenewalCycles(container, ended)
+
+    throw error
   }
 
   return ended
+}
+
+async function endCycle(
+  container: MedusaContainer,
+  input: EndAwaitingRenewalCyclesOnCancellationInput,
+  cycle: RenewalCycleRecord,
+  entry: EndedAwaitingRenewalCycle
+) {
+  const renewalModule = container.resolve<RenewalModuleService>(RENEWAL_MODULE)
+  const { subscription } = input
+  const finishedAt = new Date(input.cancelled_at)
+  const message = `Renewal ended unpaid: subscription '${subscription.id}' was cancelled while the renewal awaited its payment`
+
+  const attempts = await renewalModule.listRenewalAttempts({
+    renewal_cycle_id: cycle.id,
+    status: RenewalAttemptStatus.PROCESSING,
+  })
+
+  for (const attempt of attempts) {
+    entry.attempts.push({
+      id: attempt.id,
+      status: attempt.status,
+      finished_at: toISOStringOrNull(attempt.finished_at),
+      error_code: attempt.error_code,
+      error_message: attempt.error_message,
+    })
+
+    await renewalModule.updateRenewalAttempts({
+      id: attempt.id,
+      status: RenewalAttemptStatus.FAILED,
+      finished_at: finishedAt,
+      error_code: CANCELLATION_ERROR_CODE,
+      error_message: message,
+    })
+  }
+
+  await renewalModule.updateRenewalCycles({
+    id: cycle.id,
+    status: RenewalCycleStatus.FAILED,
+    processed_at: finishedAt,
+    last_error: message,
+  })
+
+  const log = await persistSubscriptionLogEvent(
+    container,
+    normalizeActivityLogEvent({
+      subscription_id: subscription.id,
+      customer_id: subscription.customer_id,
+      event_type: ActivityLogEventType.RENEWAL_FAILED,
+      actor_type: ActivityLogActorType.USER,
+      actor_id: input.actor_id,
+      display: {
+        subscription_reference: subscription.reference,
+        customer_name: subscription.customer_snapshot?.full_name ?? null,
+        product_title: subscription.product_snapshot?.product_title ?? null,
+        variant_title: subscription.product_snapshot?.variant_title ?? null,
+      },
+      previous_state: {
+        status: cycle.status,
+        attempt_count: cycle.attempt_count,
+        processed_at: toISOStringOrNull(cycle.processed_at),
+        generated_order_id: cycle.generated_order_id,
+        last_error: cycle.last_error,
+      },
+      new_state: {
+        status: RenewalCycleStatus.FAILED,
+        attempt_count: cycle.attempt_count,
+        processed_at: toISOStringOrNull(finishedAt),
+        generated_order_id: cycle.generated_order_id,
+        last_error: message,
+      },
+      reason: input.reason,
+      metadata: {
+        source: input.source,
+        renewal_cycle_id: cycle.id,
+        order_id: cycle.generated_order_id,
+        reason_code: CANCELLATION_ERROR_CODE,
+        scheduled_for: toISOStringOrNull(cycle.scheduled_for),
+      },
+      dedupe: {
+        scope: "renewal",
+        target_id: cycle.id,
+        qualifier: toISOStringOrNull(finishedAt),
+      },
+    })
+  )
+
+  entry.subscription_log_id = log.action === "created" ? log.record.id : null
 }
 
 export async function restoreAwaitingRenewalCycles(

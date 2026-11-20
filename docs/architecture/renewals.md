@@ -293,7 +293,8 @@ promotions or plan pricing for them by default. The renewal item build works as 
   straight to finalizing (advancing the subscription) rather than double-charging or wedging
 - the host app can pay part or all of the order before the card is charged via the
   `applyRenewalCredits` workflow hook (see `src/workflows/README.md`). It runs after the order
-  exists, on a reused order too, and the payment collection is sized from the
+  exists, on a reused order too (but never for a failed cycle while a dunning case is active: dunning
+  retries don't call it), and the payment collection is sized from the
   `pending_difference` read after it; an order the credits cover needs no saved payment method
   and is finalized without a charge
 

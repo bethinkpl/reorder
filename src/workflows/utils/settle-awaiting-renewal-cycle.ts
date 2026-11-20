@@ -20,8 +20,7 @@ import {
   type RenewalSessionSignal,
   signalNamesAttempt,
 } from "./renewal-session-marker"
-import { isLockBusyError } from "../../common/utils/lock-busy-error"
-import { runUnderLock } from "./run-under-lock"
+import { tryUnderLock } from "./run-under-lock"
 import {
   readStoredSettlementInputs,
   settleRenewalCycleSucceeded,
@@ -238,24 +237,25 @@ export async function settleAwaitingRenewalCycle(
     return "not_awaiting"
   }
 
-  let locked = false
+  const run = await tryUnderLock(container, lockKey, settle, {
+    wait_seconds: 0,
+    hold_seconds: PROCESSING_LOCK_HOLD_SECONDS,
+  })
 
-  try {
-    return await runUnderLock(
-      container,
-      lockKey,
-      () => {
-        locked = true
-
-        return settle()
-      },
-      { wait_seconds: 0, hold_seconds: PROCESSING_LOCK_HOLD_SECONDS }
-    )
-  } catch (error) {
-    if (!locked && isLockBusyError(error)) {
-      return "not_awaiting"
-    }
-
-    throw error
+  if (run.acquired) {
+    return run.result
   }
+
+  // Most likely the run that submitted the charge, which parks the cycle for the capture to be
+  // settled by the awaiting-payment sweep; a cycle it fails to park is settled there as well.
+  logRenewalEvent(container.resolve("logger"), "info", {
+    event: "renewal.awaiting_payment_settlement",
+    correlation_id: createRenewalCorrelationId("renewal-awaiting-payment"),
+    renewal_cycle_id: cycle.id,
+    subscription_id: cycle.subscription_id,
+    alertable: false,
+    message: `RenewalCycle '${cycle.id}' is still processing under another holder of its renewal lock; settling its captured payment is deferred to the awaiting-payment sweep`,
+  })
+
+  return "not_awaiting"
 }

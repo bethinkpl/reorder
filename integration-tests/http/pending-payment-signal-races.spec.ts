@@ -448,6 +448,48 @@ medusaIntegrationTestRunner({
         }
       )
 
+      it.each([
+        {
+          name: "the cycle's wait",
+          failWrite: () => failCycleWriteOnce(RenewalCycleStatus.AWAITING_PAYMENT),
+        },
+        {
+          name: "the attempt's session",
+          failWrite: failAttemptSessionWriteOnce,
+        },
+      ])(
+        "settles on the sweep a renewal cycle left processing whose capture never arrived, when $name could not be recorded",
+        async ({ failWrite }) => {
+          const container = getContainer()
+          const order = await createUnpaidOrder(container)
+          const seeded = await seedDueCharge("SUB-RENEWAL-PARK-FAILURE-LOST-CAPTURE", order.id)
+
+          answerAuthorizationWithNull(container)
+          failWrite()
+
+          await runRenewal(container, seeded.cycle.id)
+
+          const inFlight = await readRenewalState(container, seeded)
+
+          jest.restoreAllMocks()
+          await captureOnOrder(container, order.id, seeded.sessionIds[0], { linkCollection: true })
+
+          const sweepAfter = (minutes: number) =>
+            atTime(new Date(inFlight.attempts[0].started_at).getTime() + minutes * 60 * 1000, () =>
+              reconcileAwaitingRenewalCycles(container)
+            )
+
+          expect(await sweepAfter(5)).toMatchObject({ processing_settled: 0, failed: 0 })
+          expect(await sweepAfter(11)).toMatchObject({ processing_settled: 1, failed: 0 })
+          expect(await sweepAfter(12)).toMatchObject({ processing_settled: 0, failed: 0 })
+
+          await expectSettled(seeded, inFlight.attempts[0].id)
+          expect(
+            (await subscriptionModule().retrieveSubscription(seeded.subscription.id)).next_renewal_at
+          ).toEqual(oneMonthAfter(seeded.dueAt))
+        }
+      )
+
       it("keeps the renewal cycle processing when a later step of the run fails as well", async () => {
         const container = getContainer()
         const seeded = await seedDueCharge("SUB-RENEWAL-PARK-AND-RELEASE-FAILURE")
@@ -704,24 +746,42 @@ medusaIntegrationTestRunner({
         return { ...seeded, payment }
       }
 
-      it("leaves a processing renewal cycle to the holder without waiting for the lock or raising an alert, and settles it on a delivery after the lock is free", async () => {
+      it("leaves a processing renewal cycle to the holder without waiting for the lock or raising an alert, and the sweep settles it once its charge is ten minutes old", async () => {
         const container = getContainer()
         const seeded = await seedCapturedBehindLock(
           "SUB-PROCESSING-CAPTURE-WHILE-LOCKED",
           RenewalCycleStatus.PROCESSING
         )
         const before = await readRenewalState(container, seeded)
+        const logs = watchLogs(container)
         const alerts = watchAlerts(container)
+        const sweepAfter = (minutes: number) =>
+          atTime(new Date(seeded.attempt.started_at).getTime() + minutes * 60 * 1000, () =>
+            reconcileAwaitingRenewalCycles(container)
+          )
 
         await deliverCapture(container, seeded.payment.id)
 
         expect(await readRenewalState(container, seeded)).toEqual(before)
         expect(before.cases).toHaveLength(0)
         expect(alerts(seeded.cycle.id)).toHaveLength(0)
+        expect(
+          logs({
+            event: "renewal.awaiting_payment_settlement",
+            alertable: false,
+            renewal_cycle_id: seeded.cycle.id,
+          })
+        ).toEqual([expect.objectContaining({ message: expect.stringContaining("deferred to the awaiting-payment sweep") })])
 
-        await deliverCapture(container, seeded.payment.id)
+        expect(await sweepAfter(5)).toMatchObject({ processing_settled: 0, failed: 0 })
+        expect((await readRenewalState(container, seeded)).cycle.status).toEqual(
+          RenewalCycleStatus.PROCESSING
+        )
+
+        expect(await sweepAfter(11)).toMatchObject({ processing_settled: 1, failed: 0 })
 
         await expectSettled(seeded, seeded.attempt.id)
+        expect(alerts(seeded.cycle.id)).toHaveLength(0)
       })
 
       it("waits for the lock and settles a renewal cycle awaiting its payment once the holder lets go", async () => {

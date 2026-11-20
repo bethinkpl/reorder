@@ -25,6 +25,7 @@ import { SUBSCRIPTION_MODULE } from "../modules/subscription"
 import type SubscriptionModuleService from "../modules/subscription/service"
 import { SubscriptionStatus } from "../modules/subscription/types"
 import { activateSubscriptionOnPaymentCaptured } from "../subscribers/activate-subscription-on-payment-captured"
+import { loadOrderAmounts } from "../workflows/steps/run-dunning-retry"
 import { endAwaitingRenewalCyclesOnCancellation } from "../workflows/utils/end-awaiting-renewal-cycle-on-cancellation"
 import { applyRecordedRenewalPaymentFailureUnderLock } from "../workflows/utils/fail-awaiting-renewal-cycle"
 import {
@@ -34,6 +35,7 @@ import {
 import { isLockBusyError } from "../common/utils/lock-busy-error"
 import {
   settleAwaitingRenewalCycle,
+  settleAwaitingRenewalCycleUnderLock,
   type SettleAwaitingRenewalCycleOutcome,
 } from "../workflows/utils/settle-awaiting-renewal-cycle"
 
@@ -42,6 +44,8 @@ const JOB_LOCK_KEY = "jobs:reconcile-awaiting-renewal-cycles"
 const BATCH_SIZE = 200
 const ALERT_LOCK_TIMEOUT_SECONDS = 5
 const RENEWAL_LOCK_TIMEOUT_SECONDS = 5
+/** Well past the 120 s a renewal run holds its lock, so a run still in progress is never touched. */
+const STALE_PROCESSING_MINUTES = 10
 
 type OverdueStatus = RenewalCycleStatus.AWAITING_PAYMENT | RenewalCycleStatus.PROCESSING
 
@@ -60,7 +64,8 @@ export type ReconcileAwaitingRenewalCyclesResult = Record<
   | "ended_cancelled"
   | "late_captures"
   | "stale_attempts_closed"
-  | "recorded_failures_applied",
+  | "recorded_failures_applied"
+  | "processing_settled",
   number
 >
 
@@ -448,7 +453,88 @@ async function reconcileAttemptsOfClosedCycles(
   }
 }
 
-async function alertOverdueProcessingCycles(
+/**
+ * The charge a processing cycle's newest attempt submitted, once that attempt is old enough that
+ * no run can still be holding it and its renewal order has been paid.
+ */
+async function findPaidStaleCharge(
+  container: MedusaContainer,
+  cycleId: string,
+  now: Date
+) {
+  const renewalModule = container.resolve<RenewalModuleService>(RENEWAL_MODULE)
+  const cycle = await renewalModule.retrieveRenewalCycle(cycleId)
+
+  if (cycle.status !== RenewalCycleStatus.PROCESSING) {
+    return null
+  }
+
+  const [latest] = await renewalModule.listRenewalAttempts(
+    { renewal_cycle_id: cycle.id },
+    { order: { attempt_no: "DESC" }, take: 1 }
+  )
+  const orderId = cycle.generated_order_id ?? latest?.order_id
+
+  if (
+    latest?.status !== RenewalAttemptStatus.PROCESSING ||
+    now.getTime() - new Date(latest.started_at).getTime() < STALE_PROCESSING_MINUTES * 60 * 1000 ||
+    !orderId ||
+    (await loadOrderAmounts(container, orderId)).pending > 0
+  ) {
+    return null
+  }
+
+  return latest
+}
+
+/**
+ * Settles a processing cycle whose charge was paid when nothing else will: its run could not park
+ * it, and a capture that met the run's lock, or never arrived, is not delivered again. The paid
+ * order is what decides; the attempt's session may be missing when the run could not record it.
+ */
+async function settlePaidProcessingCycle(
+  container: MedusaContainer,
+  cycle: { id: string, subscription_id: string },
+  input: OverdueAlertInput
+): Promise<boolean> {
+  if (!(await findPaidStaleCharge(container, cycle.id, input.now))) {
+    return false
+  }
+
+  const outcome = await underRenewalLock(
+    container,
+    cycle.subscription_id,
+    async () => {
+      const charge = await findPaidStaleCharge(container, cycle.id, input.now)
+
+      return charge
+        ? await settleAwaitingRenewalCycleUnderLock(container, cycle.id, {
+            processing_signal: { session_id: charge.payment_reference, attempt_id: charge.id },
+          })
+        : null
+    },
+    null
+  )
+
+  if (outcome !== "settled" && outcome !== "closed_superseded") {
+    return false
+  }
+
+  logRenewalEvent(container.resolve("logger"), "warn", {
+    event: "renewal.processing_settlement",
+    outcome: "succeeded",
+    correlation_id: input.correlationId,
+    renewal_cycle_id: cycle.id,
+    subscription_id: cycle.subscription_id,
+    job_name: JOB_NAME,
+    alertable: false,
+    message: `RenewalCycle '${cycle.id}' was left processing with its renewal order paid; settled by the sweep`,
+  })
+
+  return true
+}
+
+async function reconcileProcessingCycles(
   container: MedusaContainer,
   input: OverdueAlertInput,
   result: ReconcileAwaitingRenewalCyclesResult
@@ -471,7 +557,9 @@ async function alertOverdueProcessingCycles(
 
     for (const cycle of cycles) {
       try {
-        if (
+        if (await settlePaidProcessingCycle(container, cycle, input)) {
+          result.processing_settled += 1
+        } else if (
           await raiseOverdueAlertOnce(
             container,
             cycle,
@@ -522,6 +610,7 @@ export async function reconcileAwaitingRenewalCycles(
     late_captures: 0,
     stale_attempts_closed: 0,
     recorded_failures_applied: 0,
+    processing_settled: 0,
   }
   let cursor: string | null = null
 
@@ -578,7 +667,7 @@ export async function reconcileAwaitingRenewalCycles(
     cursor = cycles[cycles.length - 1].id
   }
 
-  await alertOverdueProcessingCycles(container, alertInput, result)
+  await reconcileProcessingCycles(container, alertInput, result)
   await reconcileAttemptsOfClosedCycles(container, alertInput, result)
 
   return result
@@ -598,7 +687,7 @@ export default async function reconcileAwaitingRenewalCyclesJob(
         const result = await reconcileAwaitingRenewalCycles(container)
 
         logger.info(
-          `[${JOB_NAME}] scanned ${result.scanned} awaiting renewal cycle(s), settled ${result.settled}, closed without moving dates ${result.closed_superseded}, still unpaid ${result.order_unpaid} (overdue ${result.overdue}), submitted charges overdue while processing ${result.processing_overdue}, terminal subscription ${result.subscription_terminal}, ended for a cancelled subscription ${result.ended_cancelled}, late captures redelivered ${result.late_captures}, stale attempts closed ${result.stale_attempts_closed}, recorded payment failures applied ${result.recorded_failures_applied}, no longer awaiting ${result.not_awaiting}, failed ${result.failed} in ${Date.now() - startedAt}ms`
+          `[${JOB_NAME}] scanned ${result.scanned} awaiting renewal cycle(s), settled ${result.settled}, closed without moving dates ${result.closed_superseded}, still unpaid ${result.order_unpaid} (overdue ${result.overdue}), processing cycles settled on a paid order ${result.processing_settled}, submitted charges overdue while processing ${result.processing_overdue}, terminal subscription ${result.subscription_terminal}, ended for a cancelled subscription ${result.ended_cancelled}, late captures redelivered ${result.late_captures}, stale attempts closed ${result.stale_attempts_closed}, recorded payment failures applied ${result.recorded_failures_applied}, no longer awaiting ${result.not_awaiting}, failed ${result.failed} in ${Date.now() - startedAt}ms`
         )
       },
       {

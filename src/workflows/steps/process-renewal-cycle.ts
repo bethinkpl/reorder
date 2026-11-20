@@ -1742,7 +1742,7 @@ async function parkOrReportRenewalCycle(
       attempt_no: context.attempt_no,
       duration_ms: Date.now() - context.operation_started_at,
       alertable: true,
-      message: `RenewalCycle '${context.renewal_cycle_id}' submitted its charge on payment session '${paymentSessionId}' but could not be parked to await it; it stays 'processing' until the payment's capture settles it: ${getRenewalErrorMessage(error)}`,
+      message: `RenewalCycle '${context.renewal_cycle_id}' submitted its charge on payment session '${paymentSessionId}' but could not be parked to await it; it stays 'processing', and once its renewal order is paid the payment's capture or, ten minutes on, the awaiting-payment sweep settles it: ${getRenewalErrorMessage(error)}`,
       metadata: {
         payment_session_id: paymentSessionId,
         generated_order_id: orderResult.generated_order_id,

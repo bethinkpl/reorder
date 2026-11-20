@@ -660,6 +660,42 @@ medusaIntegrationTestRunner({
         })
       })
 
+      it("records the failure of a charge a cancellation left in flight, and the sweep closes only its attempt as failed", async () => {
+        const container = getContainer()
+        const seeded = await seedAwaitingRenewal(container, {
+          reference: "SUB-CLOSED-CYCLE-FAILURE-WHILE-LOCKED",
+        })
+
+        await cancelSubscriptionWorkflow(container).run({ input: { id: seeded.subscription.id } })
+        await whileRenewalLockHeld(container, seeded.subscription.id, async () => {
+          await deliverFailure(container, seeded.session.id, { reason: "declined" })
+        })
+
+        expect((await readRenewalState(container, seeded)).attempts).toEqual([
+          expect.objectContaining({
+            status: RenewalAttemptStatus.PROCESSING,
+            reported_payment_failure: expect.objectContaining({ session_id: seeded.session.id }),
+          }),
+        ])
+
+        expect(await reconcileAwaitingRenewalCycles(container)).toMatchObject({
+          recorded_failures_applied: 1,
+          failed: 0,
+        })
+
+        expect(await readRenewalState(container, seeded)).toMatchObject({
+          attempts: [
+            {
+              status: RenewalAttemptStatus.FAILED,
+              error_code: "declined",
+              reported_payment_failure: null,
+            },
+          ],
+          cases: [],
+        })
+        expect(emitted(DunningEvents.STARTED)).toHaveLength(0)
+      })
+
       it("drops a recorded renewal failure once the renewal order has been paid, settling the cycle instead", async () => {
         const container = getContainer()
         const seeded = await seedAwaitingRenewal(container, {

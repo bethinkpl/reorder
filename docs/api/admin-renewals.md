@@ -472,6 +472,14 @@ This means the payloads already include:
 - latest attempt summary on list
 - full attempt history on detail
 
+### Error Mapping
+
+Mutation routes answer a domain error with its own message and a status taken from its `MedusaError` type, also
+when a workflow run rethrows it as a plain object: `not_found` is `404`, `invalid_data` is `400`, `conflict` and
+`not_allowed` are `409` (so is a payment the provider refused during a forced run), any other type is `500`. An
+error without a `MedusaError` type, such as a lock held by another run, is `404` when its message reports something
+not found and `409` otherwise (`src/api/admin/route-errors.ts`).
+
 ### Operational Notes
 
 The current implementation also attaches operational metadata during execution, including trigger information and correlation IDs used for logging and scheduler tracing.

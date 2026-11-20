@@ -6,6 +6,8 @@ import {
   listAdminDunningCases,
   type ListAdminDunningCasesInput,
 } from "../../../modules/dunning/utils/admin-query"
+import { getDunningErrorMessage } from "../../../modules/dunning/utils/observability"
+import { type AdminRouteError, mapMedusaErrorByType } from "../route-errors"
 
 export function normalizeAdminDunningCasesListQuery(
   query: GetAdminDunningCasesSchemaType
@@ -59,13 +61,17 @@ export async function getAdminDunningCasesListResponse(
   )
 }
 
-export function mapDunningAdminRouteError(error: unknown) {
-  const message =
-    error instanceof Error ? error.message : "Unexpected dunning admin error"
-  const normalized = message.toLowerCase()
-  const errorType = MedusaError.isMedusaError(error) ? error.type : null
+export function mapDunningAdminRouteError(error: unknown): AdminRouteError {
+  const message = getDunningErrorMessage(error)
+  const byType = mapMedusaErrorByType(error, message)
 
-  if (errorType === MedusaError.Types.NOT_FOUND || normalized.includes("was not found")) {
+  if (byType) {
+    return byType
+  }
+
+  const normalized = message.toLowerCase()
+
+  if (normalized.includes("was not found")) {
     return {
       status: 404,
       type: MedusaError.Types.NOT_FOUND,

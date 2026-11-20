@@ -197,7 +197,15 @@ medusaIntegrationTestRunner({
             { reason: "shorter cadence", intervals: [60, 120, 240], max_attempts: 3 },
             admin
           )
-        ).rejects.toMatchObject({ response: { status: 409 } })
+        ).rejects.toMatchObject({
+          response: {
+            status: 409,
+            data: {
+              type: "conflict",
+              message: `DunningCase '${caseId}' can't update retry schedule while retry is in flight`,
+            },
+          },
+        })
 
         const laterCycle = await createRenewalCycleSeed(container, {
           subscription_id: subscriptionId,

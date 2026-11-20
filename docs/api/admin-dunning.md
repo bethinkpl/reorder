@@ -293,6 +293,8 @@ Returns the refreshed `dunning_case` detail payload.
 
 ### Common Errors
 
+- `400 invalid_data`
+  The case has no renewal order or retry schedule, or its subscription has no saved payment method.
 - `404 not_found`
   The case does not exist.
 - `409 conflict`
@@ -412,13 +414,20 @@ Returns the refreshed `dunning_case` detail payload.
 
 ## 7. Error Mapping
 
-The admin dunning route layer normalizes domain errors into HTTP responses using the current rules:
+The admin dunning route layer answers a domain error with its own message and a status taken from its
+`MedusaError` type, also when a workflow run rethrows it as a plain object:
 
 - `404`
-  for not-found errors
+  for `not_found`
 - `400`
-  for invalid or missing input
+  for `invalid_data` (for example a retry of a case without a renewal order or a saved payment method)
 - `409`
-  for domain conflicts and illegal transitions
+  for `conflict` and `not_allowed` (domain conflicts and illegal transitions), and for a payment the provider refused
+- `500`
+  for any other `MedusaError` type
+
+An error without a `MedusaError` type (for example a lock held by another run) is mapped from its message: `404`
+when it reports something not found, `400` for invalid or missing input, `409` otherwise. The renewal and
+cancellation admin routes apply the same rules (`src/api/admin/route-errors.ts`).
 
 This keeps the API aligned with the workflow-driven Medusa pattern used by the rest of the plugin.

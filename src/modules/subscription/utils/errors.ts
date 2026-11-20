@@ -74,6 +74,8 @@ export function isLockAcquisitionFailure(error: unknown) {
 
   return (
     message.includes("failed to acquire lock") ||
-    message.includes("acquiring lock")
+    message.includes("acquiring lock") ||
+    // The Postgres locking provider's answer when another owner inserted the lock first.
+    message.endsWith("is already locked.")
   )
 }

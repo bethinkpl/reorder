@@ -1175,34 +1175,22 @@ function formatCaseStatus(status: DunningCaseAdminStatus) {
   }
 }
 
-function formatRetryBlockedReason(reason: DunningRetryBlockedReason) {
-  switch (reason) {
-    case DunningRetryBlockedReason.NO_ACTIVE_CASE:
-      return "no active recovery case"
-    case DunningRetryBlockedReason.RETRY_IN_PROGRESS:
-      return "a retry is already running"
-    case DunningRetryBlockedReason.PAYMENT_IN_PROGRESS:
-      return "a payment is awaiting its result"
-    case DunningRetryBlockedReason.CASE_CLOSED:
-      return "the case is closed"
-    case DunningRetryBlockedReason.SUBSCRIPTION_NOT_RETRYABLE:
-      return "the subscription is not chargeable"
-    case DunningRetryBlockedReason.NO_PAYMENT_METHOD:
-      return "no saved payment method"
-    case DunningRetryBlockedReason.MAX_ATTEMPTS_REACHED:
-      return "all attempts are used up"
-    case DunningRetryBlockedReason.MISSING_RENEWAL_ORDER:
-      return "the case has no renewal order"
-    case DunningRetryBlockedReason.MISSING_RETRY_SCHEDULE:
-      return "the case has no retry schedule"
-    case DunningRetryBlockedReason.RETRY_NOT_DUE:
-      return "the next retry is not due yet"
-    case DunningRetryBlockedReason.MANUAL_RESOLUTION_REQUIRED:
-      return "the case needs manual resolution"
-    default:
-      reason satisfies never
-      return reason
-  }
+const RETRY_BLOCKED_REASON_LABELS: Record<DunningRetryBlockedReason, string> = {
+  [DunningRetryBlockedReason.NO_ACTIVE_CASE]: "no active recovery case",
+  [DunningRetryBlockedReason.RETRY_IN_PROGRESS]: "a retry is already running",
+  [DunningRetryBlockedReason.PAYMENT_IN_PROGRESS]: "a payment is awaiting its result",
+  [DunningRetryBlockedReason.CASE_CLOSED]: "the case is closed",
+  [DunningRetryBlockedReason.SUBSCRIPTION_NOT_RETRYABLE]: "the subscription is not chargeable",
+  [DunningRetryBlockedReason.NO_PAYMENT_METHOD]: "no saved payment method",
+  [DunningRetryBlockedReason.MAX_ATTEMPTS_REACHED]: "all attempts are used up",
+  [DunningRetryBlockedReason.MISSING_RENEWAL_ORDER]: "the case has no renewal order",
+  [DunningRetryBlockedReason.MISSING_RETRY_SCHEDULE]: "the case has no retry schedule",
+  [DunningRetryBlockedReason.RETRY_NOT_DUE]: "the next retry is not due yet",
+  [DunningRetryBlockedReason.MANUAL_RESOLUTION_REQUIRED]: "the case needs manual resolution",
+}
+
+function formatRetryBlockedReason(reason: `${DunningRetryBlockedReason}`) {
+  return RETRY_BLOCKED_REASON_LABELS[reason]
 }
 
 function getCaseStatusColor(status: DunningCaseAdminStatus) {

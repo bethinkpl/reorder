@@ -36,7 +36,7 @@ export type DunningAdminSubscriptionSummary = {
 
 export type DunningAdminRenewalSummary = {
   renewal_cycle_id: string
-  status: RenewalCycleAdminStatus
+  status: `${RenewalCycleAdminStatus}`
   scheduled_for: string
   generated_order_id: string | null
 }
@@ -92,7 +92,7 @@ export type DunningCaseAdminDetail = {
   renewal: DunningAdminRenewalSummary | null
   order: DunningAdminOrderSummary | null
   retry_eligible: boolean
-  retry_blocked_reason: DunningRetryBlockedReason | null
+  retry_blocked_reason: `${DunningRetryBlockedReason}` | null
   attempt_count: number
   max_attempts: number
   retry_schedule: DunningRetryScheduleSummary | null

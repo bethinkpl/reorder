@@ -41,7 +41,7 @@ export type CancellationAdminSubscriptionSummary = {
 
 export type CancellationAdminDunningSummary = {
   dunning_case_id: string
-  status: DunningCaseAdminStatus
+  status: `${DunningCaseAdminStatus}`
   attempt_count: number
   next_retry_at: string | null
   last_payment_error_message: string | null
@@ -49,7 +49,7 @@ export type CancellationAdminDunningSummary = {
 
 export type CancellationAdminRenewalSummary = {
   renewal_cycle_id: string
-  status: RenewalCycleAdminStatus
+  status: `${RenewalCycleAdminStatus}`
   scheduled_for: string
   approval_status: "pending" | "approved" | "rejected" | null
   generated_order_id: string | null

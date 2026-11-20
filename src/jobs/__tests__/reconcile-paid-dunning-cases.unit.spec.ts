@@ -44,6 +44,8 @@ function buildContainer(options: {
     async (filters: CaseFilters, listOptions: { take: number }) => {
       if (Array.isArray(filters.status)) {
         return cases
+          .filter((entry) => !filters.id || entry.id > filters.id.$gt)
+          .sort((left, right) => left.id.localeCompare(right.id))
           .slice(0, listOptions.take)
           .map((entry) => ({ subscription_id: `sub_${entry.id}`, ...entry }))
       }
@@ -168,7 +170,7 @@ describe("reconcilePaidDunningCases", () => {
     expect(result).toEqual({ scanned: 1, recovered: 0, unpaid: 1, failed: 0, ended_cancelled: 0, late_captures: 0, stale_attempts_closed: 0, recorded_failures_applied: 0, stale_retries_reparked: 0, stale_retries_parked: 0 })
   })
 
-  it("scans the oldest open cases only", async () => {
+  it("scans the open cases a page at a time", async () => {
     const { container, listDunningCases } = buildContainer({ cases: [] })
 
     await reconcilePaidDunningCases(container)
@@ -182,13 +184,31 @@ describe("reconcilePaidDunningCases", () => {
 
     expect(listDunningCases).toHaveBeenCalledWith(
       { status: expect.arrayContaining(openStatuses) },
-      { take: 200, order: { updated_at: "ASC" } }
+      { take: 200, order: { id: "ASC" } }
     )
     const [openCasesQuery] = listDunningCases.mock.calls.filter(([filters]) =>
       Array.isArray(filters.status)
     )
 
     expect(openCasesQuery[0].status).toHaveLength(openStatuses.length)
+  })
+
+  it("recovers a paid case behind a full page of cases it can't recover", async () => {
+    const parked = Array.from({ length: 200 }, (_, index) => ({
+      id: `dun_${String(index).padStart(3, "0")}`,
+      renewal_order_id: null,
+      status: DunningCaseStatus.AWAITING_MANUAL_RESOLUTION,
+    }))
+    const { container } = buildContainer({
+      cases: [...parked, { id: "dun_200", renewal_order_id: "order_paid" }],
+    })
+
+    const result = await reconcilePaidDunningCases(container)
+
+    expect(recoverRun).toHaveBeenCalledWith({
+      input: { dunning_case_id: "dun_200", payment_id: null },
+    })
+    expect(result).toMatchObject({ scanned: 201, recovered: 1 })
   })
 
   it("keeps sweeping after a case fails and reports it", async () => {

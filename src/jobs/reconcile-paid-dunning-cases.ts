@@ -665,6 +665,68 @@ async function reconcileAttemptsOfClosedCases(
   }
 }
 
+async function recoverPaidIdleCases(
+  container: MedusaContainer,
+  result: ReconcilePaidDunningCasesResult
+): Promise<void> {
+  const dunningModule = container.resolve<DunningModuleService>(DUNNING_MODULE)
+  let cursor: string | null = null
+
+  while (true) {
+    const cases = (await dunningModule.listDunningCases(
+      {
+        status: IDLE_DUNNING_CASE_STATUSES,
+        ...(cursor ? { id: { $gt: cursor } } : {}),
+      } as never,
+      { take: BATCH_SIZE, order: { id: "ASC" } }
+    )) as DunningCaseRecord[]
+
+    result.scanned += cases.length
+
+    for (const dunningCase of cases) {
+      try {
+        const endedCancelled = await closeCaseOfCancelledSubscription(container, dunningCase)
+
+        if (endedCancelled !== null) {
+          result.ended_cancelled += endedCancelled ? 1 : 0
+
+          continue
+        }
+
+        if (!dunningCase.renewal_order_id) {
+          continue
+        }
+
+        const { pending } = await loadOrderAmounts(
+          container,
+          dunningCase.renewal_order_id
+        )
+
+        if (pending > 0) {
+          result.unpaid += 1
+
+          continue
+        }
+
+        await recoverDunningFromCapturedPaymentWorkflow(container).run({
+          input: { dunning_case_id: dunningCase.id, payment_id: null },
+        })
+
+        result.recovered += 1
+      } catch (error) {
+        result.failed += 1
+        reportCaseFailure(container, dunningCase, error)
+      }
+    }
+
+    if (cases.length < BATCH_SIZE) {
+      return
+    }
+
+    cursor = cases[cases.length - 1].id
+  }
+}
+
 /**
  * Closes dunning cases whose renewal order is already paid in full.
  *
@@ -677,7 +739,6 @@ async function reconcileAttemptsOfClosedCases(
 export async function reconcilePaidDunningCases(
   container: MedusaContainer
 ): Promise<ReconcilePaidDunningCasesResult> {
-  const dunningModule = container.resolve<DunningModuleService>(DUNNING_MODULE)
   const alertInput: OverdueAlertInput = {
     now: new Date(Date.now()),
     alertHours: resolveAwaitingPaymentAlertHours(),
@@ -698,50 +759,7 @@ export async function reconcilePaidDunningCases(
 
   await applyRecordedPaymentFailures(container, alertInput, result)
   await settleStaleRetries(container, alertInput, result)
-
-  const cases = (await dunningModule.listDunningCases(
-    { status: IDLE_DUNNING_CASE_STATUSES } as never,
-    { take: BATCH_SIZE, order: { updated_at: "ASC" } }
-  )) as DunningCaseRecord[]
-
-  result.scanned = cases.length
-
-  for (const dunningCase of cases) {
-    try {
-      const endedCancelled = await closeCaseOfCancelledSubscription(container, dunningCase)
-
-      if (endedCancelled !== null) {
-        result.ended_cancelled += endedCancelled ? 1 : 0
-
-        continue
-      }
-
-      if (!dunningCase.renewal_order_id) {
-        continue
-      }
-
-      const { pending } = await loadOrderAmounts(
-        container,
-        dunningCase.renewal_order_id
-      )
-
-      if (pending > 0) {
-        result.unpaid += 1
-
-        continue
-      }
-
-      await recoverDunningFromCapturedPaymentWorkflow(container).run({
-        input: { dunning_case_id: dunningCase.id, payment_id: null },
-      })
-
-      result.recovered += 1
-    } catch (error) {
-      result.failed += 1
-      reportCaseFailure(container, dunningCase, error)
-    }
-  }
-
+  await recoverPaidIdleCases(container, result)
   await alertOverdueAwaitingCases(container, alertInput, result)
   await reconcileAttemptsOfClosedCases(container, alertInput, result)
 

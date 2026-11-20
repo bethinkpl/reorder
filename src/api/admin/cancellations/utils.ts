@@ -6,7 +6,7 @@ import {
   listAdminCancellationCases,
   type ListAdminCancellationCasesInput,
 } from "../../../modules/cancellation/utils/admin-query"
-import { isLockAcquisitionFailure } from "../../../modules/subscription/utils/errors"
+import { isLockBusyError } from "../../../common/utils/lock-busy-error"
 
 export function normalizeAdminCancellationsListQuery(
   query: GetAdminCancellationsSchemaType
@@ -97,7 +97,7 @@ function getNestedMessage(value: unknown): string | null {
 }
 
 export function mapCancellationAdminRouteError(error: unknown) {
-  if (isLockAcquisitionFailure(error)) {
+  if (isLockBusyError(error)) {
     return {
       status: 409,
       type: MedusaError.Types.CONFLICT,

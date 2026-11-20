@@ -5,19 +5,6 @@ import { Modules } from "@medusajs/framework/utils"
 
 const RETRY_INTERVAL_MS = 300
 
-const LOCK_WAIT_TIMEOUT_MESSAGES = [
-  /^Timed-out acquiring lock\.$/,
-  /^Failed to acquire lock for key ".+"$/,
-  /^".+" is already locked\.$/,
-]
-
-export function isLockWaitTimeout(error: unknown): boolean {
-  return (
-    error instanceof Error &&
-    LOCK_WAIT_TIMEOUT_MESSAGES.some((pattern) => pattern.test(error.message))
-  )
-}
-
 /**
  * In Medusa 2.12 `locking.execute` also uses its wait (`timeout`) as the lock's lifetime, so a short
  * wait lets the lock lapse mid-job; newer versions (2.22) give `execute` its own renewed `expire`.

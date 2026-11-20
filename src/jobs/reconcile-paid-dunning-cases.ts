@@ -1,5 +1,6 @@
 import { MedusaContainer } from "@medusajs/framework/types"
 import { Modules } from "@medusajs/framework/utils"
+import { isLockBusyError } from "../common/utils/lock-busy-error"
 import { DUNNING_MODULE } from "../modules/dunning"
 import type DunningModuleService from "../modules/dunning/service"
 import {
@@ -64,12 +65,6 @@ export type ReconcilePaidDunningCasesResult = {
 
 function getErrorMessage(error: unknown) {
   return error instanceof Error ? error.message : String(error)
-}
-
-function isLockTimeout(message: string) {
-  const lowered = message.toLowerCase()
-
-  return lowered.includes("timed-out acquiring lock") || lowered.includes("timeout")
 }
 
 async function findDueOverdueAlert(
@@ -158,7 +153,7 @@ async function raiseOverdueAlertOnce(
       { timeout: ALERT_LOCK_TIMEOUT_SECONDS }
     )
   } catch (error) {
-    if (isLockTimeout(getErrorMessage(error))) {
+    if (isLockBusyError(error)) {
       return false
     }
 
@@ -345,7 +340,7 @@ async function reconcileAttemptsOfClosedCases(
           result.stale_attempts_closed += 1
         }
       } catch (error) {
-        if (isLockTimeout(getErrorMessage(error))) {
+        if (isLockBusyError(error)) {
           continue
         }
 
@@ -453,7 +448,7 @@ export default async function reconcilePaidDunningCasesJob(
   } catch (error) {
     const message = getErrorMessage(error)
 
-    if (isLockTimeout(message)) {
+    if (isLockBusyError(error)) {
       logger.warn(`[${JOB_NAME}] did not complete: ${message}`)
     } else {
       logger.error(`[${JOB_NAME}] did not complete: ${message}`)

@@ -7,7 +7,7 @@ import {
   type ListAdminDunningCasesInput,
 } from "../../../modules/dunning/utils/admin-query"
 import { getDunningErrorMessage } from "../../../modules/dunning/utils/observability"
-import { isLockAcquisitionFailure } from "../../../modules/subscription/utils/errors"
+import { isLockBusyError } from "../../../common/utils/lock-busy-error"
 
 export function normalizeAdminDunningCasesListQuery(
   query: GetAdminDunningCasesSchemaType
@@ -63,7 +63,7 @@ export async function getAdminDunningCasesListResponse(
 
 export function mapDunningAdminRouteError(error: unknown) {
   // A workflow rethrows its step's error as a serialised plain object, not an Error.
-  const message = isLockAcquisitionFailure(error)
+  const message = isLockBusyError(error)
     ? "This dunning case is being updated by a retry or a payment right now; try again in a moment"
     : getDunningErrorMessage(error)
   const normalized = message.toLowerCase()

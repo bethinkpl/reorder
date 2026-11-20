@@ -13,7 +13,7 @@ import { findSubscriptionIdForPaymentCollection } from "../modules/subscription/
 import { failAwaitingDunningAttempt } from "../workflows/utils/fail-awaiting-dunning-attempt"
 import { failAwaitingRenewalCycle } from "../workflows/utils/fail-awaiting-renewal-cycle"
 import { readRenewalSessionMarkers } from "../workflows/utils/renewal-session-marker"
-import { isLockWaitTimeout } from "../workflows/utils/run-under-lock"
+import { isLockBusyError } from "../common/utils/lock-busy-error"
 
 type WebhookEventData = {
   provider: string
@@ -79,7 +79,7 @@ async function reportingFailure(
   } catch (error) {
     const logger = container.resolve("logger")
     const retryable = !isGone(error)
-    const alertable = retryable && !isLockWaitTimeout(error)
+    const alertable = retryable && !isLockBusyError(error)
     const line = JSON.stringify({
       domain: "subscriptions",
       ...context,

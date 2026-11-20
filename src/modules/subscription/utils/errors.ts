@@ -1,4 +1,5 @@
 import { MedusaError } from "@medusajs/framework/utils"
+import { isLockBusyError } from "../../../common/utils/lock-busy-error"
 
 export const subscriptionErrors = {
   notFound(entity: string, id: string) {
@@ -39,17 +40,5 @@ export const subscriptionErrors = {
   },
 }
 
-export function isLockAcquisitionFailure(error: unknown) {
-  const message =
-    typeof error === "object" &&
-    error !== null &&
-    "message" in error &&
-    typeof error.message === "string"
-      ? error.message.toLowerCase()
-      : ""
-
-  return (
-    message.includes("failed to acquire lock") ||
-    message.includes("acquiring lock")
-  )
-}
+/** The older name of `isLockBusyError`, kept for callers that still use it. */
+export const isLockAcquisitionFailure = isLockBusyError

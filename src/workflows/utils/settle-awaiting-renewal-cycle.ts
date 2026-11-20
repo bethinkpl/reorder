@@ -20,7 +20,8 @@ import {
   type RenewalSessionSignal,
   signalNamesAttempt,
 } from "./renewal-session-marker"
-import { isLockWaitTimeout, runUnderLock } from "./run-under-lock"
+import { isLockBusyError } from "../../common/utils/lock-busy-error"
+import { runUnderLock } from "./run-under-lock"
 import {
   readStoredSettlementInputs,
   settleRenewalCycleSucceeded,
@@ -251,7 +252,7 @@ export async function settleAwaitingRenewalCycle(
       { wait_seconds: 0, hold_seconds: PROCESSING_LOCK_HOLD_SECONDS }
     )
   } catch (error) {
-    if (!locked && isLockWaitTimeout(error)) {
+    if (!locked && isLockBusyError(error)) {
       return "not_awaiting"
     }
 

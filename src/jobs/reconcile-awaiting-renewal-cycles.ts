@@ -29,7 +29,7 @@ import {
   findCapturedPaymentId,
   NO_PAYMENT_SIGNAL_ERROR_CODE,
 } from "../workflows/utils/late-payment-capture"
-import { isLockWaitTimeout } from "../workflows/utils/run-under-lock"
+import { isLockBusyError } from "../common/utils/lock-busy-error"
 import {
   settleAwaitingRenewalCycle,
   type SettleAwaitingRenewalCycleOutcome,
@@ -155,7 +155,7 @@ async function raiseOverdueAlertOnce(
       { timeout: ALERT_LOCK_TIMEOUT_SECONDS }
     )
   } catch (error) {
-    if (isLockWaitTimeout(error)) {
+    if (isLockBusyError(error)) {
       return false
     }
 
@@ -193,7 +193,7 @@ async function underRenewalLock<T>(
         timeout: RENEWAL_LOCK_TIMEOUT_SECONDS,
       })
   } catch (error) {
-    if (isLockWaitTimeout(error)) {
+    if (isLockBusyError(error)) {
       return whenBusy
     }
 
@@ -526,7 +526,7 @@ export default async function reconcileAwaitingRenewalCyclesJob(
   } catch (error) {
     const message = getErrorMessage(error)
 
-    if (isLockWaitTimeout(error)) {
+    if (isLockBusyError(error)) {
       logger.warn(`[${JOB_NAME}] did not complete: ${message}`)
     } else {
       logger.error(`[${JOB_NAME}] did not complete: ${message}`)

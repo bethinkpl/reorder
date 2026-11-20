@@ -3,7 +3,7 @@ import type {
   MedusaResponse,
 } from "@medusajs/framework/http"
 import { MedusaError } from "@medusajs/framework/utils"
-import { isLockAcquisitionFailure } from "../../../../../modules/subscription/utils/errors"
+import { isLockBusyError } from "../../../../../common/utils/lock-busy-error"
 import type { PostAdminCancelSubscriptionSchemaType } from "../../validators"
 import { getAdminSubscriptionDetailResponse } from "../../utils"
 import { cancelSubscriptionWorkflow } from "../../../../../workflows"
@@ -13,7 +13,7 @@ import { cancelSubscriptionWorkflow } from "../../../../../workflows"
  * answered here. A workflow rethrows its step's error as a serialised plain object.
  */
 function readConflictMessage(error: unknown, subscriptionId: string) {
-  if (isLockAcquisitionFailure(error)) {
+  if (isLockBusyError(error)) {
     return `Subscription '${subscriptionId}' is being updated by a renewal or a payment right now; try again in a moment`
   }
 

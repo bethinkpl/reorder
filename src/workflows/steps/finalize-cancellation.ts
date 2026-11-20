@@ -323,9 +323,11 @@ export const finalizeCancellationStep = createStep(
       ),
     })
 
+    let updatedCase: CancellationCaseRecord
+
     // A step that throws is not compensated, so it undoes its own first write.
     try {
-      await cancellationModule.updateCancellationCases({
+      updatedCase = (await cancellationModule.updateCancellationCases({
         id: cancellationCase.id,
         status: CancellationCaseStatus.CANCELED,
         reason,
@@ -343,16 +345,12 @@ export const finalizeCancellationStep = createStep(
           cancelEffectiveAt,
           finalizedAt
         ),
-      } as any)
+      } as any)) as CancellationCaseRecord
     } catch (error) {
       await restoreCancelledSubscription(container, subscription)
 
       throw error
     }
-
-    const updatedCase = (await cancellationModule.retrieveCancellationCase(
-      cancellationCase.id
-    )) as CancellationCaseRecord
 
     return new StepResponse<
       FinalizeCancellationStepOutput,

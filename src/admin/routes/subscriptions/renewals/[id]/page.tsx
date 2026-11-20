@@ -42,6 +42,7 @@ import {
   RenewalAttemptAdminStatus,
   RenewalCycleAdminDetail,
   RenewalCycleAdminDetailResponse,
+  RenewalAwaitingPaymentAdminResolution,
   RenewalCycleAdminStatus,
   ResolveAwaitingRenewalPaymentAdminResponse,
 } from "../../../../types/renewal"
@@ -203,7 +204,7 @@ const RenewalDetailPage = () => {
       renewal?.subscription.subscription_id
     )
     toast.success(
-      response.resolution === "settled"
+      response.resolution === RenewalAwaitingPaymentAdminResolution.SETTLED
         ? "Payment resolved: the renewal is settled"
         : "Payment resolved as failed: dunning has started"
     )

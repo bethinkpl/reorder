@@ -37,6 +37,8 @@ import {
   CancellationCaseAdminStatus,
   CancellationFinalOutcomeAdmin,
 } from "../../../../types/cancellation"
+import { DunningCaseAdminStatus } from "../../../../types/dunning"
+import { RenewalCycleAdminStatus } from "../../../../types/renewal"
 import type {
   ApplyRetentionOfferAdminRequest,
   CancellationAdminOfferEventRecord,
@@ -1618,19 +1620,19 @@ function formatDunningStatus(
   status: NonNullable<CancellationCaseAdminDetail["dunning"]>["status"]
 ) {
   switch (status) {
-    case "open":
+    case DunningCaseAdminStatus.OPEN:
       return "Open"
-    case "retry_scheduled":
+    case DunningCaseAdminStatus.RETRY_SCHEDULED:
       return "Retry scheduled"
-    case "retrying":
+    case DunningCaseAdminStatus.RETRYING:
       return "Retrying"
-    case "awaiting_payment":
+    case DunningCaseAdminStatus.AWAITING_PAYMENT:
       return "Awaiting payment"
-    case "awaiting_manual_resolution":
+    case DunningCaseAdminStatus.AWAITING_MANUAL_RESOLUTION:
       return "Awaiting manual resolution"
-    case "recovered":
+    case DunningCaseAdminStatus.RECOVERED:
       return "Recovered"
-    case "unrecovered":
+    case DunningCaseAdminStatus.UNRECOVERED:
       return "Unrecovered"
   }
 }
@@ -1639,15 +1641,15 @@ function formatRenewalStatus(
   status: NonNullable<CancellationCaseAdminDetail["renewal"]>["status"]
 ) {
   switch (status) {
-    case "scheduled":
+    case RenewalCycleAdminStatus.SCHEDULED:
       return "Scheduled"
-    case "processing":
+    case RenewalCycleAdminStatus.PROCESSING:
       return "Processing"
-    case "succeeded":
+    case RenewalCycleAdminStatus.SUCCEEDED:
       return "Succeeded"
-    case "failed":
+    case RenewalCycleAdminStatus.FAILED:
       return "Failed"
-    case "awaiting_payment":
+    case RenewalCycleAdminStatus.AWAITING_PAYMENT:
       return "Awaiting payment"
   }
 }

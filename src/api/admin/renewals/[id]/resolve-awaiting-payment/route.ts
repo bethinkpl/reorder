@@ -4,6 +4,7 @@ import type {
 } from "@medusajs/framework/http"
 import type { MedusaContainer } from "@medusajs/framework/types"
 import { Modules } from "@medusajs/framework/utils"
+import { RenewalAwaitingPaymentAdminResolution } from "../../../../../admin/types/renewal"
 import { RENEWAL_MODULE } from "../../../../../modules/renewal"
 import type RenewalModuleService from "../../../../../modules/renewal/service"
 import { CHARGE_IN_FLIGHT_RENEWAL_CYCLE_STATUSES } from "../../../../../modules/renewal/types"
@@ -27,8 +28,6 @@ import { renewalSubscriptionLockKey } from "../../../../../modules/renewal/utils
 
 const RENEWAL_LOCK_TIMEOUT_SECONDS = 30
 const UNPAID_ERROR_CODE = "resolved_unpaid"
-
-type AwaitingPaymentResolution = "settled" | "failed"
 
 type LatestRenewalAttempt = Awaited<
   ReturnType<RenewalModuleService["listRenewalAttempts"]>
@@ -62,7 +61,7 @@ async function failUnpaidUnderLock(
   container: MedusaContainer,
   input: ResolveAwaitingPaymentInput,
   attempt: LatestRenewalAttempt | undefined
-): Promise<AwaitingPaymentResolution> {
+): Promise<RenewalAwaitingPaymentAdminResolution> {
   if (!attempt) {
     throw noAttemptToFail(input.renewal_cycle_id)
   }
@@ -89,13 +88,13 @@ async function failUnpaidUnderLock(
     throw noAttemptToFail(input.renewal_cycle_id)
   }
 
-  return "failed"
+  return RenewalAwaitingPaymentAdminResolution.FAILED
 }
 
 async function resolveUnderLock(
   container: MedusaContainer,
   input: ResolveAwaitingPaymentInput
-): Promise<AwaitingPaymentResolution> {
+): Promise<RenewalAwaitingPaymentAdminResolution> {
   const [latest] = await container
     .resolve<RenewalModuleService>(RENEWAL_MODULE)
     .listRenewalAttempts(
@@ -118,7 +117,7 @@ async function resolveUnderLock(
   switch (outcome) {
     case "settled":
     case "closed_superseded":
-      return "settled"
+      return RenewalAwaitingPaymentAdminResolution.SETTLED
     case "order_unpaid":
       return await failUnpaidUnderLock(container, input, latest)
     case "not_awaiting":
@@ -133,7 +132,7 @@ async function resolveUnderLock(
 async function resolveAwaitingPayment(
   container: MedusaContainer,
   input: ResolveAwaitingPaymentInput
-): Promise<AwaitingPaymentResolution> {
+): Promise<RenewalAwaitingPaymentAdminResolution> {
   const renewalModule = container.resolve<RenewalModuleService>(RENEWAL_MODULE)
   const cycle = await renewalModule.retrieveRenewalCycle(input.renewal_cycle_id)
 
@@ -151,7 +150,7 @@ async function resolveAwaitingPayment(
 
   logRenewalEvent(container.resolve("logger"), "info", {
     event: "renewal.awaiting_payment_resolved",
-    outcome: resolution === "settled" ? "succeeded" : "failed",
+    outcome: resolution === RenewalAwaitingPaymentAdminResolution.SETTLED ? "succeeded" : "failed",
     correlation_id: createRenewalCorrelationId("renewal-admin-resolve"),
     renewal_cycle_id: cycle.id,
     subscription_id: cycle.subscription_id,
@@ -168,7 +167,7 @@ export const POST = async (
   req: AuthenticatedMedusaRequest<PostAdminResolveAwaitingRenewalPaymentSchemaType>,
   res: MedusaResponse
 ) => {
-  let resolution: AwaitingPaymentResolution
+  let resolution: RenewalAwaitingPaymentAdminResolution
 
   try {
     resolution = await resolveAwaitingPayment(req.scope, {

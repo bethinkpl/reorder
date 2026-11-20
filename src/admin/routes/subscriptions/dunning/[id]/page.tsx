@@ -40,6 +40,7 @@ import {
   DunningAttemptAdminStatus,
   DunningCaseAdminDetail,
   DunningCaseAdminDetailResponse,
+  DunningAwaitingPaymentAdminResolution,
   DunningCaseAdminStatus,
   DunningRetryBlockedReason,
   MarkRecoveredDunningAdminRequest,
@@ -49,6 +50,7 @@ import {
   ReverseChurnDunningAdminRequest,
   UpdateDunningRetryScheduleAdminRequest,
 } from "../../../../types/dunning"
+import { RenewalCycleAdminStatus } from "../../../../types/renewal"
 
 type ActionDrawerMode =
   | "mark_recovered"
@@ -1175,27 +1177,27 @@ function formatCaseStatus(status: DunningCaseAdminStatus) {
 
 function formatRetryBlockedReason(reason: DunningRetryBlockedReason) {
   switch (reason) {
-    case "no_active_case":
+    case DunningRetryBlockedReason.NO_ACTIVE_CASE:
       return "no active recovery case"
-    case "retry_in_progress":
+    case DunningRetryBlockedReason.RETRY_IN_PROGRESS:
       return "a retry is already running"
-    case "payment_in_progress":
+    case DunningRetryBlockedReason.PAYMENT_IN_PROGRESS:
       return "a payment is awaiting its result"
-    case "case_closed":
+    case DunningRetryBlockedReason.CASE_CLOSED:
       return "the case is closed"
-    case "subscription_not_retryable":
+    case DunningRetryBlockedReason.SUBSCRIPTION_NOT_RETRYABLE:
       return "the subscription is not chargeable"
-    case "no_payment_method":
+    case DunningRetryBlockedReason.NO_PAYMENT_METHOD:
       return "no saved payment method"
-    case "max_attempts_reached":
+    case DunningRetryBlockedReason.MAX_ATTEMPTS_REACHED:
       return "all attempts are used up"
-    case "missing_renewal_order":
+    case DunningRetryBlockedReason.MISSING_RENEWAL_ORDER:
       return "the case has no renewal order"
-    case "missing_retry_schedule":
+    case DunningRetryBlockedReason.MISSING_RETRY_SCHEDULE:
       return "the case has no retry schedule"
-    case "retry_not_due":
+    case DunningRetryBlockedReason.RETRY_NOT_DUE:
       return "the next retry is not due yet"
-    case "manual_resolution_required":
+    case DunningRetryBlockedReason.MANUAL_RESOLUTION_REQUIRED:
       return "the case needs manual resolution"
     default:
       reason satisfies never
@@ -1267,15 +1269,15 @@ function formatRenewalStatus(
   status: NonNullable<DunningCaseAdminDetail["renewal"]>["status"]
 ) {
   switch (status) {
-    case "scheduled":
+    case RenewalCycleAdminStatus.SCHEDULED:
       return "Scheduled"
-    case "processing":
+    case RenewalCycleAdminStatus.PROCESSING:
       return "Processing"
-    case "succeeded":
+    case RenewalCycleAdminStatus.SUCCEEDED:
       return "Succeeded"
-    case "failed":
+    case RenewalCycleAdminStatus.FAILED:
       return "Failed"
-    case "awaiting_payment":
+    case RenewalCycleAdminStatus.AWAITING_PAYMENT:
       return "Awaiting payment"
   }
 }
@@ -1306,7 +1308,7 @@ function describeAwaitingPaymentResolution(
 function describeResolvedPayment(
   response: ResolveAwaitingDunningPaymentAdminResponse
 ) {
-  if (response.resolution === "recovered") {
+  if (response.resolution === DunningAwaitingPaymentAdminResolution.RECOVERED) {
     return "Payment resolved: the case is recovered"
   }
 

@@ -20,7 +20,9 @@ import {
   RetentionOfferDecisionStatus,
 } from "../types"
 import { DunningCaseStatus } from "../../dunning/types"
+import { mapCaseStatus as mapDunningCaseStatus } from "../../dunning/utils/admin-query"
 import { RenewalCycleStatus } from "../../renewal/types"
+import { mapCycleStatus } from "../../renewal/utils/admin-query"
 import { cancellationErrors } from "./errors"
 
 export type ListAdminCancellationCasesInput = {
@@ -410,7 +412,7 @@ async function getActiveDunningSummaryMap(
 
     result.set(subscriptionId, {
       dunning_case_id: active.id,
-      status: active.status,
+      status: mapDunningCaseStatus(active.status),
       attempt_count: active.attempt_count,
       next_retry_at: active.next_retry_at,
       last_payment_error_message: active.last_payment_error_message,
@@ -464,7 +466,7 @@ async function getRenewalSummaryMap(
 
     result.set(subscriptionId, {
       renewal_cycle_id: selected.id,
-      status: selected.status,
+      status: mapCycleStatus(selected.status),
       scheduled_for: toIsoStringOrNull(selected.scheduled_for) ?? "",
       approval_status: selected.approval_status,
       generated_order_id: selected.generated_order_id,

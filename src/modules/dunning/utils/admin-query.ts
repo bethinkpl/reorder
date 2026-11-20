@@ -9,6 +9,7 @@ import {
   DunningCaseAdminDetail,
   DunningCaseAdminDetailResponse,
   DunningCaseAdminStatus,
+  DunningRetryBlockedReason,
 } from "../../../admin/types/dunning"
 import {
   DunningAttemptStatus,
@@ -16,12 +17,13 @@ import {
   type DunningRetrySchedule,
 } from "../types"
 import { RenewalCycleStatus } from "../../renewal/types"
+import { mapCycleStatus } from "../../renewal/utils/admin-query"
 import {
   awaitingPaymentLimitEndsAt,
   resolveAwaitingPaymentResolveMinHours,
 } from "../../renewal/utils/awaiting-payment-age"
 import { dunningErrors } from "./errors"
-import { resolveRetryEligibility } from "./retry-eligibility"
+import { resolveRetryEligibility, RetryBlockedReason } from "./retry-eligibility"
 import type {
   SubscriptionPaymentContext,
   SubscriptionStatus,
@@ -173,6 +175,20 @@ const inMemorySortableFields = new Set([
   "order_display_id",
 ])
 
+const ADMIN_RETRY_BLOCKED_REASONS: Record<RetryBlockedReason, DunningRetryBlockedReason> = {
+  [RetryBlockedReason.NO_ACTIVE_CASE]: DunningRetryBlockedReason.NO_ACTIVE_CASE,
+  [RetryBlockedReason.RETRY_IN_PROGRESS]: DunningRetryBlockedReason.RETRY_IN_PROGRESS,
+  [RetryBlockedReason.PAYMENT_IN_PROGRESS]: DunningRetryBlockedReason.PAYMENT_IN_PROGRESS,
+  [RetryBlockedReason.CASE_CLOSED]: DunningRetryBlockedReason.CASE_CLOSED,
+  [RetryBlockedReason.SUBSCRIPTION_NOT_RETRYABLE]: DunningRetryBlockedReason.SUBSCRIPTION_NOT_RETRYABLE,
+  [RetryBlockedReason.NO_PAYMENT_METHOD]: DunningRetryBlockedReason.NO_PAYMENT_METHOD,
+  [RetryBlockedReason.MAX_ATTEMPTS_REACHED]: DunningRetryBlockedReason.MAX_ATTEMPTS_REACHED,
+  [RetryBlockedReason.MISSING_RENEWAL_ORDER]: DunningRetryBlockedReason.MISSING_RENEWAL_ORDER,
+  [RetryBlockedReason.MISSING_RETRY_SCHEDULE]: DunningRetryBlockedReason.MISSING_RETRY_SCHEDULE,
+  [RetryBlockedReason.RETRY_NOT_DUE]: DunningRetryBlockedReason.RETRY_NOT_DUE,
+  [RetryBlockedReason.MANUAL_RESOLUTION_REQUIRED]: DunningRetryBlockedReason.MANUAL_RESOLUTION_REQUIRED,
+}
+
 export function mapCaseStatus(status: DunningCaseRecord["status"]) {
   switch (status) {
     case DunningCaseStatus.OPEN:
@@ -236,7 +252,7 @@ function mapListItem(
     renewal: renewal
       ? {
           renewal_cycle_id: renewal.id,
-          status: renewal.status,
+          status: mapCycleStatus(renewal.status),
           scheduled_for: renewal.scheduled_for,
           generated_order_id: renewal.generated_order_id,
         }
@@ -828,7 +844,7 @@ export async function getAdminDunningDetail(
     renewal: renewal
       ? {
           renewal_cycle_id: renewal.id,
-          status: renewal.status,
+          status: mapCycleStatus(renewal.status),
           scheduled_for: renewal.scheduled_for,
           generated_order_id: renewal.generated_order_id,
         }
@@ -841,7 +857,9 @@ export async function getAdminDunningDetail(
         }
       : null,
     retry_eligible: retryEligibility.eligible,
-    retry_blocked_reason: retryEligibility.blocked_reason,
+    retry_blocked_reason: retryEligibility.blocked_reason
+      ? ADMIN_RETRY_BLOCKED_REASONS[retryEligibility.blocked_reason]
+      : null,
     attempt_count: dunningCase.attempt_count,
     max_attempts: dunningCase.max_attempts,
     retry_schedule: dunningCase.retry_schedule,

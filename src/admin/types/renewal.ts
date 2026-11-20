@@ -122,6 +122,11 @@ export type ResolveAwaitingRenewalPaymentAdminRequest = {
   reason?: string
 }
 
+export enum RenewalAwaitingPaymentAdminResolution {
+  SETTLED = "settled",
+  FAILED = "failed",
+}
+
 export type ResolveAwaitingRenewalPaymentAdminResponse = RenewalCycleAdminDetailResponse & {
-  resolution: "settled" | "failed"
+  resolution: RenewalAwaitingPaymentAdminResolution
 }

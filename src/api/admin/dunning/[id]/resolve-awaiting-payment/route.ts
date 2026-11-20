@@ -4,6 +4,7 @@ import type {
 } from "@medusajs/framework/http"
 import type { MedusaContainer } from "@medusajs/framework/types"
 import { Modules } from "@medusajs/framework/utils"
+import { DunningAwaitingPaymentAdminResolution } from "../../../../../admin/types/dunning"
 import { DUNNING_MODULE } from "../../../../../modules/dunning"
 import { DunningEvents } from "../../../../../modules/dunning/events"
 import type DunningModuleService from "../../../../../modules/dunning/service"
@@ -36,8 +37,6 @@ import { dunningCaseLockKey } from "../../../../../modules/dunning/utils/lock-ke
 
 const DUNNING_LOCK_TIMEOUT_SECONDS = 30
 const UNPAID_ERROR_CODE = "resolved_unpaid"
-
-type AwaitingPaymentResolution = "recovered" | "failed"
 
 type ResolveAwaitingPaymentInput = {
   dunning_case_id: string
@@ -76,7 +75,7 @@ async function isRenewalOrderPaid(
 async function recoverPaidUnderLock(
   container: MedusaContainer,
   dunningCaseId: string
-): Promise<AwaitingPaymentResolution> {
+): Promise<DunningAwaitingPaymentAdminResolution> {
   const { output } = await recoverDunningFromCapturedPayment(container, {
     dunning_case_id: dunningCaseId,
     payment_id: null,
@@ -96,13 +95,13 @@ async function recoverPaidUnderLock(
     },
   })
 
-  return "recovered"
+  return DunningAwaitingPaymentAdminResolution.RECOVERED
 }
 
 async function failUnpaidUnderLock(
   container: MedusaContainer,
   input: ResolveAwaitingPaymentInput
-): Promise<AwaitingPaymentResolution> {
+): Promise<DunningAwaitingPaymentAdminResolution> {
   const [latest] = await container
     .resolve<DunningModuleService>(DUNNING_MODULE)
     .listDunningAttempts(
@@ -137,13 +136,13 @@ async function failUnpaidUnderLock(
 
   await emitDunningAttemptOutcomeEvents(container, output)
 
-  return "failed"
+  return DunningAwaitingPaymentAdminResolution.FAILED
 }
 
 async function resolveUnderLock(
   container: MedusaContainer,
   input: ResolveAwaitingPaymentInput
-): Promise<AwaitingPaymentResolution> {
+): Promise<DunningAwaitingPaymentAdminResolution> {
   const dunningCase = await container
     .resolve<DunningModuleService>(DUNNING_MODULE)
     .retrieveDunningCase(input.dunning_case_id)
@@ -162,7 +161,7 @@ async function resolveUnderLock(
 async function resolveAwaitingPayment(
   container: MedusaContainer,
   input: ResolveAwaitingPaymentInput
-): Promise<AwaitingPaymentResolution> {
+): Promise<DunningAwaitingPaymentAdminResolution> {
   const dunningModule = container.resolve<DunningModuleService>(DUNNING_MODULE)
   const [dunningCase] = await dunningModule.listDunningCases({
     id: input.dunning_case_id,
@@ -186,7 +185,7 @@ async function resolveAwaitingPayment(
 
   logDunningEvent(container.resolve("logger"), "info", {
     event: "dunning.awaiting_payment_resolved",
-    outcome: resolution === "recovered" ? "succeeded" : "failed",
+    outcome: resolution === DunningAwaitingPaymentAdminResolution.RECOVERED ? "succeeded" : "failed",
     correlation_id: createDunningCorrelationId("dunning-admin-resolve"),
     dunning_case_id: dunningCase.id,
     subscription_id: dunningCase.subscription_id,
@@ -202,7 +201,7 @@ export const POST = async (
   req: AuthenticatedMedusaRequest<PostAdminResolveAwaitingDunningPaymentSchemaType>,
   res: MedusaResponse
 ) => {
-  let resolution: AwaitingPaymentResolution
+  let resolution: DunningAwaitingPaymentAdminResolution
 
   try {
     resolution = await resolveAwaitingPayment(req.scope, {

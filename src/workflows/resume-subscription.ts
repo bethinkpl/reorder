@@ -19,12 +19,13 @@ import {
 import { rebuildAnalyticsDailySnapshotsWorkflow } from "./rebuild-analytics-daily-snapshots"
 import { toISOStringOrNull } from "./utils/date-output"
 import { buildAnalyticsIncrementalRebuildInput } from "./utils/analytics-incremental"
+import { renewalSubscriptionLockKey } from "../modules/renewal/utils/lock-key"
 
 export const resumeSubscriptionWorkflow = createWorkflow(
   "resume-subscription",
   function (input: ResumeSubscriptionStepInput) {
     const renewalLockKey = transform({ input }, function ({ input }) {
-      return `renewal:subscription:${input.id}`
+      return renewalSubscriptionLockKey(input.id)
     })
 
     acquireLockStep({

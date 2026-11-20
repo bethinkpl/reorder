@@ -37,6 +37,7 @@ import {
   NO_PAYMENT_SIGNAL_ERROR_CODE,
 } from "../workflows/utils/late-payment-capture"
 import { tryUnderLock } from "../workflows/utils/run-under-lock"
+import { dunningCaseLockKey } from "../modules/dunning/utils/lock-key"
 
 const JOB_NAME = "reconcile-paid-dunning-cases"
 const JOB_LOCK_KEY = "jobs:reconcile-paid-dunning-cases"
@@ -127,7 +128,7 @@ async function raiseOverdueAlertOnce(
 
   try {
     return await container.resolve(Modules.LOCKING).execute(
-      `dunning:${caseId}`,
+      dunningCaseLockKey(caseId),
       async () => {
         const due = await findDueOverdueAlert(dunningModule, caseId, input)
 
@@ -287,7 +288,7 @@ async function underCaseLock<T>(
   caseId: string,
   job: () => Promise<T | null>
 ): Promise<T | null> {
-  const run = await tryUnderLock(container, `dunning:${caseId}`, job, {
+  const run = await tryUnderLock(container, dunningCaseLockKey(caseId), job, {
     wait_seconds: ALERT_LOCK_TIMEOUT_SECONDS,
     hold_seconds: CASE_LOCK_HOLD_SECONDS,
   })
@@ -612,7 +613,7 @@ async function reconcileAttemptsOfClosedCases(
         }
 
         const closed = await container.resolve(Modules.LOCKING).execute(
-          `dunning:${dunningCase.id}`,
+          dunningCaseLockKey(dunningCase.id),
           () => failStaleAttemptUnderLock(container, attempt.id, { ...input, minHours }),
           { timeout: ALERT_LOCK_TIMEOUT_SECONDS }
         )

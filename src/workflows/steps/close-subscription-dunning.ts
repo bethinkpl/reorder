@@ -6,6 +6,7 @@ import { DUNNING_MODULE } from "../../modules/dunning"
 import type DunningModuleService from "../../modules/dunning/service"
 import { DunningCaseStatus } from "../../modules/dunning/types"
 import { dunningErrors } from "../../modules/dunning/utils/errors"
+import { dunningCaseLockKey } from "../../modules/dunning/utils/lock-key"
 
 export const SUBSCRIPTION_CANCELLED_RECOVERY_REASON =
   "subscription_cancelled_by_customer"
@@ -82,7 +83,7 @@ export const closeSubscriptionDunningStep = createStep(
 
     for (const candidateCase of candidateCases) {
       await locking.execute(
-        `dunning:${candidateCase.id}`,
+        dunningCaseLockKey(candidateCase.id),
         async () => {
           const currentCase = (await dunningModule.retrieveDunningCase(
             candidateCase.id

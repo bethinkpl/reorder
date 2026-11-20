@@ -18,6 +18,7 @@ import {
   type ApplyRetentionOfferStepInput,
 } from "./steps/apply-retention-offer"
 import { resolveCancellationCaseSubscriptionStep } from "./steps/resolve-cancellation-case-subscription"
+import { renewalSubscriptionLockKey } from "../modules/renewal/utils/lock-key"
 
 export const applyRetentionOfferWorkflow = createWorkflow(
   "apply-retention-offer",
@@ -26,7 +27,7 @@ export const applyRetentionOfferWorkflow = createWorkflow(
       cancellation_case_id: input.cancellation_case_id,
     })
     const renewalLockKey = transform({ scope }, function ({ scope }) {
-      return `renewal:subscription:${scope.subscription_id}`
+      return renewalSubscriptionLockKey(scope.subscription_id)
     })
 
     acquireLockStep({

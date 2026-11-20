@@ -23,6 +23,7 @@ import {
   DEFAULT_AWAITING_PAYMENT_RESOLVE_MIN_HOURS,
 } from "../../src/modules/renewal/utils/awaiting-payment-age"
 import { renewalErrors } from "../../src/modules/renewal/utils/errors"
+import { renewalSubscriptionLockKey } from "../../src/modules/renewal/utils/lock-key"
 import {
   LatePaymentCapturedReason,
   SubscriptionEvents,
@@ -510,7 +511,7 @@ medusaIntegrationTestRunner({
           )
 
           expect(refusal).toMatchObject({
-            message: `Failed to acquire lock for key "renewal:subscription:${input.id}"`,
+            message: `Failed to acquire lock for key "${renewalSubscriptionLockKey(input.id)}"`,
           })
           expect(await readRenewalState(container, seeded)).toEqual(before)
         }

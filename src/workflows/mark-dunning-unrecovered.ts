@@ -11,12 +11,13 @@ import {
   markDunningUnrecoveredStep,
   type MarkDunningUnrecoveredStepInput,
 } from "./steps/mark-dunning-unrecovered"
+import { dunningCaseLockKey } from "../modules/dunning/utils/lock-key"
 
 export const markDunningUnrecoveredWorkflow = createWorkflow(
   "mark-dunning-unrecovered",
   function (input: MarkDunningUnrecoveredStepInput) {
     const lockKey = transform({ input }, function ({ input }) {
-      return `dunning:${input.dunning_case_id}`
+      return dunningCaseLockKey(input.dunning_case_id)
     })
 
     acquireLockStep({

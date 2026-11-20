@@ -26,6 +26,7 @@ import {
   settleRenewalCycleSucceeded,
   type StoredRenewalSettlementInputs,
 } from "./settle-renewal-cycle-succeeded"
+import { renewalSubscriptionLockKey } from "../../modules/renewal/utils/lock-key"
 
 const RENEWAL_LOCK_TIMEOUT_SECONDS = 30
 const PROCESSING_LOCK_HOLD_SECONDS = 120
@@ -223,7 +224,7 @@ export async function settleAwaitingRenewalCycle(
 ): Promise<SettleAwaitingRenewalCycleOutcome> {
   const renewalModule = container.resolve<RenewalModuleService>(RENEWAL_MODULE)
   const cycle = await renewalModule.retrieveRenewalCycle(renewalCycleId)
-  const lockKey = `renewal:subscription:${cycle.subscription_id}`
+  const lockKey = renewalSubscriptionLockKey(cycle.subscription_id)
   const settle = () =>
     settleAwaitingRenewalCycleUnderLock(container, renewalCycleId, options)
 

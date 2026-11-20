@@ -66,4 +66,19 @@ export default defineConfig([
     },
     files: ["src/**/migrations/*.ts"],
   },
+  {
+    files: ["src/**/*.{ts,tsx}"],
+    ignores: [
+      "src/**/__tests__/**",
+      "src/**/migrations/**",
+      "src/modules/renewal/utils/lock-key.ts",
+      "src/modules/dunning/utils/lock-key.ts",
+    ],
+    rules: {
+      "no-restricted-syntax": ["error", {
+        selector: "TemplateLiteral[quasis.0.value.raw=/^(renewal:subscription:|dunning:)/]",
+        message: "Build lock keys with renewalSubscriptionLockKey() or dunningCaseLockKey().",
+      }],
+    },
+  },
 ])

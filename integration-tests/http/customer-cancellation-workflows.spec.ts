@@ -17,6 +17,7 @@ import {
 import { DUNNING_MODULE } from "../../src/modules/dunning"
 import type DunningModuleService from "../../src/modules/dunning/service"
 import { DunningCaseStatus } from "../../src/modules/dunning/types"
+import { dunningCaseLockKey } from "../../src/modules/dunning/utils/lock-key"
 import { RENEWAL_MODULE } from "../../src/modules/renewal"
 import type RenewalModuleService from "../../src/modules/renewal/service"
 import { RenewalCycleStatus } from "../../src/modules/renewal/types"
@@ -365,7 +366,7 @@ medusaIntegrationTestRunner({
           status: DunningCaseStatus.RETRY_SCHEDULED,
         })
 
-        await locking.acquire(`dunning:${dunningCase.id}`, { expire: 30 })
+        await locking.acquire(dunningCaseLockKey(dunningCase.id), { expire: 30 })
 
         const cancellation = cancelSubscriptionByCustomerWorkflow(
           container
@@ -395,7 +396,7 @@ medusaIntegrationTestRunner({
           id: dunningCase.id,
           status: DunningCaseStatus.RETRYING,
         } as any)
-        await locking.release(`dunning:${dunningCase.id}`)
+        await locking.release(dunningCaseLockKey(dunningCase.id))
 
         await expect(settled).resolves.toEqual("rejected")
         await expect(cancellation).rejects.toMatchObject({

@@ -13,6 +13,7 @@ import {
 } from "./steps/finalize-cancellation"
 import { resolveCancellationCaseSubscriptionStep } from "./steps/resolve-cancellation-case-subscription"
 import { buildCancellationFinalizedLogEvent } from "./steps/shared-cancellation-log"
+import { renewalSubscriptionLockKey } from "../modules/renewal/utils/lock-key"
 
 export const finalizeCancellationWorkflow = createWorkflow(
   "finalize-cancellation",
@@ -21,7 +22,7 @@ export const finalizeCancellationWorkflow = createWorkflow(
       cancellation_case_id: input.cancellation_case_id,
     })
     const renewalLockKey = transform({ scope }, function ({ scope }) {
-      return `renewal:subscription:${scope.subscription_id}`
+      return renewalSubscriptionLockKey(scope.subscription_id)
     })
 
     acquireLockStep({

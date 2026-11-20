@@ -20,12 +20,14 @@ import {
   DunningAttemptStatus,
   DunningCaseStatus,
 } from "../../src/modules/dunning/types"
+import { dunningCaseLockKey } from "../../src/modules/dunning/utils/lock-key"
 import { RENEWAL_MODULE } from "../../src/modules/renewal"
 import type RenewalModuleService from "../../src/modules/renewal/service"
 import {
   RenewalAttemptStatus,
   RenewalCycleStatus,
 } from "../../src/modules/renewal/types"
+import { renewalSubscriptionLockKey } from "../../src/modules/renewal/utils/lock-key"
 import {
   AWAITING_PAYMENT_OVERDUE_EVENT,
   DEFAULT_AWAITING_PAYMENT_ALERT_HOURS,
@@ -55,7 +57,6 @@ import {
   failRenewalLockReleaseOnce,
   oneMonthAfter,
   readRenewalState,
-  renewalLockKey,
   seedAwaitingRenewal,
   whileRenewalLockHeld,
 } from "../helpers/awaiting-renewal-fixtures"
@@ -111,8 +112,6 @@ const DUE_FOR_RETRY = {
   attempt_count: 0,
   attempts: [],
 }
-
-const dunningLockKey = (dunningCaseId: string) => `dunning:${dunningCaseId}`
 
 function interceptOnce<TArgs extends unknown[], TResult>(
   original: (...args: TArgs) => Promise<TResult>,
@@ -345,7 +344,7 @@ medusaIntegrationTestRunner({
     describe("a failure reported before the run has parked the charge", () => {
       it("fails the renewal cycle and opens dunning once the run releases its lock", async () => {
         const seeded = await seedDueCharge("SUB-EARLY-RENEWAL-FAILURE")
-        const delivery = failBeforeTheRunParks(renewalLockKey(seeded.subscription.id), "declined")
+        const delivery = failBeforeTheRunParks(renewalSubscriptionLockKey(seeded.subscription.id), "declined")
 
         await runRenewal(getContainer(), seeded.cycle.id)
         await delivery.done
@@ -360,7 +359,7 @@ medusaIntegrationTestRunner({
         jest
           .spyOn(paymentModule(), "authorizePaymentSession")
           .mockImplementation(async (sessionId) => {
-            await locking().release(renewalLockKey(seeded.subscription.id))
+            await locking().release(renewalSubscriptionLockKey(seeded.subscription.id))
             await deliverFailure(container, sessionId, { reason: "declined" })
 
             return null as never
@@ -384,7 +383,7 @@ medusaIntegrationTestRunner({
           DUE_FOR_RETRY
         )
         const sessions = routeRetrySessionsToFixture(container)
-        const delivery = failBeforeTheRunParks(dunningLockKey(dunningCase.id), "insufficient_funds")
+        const delivery = failBeforeTheRunParks(dunningCaseLockKey(dunningCase.id), "insufficient_funds")
 
         await runRetry(container, dunningCase.id)
         await delivery.done
@@ -738,13 +737,13 @@ medusaIntegrationTestRunner({
         const alerts = watchAlerts(container)
         const ownerId = "dunning-holder"
 
-        await locking().acquire(dunningLockKey(dunningCase.id), { ownerId, expire: 60 })
+        await locking().acquire(dunningCaseLockKey(dunningCase.id), { ownerId, expire: 60 })
 
         try {
           await deliverFailure(container, sessions[0].id, { reason: "insufficient_funds" })
           await deliverFailure(container, sessions[0].id, { reason: "insufficient_funds" })
         } finally {
-          await locking().release(dunningLockKey(dunningCase.id), { ownerId })
+          await locking().release(dunningCaseLockKey(dunningCase.id), { ownerId })
         }
 
         expect(alerts(dunningCase.id)).toHaveLength(0)
@@ -781,7 +780,7 @@ medusaIntegrationTestRunner({
         const container = getContainer()
         const seeded = await seedAwaitingRenewal(container, { reference, cycle_status: cycleStatus })
         const payment = await captureOnOrder(container, seeded.order.id, seeded.session.id)
-        const lockKey = renewalLockKey(seeded.subscription.id)
+        const lockKey = renewalSubscriptionLockKey(seeded.subscription.id)
 
         await locking().acquire(lockKey, { ownerId: reference, expire: 60 })
         releaseOnFirstRequest(container, lockKey, reference)
@@ -892,7 +891,7 @@ medusaIntegrationTestRunner({
         reference: "SUB-CANCELLED-WHILE-CAPTURED",
       })
       const payment = await captureOnOrder(container, seeded.order.id, seeded.session.id)
-      const queued = nthLockRequest(container, renewalLockKey(seeded.subscription.id), 2)
+      const queued = nthLockRequest(container, renewalSubscriptionLockKey(seeded.subscription.id), 2)
       const cancellation: { done: Promise<unknown> } = { done: Promise.resolve() }
       const update = interceptOnce(
         subscriptions.updateSubscriptions.bind(subscriptions),

@@ -39,6 +39,7 @@ import {
 } from "./renewal-session-marker"
 import { tryUnderLock } from "./run-under-lock"
 import { readStoredSettlementInputs } from "./settle-renewal-cycle-succeeded"
+import { renewalSubscriptionLockKey } from "../../modules/renewal/utils/lock-key"
 
 const RUN_LOCK_WAIT_SECONDS = 5
 const LOCK_HOLD_SECONDS = 120
@@ -148,7 +149,7 @@ export async function failAwaitingRenewalCycle(
 
   const run = await tryUnderLock(
     container,
-    `renewal:subscription:${cycle.subscription_id}`,
+    renewalSubscriptionLockKey(cycle.subscription_id),
     () => applyRenewalPaymentFailureUnderLock(container, input),
     { wait_seconds: RUN_LOCK_WAIT_SECONDS, hold_seconds: LOCK_HOLD_SECONDS }
   )

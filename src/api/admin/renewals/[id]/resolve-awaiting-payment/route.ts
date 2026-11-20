@@ -23,6 +23,7 @@ import {
   mapRenewalAdminRouteError,
 } from "../../utils"
 import type { PostAdminResolveAwaitingRenewalPaymentSchemaType } from "../../validators"
+import { renewalSubscriptionLockKey } from "../../../../../modules/renewal/utils/lock-key"
 
 const RENEWAL_LOCK_TIMEOUT_SECONDS = 30
 const UNPAID_ERROR_CODE = "resolved_unpaid"
@@ -148,7 +149,7 @@ async function resolveAwaitingPayment(
   const resolution = await container
     .resolve(Modules.LOCKING)
     .execute(
-      `renewal:subscription:${cycle.subscription_id}`,
+      renewalSubscriptionLockKey(cycle.subscription_id),
       () => resolveUnderLock(container, input),
       { timeout: RENEWAL_LOCK_TIMEOUT_SECONDS }
     )

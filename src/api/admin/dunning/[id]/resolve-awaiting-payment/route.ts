@@ -32,6 +32,7 @@ import {
   mapDunningAdminRouteError,
 } from "../../utils"
 import type { PostAdminResolveAwaitingDunningPaymentSchemaType } from "../../validators"
+import { dunningCaseLockKey } from "../../../../../modules/dunning/utils/lock-key"
 
 const DUNNING_LOCK_TIMEOUT_SECONDS = 30
 const UNPAID_ERROR_CODE = "resolved_unpaid"
@@ -178,7 +179,7 @@ async function resolveAwaitingPayment(
   const resolution = await container
     .resolve(Modules.LOCKING)
     .execute(
-      `dunning:${dunningCase.id}`,
+      dunningCaseLockKey(dunningCase.id),
       () => resolveUnderLock(container, input),
       { timeout: DUNNING_LOCK_TIMEOUT_SECONDS }
     )

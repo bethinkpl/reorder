@@ -20,6 +20,7 @@ import { RENEWAL_MODULE } from "../../src/modules/renewal"
 import type RenewalModuleService from "../../src/modules/renewal/service"
 import { RenewalAttemptStatus, RenewalCycleStatus } from "../../src/modules/renewal/types"
 import { renewalErrors } from "../../src/modules/renewal/utils/errors"
+import { renewalSubscriptionLockKey } from "../../src/modules/renewal/utils/lock-key"
 import { SUBSCRIPTION_MODULE } from "../../src/modules/subscription"
 import type SubscriptionModuleService from "../../src/modules/subscription/service"
 import { type SubscriptionSourceSnapshot, SubscriptionStatus } from "../../src/modules/subscription/types"
@@ -37,7 +38,6 @@ import {
   failRenewalLockReleaseOnce,
   oneMonthAfter,
   readRenewalState,
-  renewalLockKey,
   seedAwaitingRenewal,
 } from "../helpers/awaiting-renewal-fixtures"
 import { createDunningCaseSeed } from "../helpers/dunning-fixtures"
@@ -243,9 +243,9 @@ medusaIntegrationTestRunner({
             .map((entry) => entry.outcome)
         ).toEqual(["started", "awaiting_payment"])
         await expect(
-          locking.acquire(renewalLockKey(seeded.subscription.id), { ownerId: "lock-probe", expire: 5 })
+          locking.acquire(renewalSubscriptionLockKey(seeded.subscription.id), { ownerId: "lock-probe", expire: 5 })
         ).resolves.toBeUndefined()
-        await locking.release(renewalLockKey(seeded.subscription.id), { ownerId: "lock-probe" })
+        await locking.release(renewalSubscriptionLockKey(seeded.subscription.id), { ownerId: "lock-probe" })
       })
 
       it("parks a plan-change cycle with the new variant's snapshot and leaves the plan change unapplied", async () => {

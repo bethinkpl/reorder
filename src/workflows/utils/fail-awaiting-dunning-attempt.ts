@@ -28,6 +28,7 @@ import {
   settleDeclinedRetryAttempt,
 } from "../steps/run-dunning-retry"
 import { tryUnderLock } from "./run-under-lock"
+import { dunningCaseLockKey } from "../../modules/dunning/utils/lock-key"
 
 const RUN_LOCK_WAIT_SECONDS = 5
 const LOCK_HOLD_SECONDS = 120
@@ -175,7 +176,7 @@ export async function failAwaitingDunningAttempt(
 
   const run = await tryUnderLock(
     container,
-    `dunning:${markers.dunning_case_id}`,
+    dunningCaseLockKey(markers.dunning_case_id),
     () => applyDunningPaymentFailureUnderLock(container, { ...input, ...markers }),
     { wait_seconds: RUN_LOCK_WAIT_SECONDS, hold_seconds: LOCK_HOLD_SECONDS }
   )

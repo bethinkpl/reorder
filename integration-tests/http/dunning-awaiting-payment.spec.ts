@@ -12,6 +12,7 @@ import { DUNNING_MODULE } from "../../src/modules/dunning"
 import { DunningEvents } from "../../src/modules/dunning/events"
 import type DunningModuleService from "../../src/modules/dunning/service"
 import { DunningAttemptStatus, DunningCaseStatus } from "../../src/modules/dunning/types"
+import { dunningCaseLockKey } from "../../src/modules/dunning/utils/lock-key"
 import { RetryBlockedReason } from "../../src/modules/dunning/utils/retry-eligibility"
 import { RENEWAL_MODULE } from "../../src/modules/renewal"
 import type RenewalModuleService from "../../src/modules/renewal/service"
@@ -305,7 +306,7 @@ medusaIntegrationTestRunner({
         const store = { headers: await createStoreCustomerHeaders(container, customerId) }
         const before = await readDunningState(container, caseId)
 
-        const refusal = await whileLockHeld(container, `dunning:${caseId}`, () =>
+        const refusal = await whileLockHeld(container, dunningCaseLockKey(caseId), () =>
           api
             .post(`/store/customers/me/subscriptions/${seeded.subscription.id}/retry-payment`, {}, store)
             .catch((error: { response: unknown }) => error.response)
@@ -982,7 +983,7 @@ medusaIntegrationTestRunner({
         const before = await readDunningState(container, caseId)
         const markRecovered = () => api.post(`/admin/dunning/${caseId}/mark-recovered`, {}, admin)
 
-        const refusal = await whileLockHeld(container, `dunning:${caseId}`, () =>
+        const refusal = await whileLockHeld(container, dunningCaseLockKey(caseId), () =>
           markRecovered().catch((error: { response?: unknown }) => error.response)
         )
 

@@ -39,6 +39,7 @@ import {
   settleAwaitingRenewalCycleUnderLock,
   type SettleAwaitingRenewalCycleOutcome,
 } from "../workflows/utils/settle-awaiting-renewal-cycle"
+import { renewalSubscriptionLockKey } from "../modules/renewal/utils/lock-key"
 
 const JOB_NAME = "reconcile-awaiting-renewal-cycles"
 const JOB_LOCK_KEY = "jobs:reconcile-awaiting-renewal-cycles"
@@ -124,7 +125,7 @@ async function raiseOverdueAlertOnce(
 
   try {
     return await container.resolve(Modules.LOCKING).execute(
-      `renewal:subscription:${cycle.subscription_id}`,
+      renewalSubscriptionLockKey(cycle.subscription_id),
       async () => {
         const due = await findDueOverdueAlert(renewalModule, cycle.id, status, input)
 
@@ -192,7 +193,7 @@ async function underRenewalLock<T>(
   job: () => Promise<T>,
   whenBusy: T
 ): Promise<T> {
-  const run = await tryUnderLock(container, `renewal:subscription:${subscriptionId}`, job, {
+  const run = await tryUnderLock(container, renewalSubscriptionLockKey(subscriptionId), job, {
     wait_seconds: RENEWAL_LOCK_TIMEOUT_SECONDS,
     hold_seconds: RENEWAL_LOCK_HOLD_SECONDS,
   })

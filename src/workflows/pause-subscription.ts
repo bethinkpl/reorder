@@ -17,12 +17,13 @@ import {
   ActivityLogEventType,
 } from "../modules/activity-log/types"
 import { toISOStringOrNull } from "./utils/date-output"
+import { renewalSubscriptionLockKey } from "../modules/renewal/utils/lock-key"
 
 export const pauseSubscriptionWorkflow = createWorkflow(
   "pause-subscription",
   function (input: PauseSubscriptionStepInput) {
     const renewalLockKey = transform({ input }, function ({ input }) {
-      return `renewal:subscription:${input.id}`
+      return renewalSubscriptionLockKey(input.id)
     })
 
     acquireLockStep({

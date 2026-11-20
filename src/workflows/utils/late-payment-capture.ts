@@ -30,6 +30,8 @@ import {
   signalNamesAttempt,
 } from "./renewal-session-marker"
 import { runUnderLock } from "./run-under-lock"
+import { renewalSubscriptionLockKey } from "../../modules/renewal/utils/lock-key"
+import { dunningCaseLockKey } from "../../modules/dunning/utils/lock-key"
 
 const LOCK_WAIT_SECONDS = 30
 const LOCK_HOLD_SECONDS = 120
@@ -488,13 +490,13 @@ export async function reconcileTrackedCapture(
     const lockOptions = { wait_seconds: LOCK_WAIT_SECONDS, hold_seconds: LOCK_HOLD_SECONDS }
     const event = await runUnderLock(
       container,
-      `renewal:subscription:${input.subscription_id}`,
+      renewalSubscriptionLockKey(input.subscription_id),
       () =>
         charge.kind === "renewal"
           ? reconcileUnderLock(container, input)
           : runUnderLock(
               container,
-              `dunning:${charge.dunning_case_id}`,
+              dunningCaseLockKey(charge.dunning_case_id),
               () => reconcileUnderLock(container, input),
               lockOptions
             ),

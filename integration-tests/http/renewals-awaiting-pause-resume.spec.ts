@@ -9,13 +9,13 @@ import {
 } from "../../src/modules/cancellation/types"
 import { DunningCaseStatus } from "../../src/modules/dunning/types"
 import { RenewalCycleStatus } from "../../src/modules/renewal/types"
+import { renewalSubscriptionLockKey } from "../../src/modules/renewal/utils/lock-key"
 import { SUBSCRIPTION_MODULE } from "../../src/modules/subscription"
 import type SubscriptionModuleService from "../../src/modules/subscription/service"
 import { SubscriptionStatus } from "../../src/modules/subscription/types"
 import { seedDunningCase } from "../helpers/awaiting-dunning-fixtures"
 import {
   readRenewalState,
-  renewalLockKey,
   seedAwaitingRenewal,
   whileRenewalLockHeld,
 } from "../helpers/awaiting-renewal-fixtures"
@@ -68,7 +68,7 @@ medusaIntegrationTestRunner({
 
     async function expectRenewalLockFree(subscriptionId: string) {
       const locking = getContainer().resolve(Modules.LOCKING)
-      const key = renewalLockKey(subscriptionId)
+      const key = renewalSubscriptionLockKey(subscriptionId)
 
       await expect(locking.acquire(key, { ownerId: "lock-probe", expire: 5 })).resolves.toBeUndefined()
       await locking.release(key, { ownerId: "lock-probe" })

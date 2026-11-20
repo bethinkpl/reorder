@@ -15,6 +15,7 @@ import {
   RenewalAttemptStatus,
   RenewalCycleStatus,
 } from "../../src/modules/renewal/types"
+import { renewalSubscriptionLockKey } from "../../src/modules/renewal/utils/lock-key"
 import { SUBSCRIPTION_MODULE } from "../../src/modules/subscription"
 import type SubscriptionModuleService from "../../src/modules/subscription/service"
 import { SubscriptionStatus } from "../../src/modules/subscription/types"
@@ -156,17 +157,13 @@ export function oneMonthAfter(date: Date) {
   return DateTime.fromJSDate(date, { zone: "utc" }).plus({ months: 1 }).toJSDate()
 }
 
-export function renewalLockKey(subscriptionId: string) {
-  return `renewal:subscription:${subscriptionId}`
-}
-
 export async function whileRenewalLockHeld<T>(
   container: MedusaContainer,
   subscriptionId: string,
   run: () => Promise<T>
 ) {
   const locking = container.resolve(Modules.LOCKING)
-  const key = renewalLockKey(subscriptionId)
+  const key = renewalSubscriptionLockKey(subscriptionId)
   const ownerId = `renewal-run-on-${subscriptionId}`
 
   await locking.acquire(key, { ownerId, expire: 60 })
@@ -185,7 +182,7 @@ export function failRenewalLockReleaseOnce(
 ) {
   const locking = container.resolve(Modules.LOCKING)
   const release = locking.release.bind(locking)
-  const key = renewalLockKey(subscriptionId)
+  const key = renewalSubscriptionLockKey(subscriptionId)
   let failed = false
 
   jest.spyOn(locking, "release").mockImplementation(async (keys, args) => {

@@ -17,6 +17,7 @@ import {
   runDunningRetryStep,
   type RunDunningRetryStepInput,
 } from "./steps/run-dunning-retry"
+import { dunningCaseLockKey } from "../modules/dunning/utils/lock-key"
 
 /**
  * `payment_session_data` is owned by the `setPaymentSessionData` hook, so it is
@@ -31,7 +32,7 @@ export const runDunningRetryWorkflow = createWorkflow(
   "run-dunning-retry",
   function (input: RunDunningRetryWorkflowInput) {
     const lockKey = transform({ input }, function ({ input }) {
-      return `dunning:${input.dunning_case_id}`
+      return dunningCaseLockKey(input.dunning_case_id)
     })
 
     acquireLockStep({

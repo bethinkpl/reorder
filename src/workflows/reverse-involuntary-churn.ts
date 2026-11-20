@@ -8,12 +8,13 @@ import {
   reverseInvoluntaryChurnStep,
   type ReverseInvoluntaryChurnStepInput,
 } from "./steps/reverse-involuntary-churn"
+import { dunningCaseLockKey } from "../modules/dunning/utils/lock-key"
 
 export const reverseInvoluntaryChurnWorkflow = createWorkflow(
   "reverse-involuntary-churn",
   function (input: ReverseInvoluntaryChurnStepInput) {
     const lockKey = transform({ input }, function ({ input }) {
-      return `dunning:${input.dunning_case_id}`
+      return dunningCaseLockKey(input.dunning_case_id)
     })
 
     acquireLockStep({

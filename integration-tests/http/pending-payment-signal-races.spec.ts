@@ -1003,6 +1003,62 @@ medusaIntegrationTestRunner({
       })
     })
 
+    it("ends the renewal cycle without dunning and reports the charge once for a refund when the subscription was cancelled while the provider took it, after the run's lock lapsed", async () => {
+      const container = getContainer()
+      const seeded = await seedDueCharge("SUB-RENEWAL-CHARGED-AFTER-CANCEL")
+      const payments = paymentModule()
+      const authorize = payments.authorizePaymentSession.bind(payments)
+
+      jest
+        .spyOn(payments, "authorizePaymentSession")
+        .mockImplementation(async (sessionId, context) => {
+          await locking().release(renewalSubscriptionLockKey(seeded.subscription.id))
+          await cancelSubscriptionWorkflow(container).run({
+            input: { id: seeded.subscription.id, reason: "customer left" },
+          })
+
+          return await authorize(sessionId, context)
+        })
+
+      await expect(runRenewal(container, seeded.cycle.id)).resolves.toMatchObject({
+        outcome: RenewalRunOutcome.FAILED,
+        renewal_cycle: { status: RenewalCycleStatus.FAILED },
+      })
+
+      const [payment] = await paymentModule().listPayments({ payment_session_id: seeded.sessionIds[0] })
+
+      expect(emitted(SubscriptionEvents.LATE_PAYMENT_CAPTURED)).toHaveLength(1)
+
+      await reconcileAwaitingRenewalCycles(container)
+
+      const state = await readRenewalState(container, seeded)
+
+      expect(state).toMatchObject({
+        subscription: { status: SubscriptionStatus.CANCELLED, next_renewal_at: null },
+        cycle: { status: RenewalCycleStatus.FAILED, last_error: expect.stringMatching(/cancel/i) },
+        attempts: [
+          {
+            status: RenewalAttemptStatus.SUCCEEDED,
+            payment_reference: seeded.sessionIds[0],
+            error_code: PaymentAttemptErrorCode.CAPTURED_AFTER_CLOSE,
+          },
+        ],
+        cases: [],
+      })
+      expect(state.succeededLogs).toHaveLength(0)
+      expect(state.failedLogs).toHaveLength(1)
+      expect(emitted(SubscriptionEvents.LATE_PAYMENT_CAPTURED).map((message) => message.data)).toEqual([
+        expect.objectContaining({
+          subscription_id: seeded.subscription.id,
+          payment_id: payment.id,
+          renewal_cycle_id: seeded.cycle.id,
+          reason: LatePaymentCapturedReason.SUBSCRIPTION_TERMINAL,
+          refund_amount: RENEWAL_AMOUNT,
+        }),
+      ])
+      expect(emitted(DunningEvents.STARTED)).toHaveLength(0)
+    })
+
     it("settles first and cancels afterwards, leaving the cancelled subscription without a renewal date, when an admin cancellation reaches a renewal its capture is settling", async () => {
       const container = getContainer()
       const subscriptions = subscriptionModule()

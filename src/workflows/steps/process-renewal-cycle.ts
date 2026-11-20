@@ -58,9 +58,12 @@ import {
 import { toISOStringOrNull } from "../utils/date-output"
 import { recordOrderCaptureTransactions } from "../utils/record-order-capture-transactions"
 import { resolvePaymentCollection } from "../utils/resolve-payment-collection"
+import { endRenewalCycleOnCancellation } from "../utils/end-awaiting-renewal-cycle-on-cancellation"
+import { reconcileTrackedCapture } from "../utils/late-payment-capture"
 import {
   type RenewalSettlementAudit,
   settleRenewalCycleSucceeded,
+  SUBSCRIPTION_CANCELLED_REFUSAL,
 } from "../utils/settle-renewal-cycle-succeeded"
 import {
   computeSubscriptionDiscountAmount,
@@ -1769,7 +1772,8 @@ async function parkOrReportRenewalCycle(
 
 export type AuthorizeRenewalPaymentStepOutput =
   | ({ charge_submitted: true } & SubmittedRenewalCharge)
-  | { charge_submitted: false }
+  /** `payment_session_id` names the session a charge was taken on there and then. */
+  | { charge_submitted: false, payment_session_id: string | null }
 
 export const authorizeRenewalPaymentStep = createStep(
   "authorize-renewal-payment",
@@ -1784,10 +1788,14 @@ export const authorizeRenewalPaymentStep = createStep(
     const { context, order_result, payment_session_data } = input
 
     if (!order_result.payment) {
-      return new StepResponse<AuthorizeRenewalPaymentStepOutput>({ charge_submitted: false })
+      return new StepResponse<AuthorizeRenewalPaymentStepOutput>({
+        charge_submitted: false,
+        payment_session_id: null,
+      })
     }
 
     const orderId = order_result.order?.id as string
+    let paymentSessionId: string | null = null
 
     try {
       const data =
@@ -1822,6 +1830,8 @@ export const authorizeRenewalPaymentStep = createStep(
           orderId
         )
       }
+
+      paymentSessionId = paymentSessionResult.result.id
 
       const paymentModule =
         container.resolve<IPaymentModuleService>(Modules.PAYMENT)
@@ -1901,9 +1911,75 @@ export const authorizeRenewalPaymentStep = createStep(
       throw error
     }
 
-    return new StepResponse<AuthorizeRenewalPaymentStepOutput>({ charge_submitted: false })
+    return new StepResponse<AuthorizeRenewalPaymentStepOutput>({
+      charge_submitted: false,
+      payment_session_id: paymentSessionId,
+    })
   }
 )
+
+/**
+ * The charge went through, but the subscription was cancelled while the provider took it (the run's
+ * lock lapsed). The cycle ends as the cancellation ends an awaiting one, with the attempt left on its
+ * session, and the capture is reconciled as a late payment so the host is asked to refund it.
+ */
+async function endRenewalCycleOfCancelledSubscription(
+  container: MedusaContainer,
+  context: RenewalExecutionContext,
+  orderResult: RenewalOrderStepResult,
+  paymentSessionId: string | null
+) {
+  const renewalModule = container.resolve<RenewalModuleService>(RENEWAL_MODULE)
+
+  if (paymentSessionId) {
+    await renewalModule.updateRenewalAttempts({
+      id: context.attempt_id,
+      payment_reference: paymentSessionId,
+      order_id: orderResult.generated_order_id,
+    })
+  }
+
+  await endRenewalCycleOnCancellation(
+    container,
+    {
+      subscription: await container
+        .resolve<SubscriptionModuleService>(SUBSCRIPTION_MODULE)
+        .retrieveSubscription(context.subscription_id),
+      cancelled_at: new Date(),
+      actor_id: null,
+      actor_type: ActivityLogActorType.SYSTEM,
+      reason: null,
+      source: "scheduler",
+    },
+    context.renewal_cycle_id
+  )
+
+  const [payment] = paymentSessionId
+    ? (
+        await container
+          .resolve<IPaymentModuleService>(Modules.PAYMENT)
+          .listPayments({ payment_session_id: paymentSessionId })
+      ).filter(({ captured_at }) => captured_at)
+    : []
+
+  if (payment && paymentSessionId) {
+    await reconcileTrackedCapture(container, {
+      charge: {
+        kind: "renewal",
+        session_id: paymentSessionId,
+        renewal_cycle_id: context.renewal_cycle_id,
+        renewal_attempt_id: context.attempt_id,
+      },
+      payment_id: payment.id,
+      payment_collection_id: payment.payment_collection_id,
+      subscription_id: context.subscription_id,
+      order_id: orderResult.generated_order_id,
+      kept_for_churn_reversal: false,
+    })
+  }
+
+  return await renewalModule.retrieveRenewalCycle(context.renewal_cycle_id)
+}
 
 export const finalizeRenewalCycleStep = createStep(
   "finalize-renewal-cycle",
@@ -1911,14 +1987,15 @@ export const finalizeRenewalCycleStep = createStep(
     input: {
       context: RenewalExecutionContext
       order_result: RenewalOrderStepResult
+      authorization: AuthorizeRenewalPaymentStepOutput
     },
     { container }
   ) {
-    const { context, order_result } = input
+    const { context, order_result, authorization } = input
     const generatedOrderId = order_result.generated_order_id
 
     try {
-      const { renewal_cycle: updatedCycle } = await settleRenewalCycleSucceeded(
+      const settlement = await settleRenewalCycleSucceeded(
         container,
         {
           renewal_cycle_id: context.renewal_cycle_id,
@@ -1932,9 +2009,18 @@ export const finalizeRenewalCycleStep = createStep(
           audit: buildRenewalSettlementAudit(context),
         }
       )
+      const cancelled = settlement.reason === SUBSCRIPTION_CANCELLED_REFUSAL
 
       return new StepResponse({
-        renewal_cycle: updatedCycle,
+        outcome: cancelled ? RenewalRunOutcome.FAILED : RenewalRunOutcome.SUCCEEDED,
+        renewal_cycle: cancelled
+          ? await endRenewalCycleOfCancelledSubscription(
+              container,
+              context,
+              order_result,
+              authorization.charge_submitted ? null : authorization.payment_session_id
+            )
+          : settlement.renewal_cycle,
         subscription_id: context.subscription_id,
         attempt_id: context.attempt_id,
         generated_order_id: generatedOrderId,

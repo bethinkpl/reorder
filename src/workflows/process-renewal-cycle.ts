@@ -157,6 +157,7 @@ export const processRenewalCycleWorkflow = createWorkflow(
       const result = finalizeRenewalCycleStep({
         context,
         order_result: orderResult,
+        authorization,
       })
 
       ensureNextRenewalCycleStep({
@@ -170,7 +171,7 @@ export const processRenewalCycleWorkflow = createWorkflow(
       { finalized, authorization, context, orderResult },
       function ({ finalized, authorization, context, orderResult }) {
         if (finalized) {
-          return { outcome: RenewalRunOutcome.SUCCEEDED, ...finalized }
+          return { ...finalized }
         }
 
         return {

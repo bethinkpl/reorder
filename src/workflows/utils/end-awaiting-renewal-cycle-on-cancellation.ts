@@ -68,16 +68,7 @@ export async function endAwaitingRenewalCyclesOnCancellation(
 
   try {
     for (const cycle of cycles) {
-      const entry: EndedAwaitingRenewalCycle = {
-        cycle: {
-          id: cycle.id,
-          status: cycle.status,
-          processed_at: toISOStringOrNull(cycle.processed_at),
-          last_error: cycle.last_error,
-        },
-        attempts: [],
-        subscription_log_id: null,
-      }
+      const entry = emptyEntry(cycle)
 
       // Recorded before its writes, so a throw half way through still restores this cycle.
       ended.push(entry)
@@ -90,6 +81,35 @@ export async function endAwaitingRenewalCyclesOnCancellation(
   }
 
   return ended
+}
+
+/**
+ * Ends one cycle of a cancelled subscription the way a cancellation ends an awaiting one, for a run
+ * that only found the subscription cancelled once its charge had gone through.
+ */
+export async function endRenewalCycleOnCancellation(
+  container: MedusaContainer,
+  input: EndAwaitingRenewalCyclesOnCancellationInput,
+  renewalCycleId: string
+): Promise<void> {
+  const [cycle] = await container
+    .resolve<RenewalModuleService>(RENEWAL_MODULE)
+    .listRenewalCycles({ id: renewalCycleId })
+
+  await endCycle(container, input, cycle, emptyEntry(cycle))
+}
+
+function emptyEntry(cycle: RenewalCycleRecord): EndedAwaitingRenewalCycle {
+  return {
+    cycle: {
+      id: cycle.id,
+      status: cycle.status,
+      processed_at: toISOStringOrNull(cycle.processed_at),
+      last_error: cycle.last_error,
+    },
+    attempts: [],
+    subscription_log_id: null,
+  }
 }
 
 async function endCycle(

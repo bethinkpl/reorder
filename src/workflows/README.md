@@ -89,7 +89,10 @@ generated_order_id }`. `outcome` is one of `RenewalRunOutcome` (exported from
 - `park_failed` — the charge was submitted but the cycle could not be parked, so it stays
   `processing` (an alertable log says so); `renewal_cycle` is `null`.
 - `failed` — the charge's failure was reported while the run was still waiting on it, and the
-  cycle had already failed; `renewal_cycle` is that cycle.
+  cycle had already failed; or the charge went through only after the subscription had been
+  cancelled (the run's lock lapsed), so the cycle was ended as a cancellation ends an awaiting one
+  and the capture reconciled as a late payment (`subscription.late_payment_captured`).
+  `renewal_cycle` is that cycle.
 
 ## Extensibility Hooks
 

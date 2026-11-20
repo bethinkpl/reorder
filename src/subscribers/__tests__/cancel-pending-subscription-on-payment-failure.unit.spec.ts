@@ -13,6 +13,7 @@ import {
   Modules,
   PaymentActions,
 } from "@medusajs/framework/utils"
+import { renewalSubscriptionLockKey } from "../../modules/renewal/utils/lock-key"
 import { SUBSCRIPTION_MODULE } from "../../modules/subscription"
 import { SubscriptionStatus } from "../../modules/subscription/types"
 import { failAwaitingRenewalCycle } from "../../workflows/utils/fail-awaiting-renewal-cycle"
@@ -238,12 +239,12 @@ describe("cancelPendingSubscriptionOnPaymentFailure", () => {
     })
 
     it.each([
-      new Error("Failed to acquire lock for key \"renewal:subscription:sub_1\""),
+      new Error(`Failed to acquire lock for key "${renewalSubscriptionLockKey("sub_1")}"`),
       new MedusaError(
         MedusaError.Types.CONFLICT,
-        "Failed to acquire lock for key \"renewal:subscription:sub_1\""
+        `Failed to acquire lock for key "${renewalSubscriptionLockKey("sub_1")}"`
       ),
-      new Error("\"renewal:subscription:sub_1\" is already locked."),
+      new Error(`"${renewalSubscriptionLockKey("sub_1")}" is already locked.`),
       new Error("Timed-out acquiring lock."),
     ])("rejects after a non-alertable entry when the lock stays taken: '$message'", async (error) => {
       const { outcome, logs } = await deliverWhileHandlingThrows(error)

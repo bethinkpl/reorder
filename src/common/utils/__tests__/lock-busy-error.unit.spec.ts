@@ -1,11 +1,12 @@
 import { MedusaError, serializeError } from "@medusajs/framework/utils"
+import { renewalSubscriptionLockKey } from "../../../modules/renewal/utils/lock-key"
 import { isLockBusyError } from "../lock-busy-error"
 
 describe("isLockBusyError", () => {
   it.each([
-    "Failed to acquire lock for key \"renewal:subscription:sub_1\"",
+    `Failed to acquire lock for key "${renewalSubscriptionLockKey("sub_1")}"`,
     "Timed-out acquiring lock.",
-    "\"renewal:subscription:sub_1\" is already locked.",
+    `"${renewalSubscriptionLockKey("sub_1")}" is already locked.`,
   ])("recognises the locking providers' answer %p, also as the plain object a workflow rethrows", (message) => {
     expect(isLockBusyError(new Error(message))).toBe(true)
     expect(isLockBusyError(serializeError(new Error(message)))).toBe(true)

@@ -1,6 +1,7 @@
 import { MedusaError, serializeError } from "@medusajs/framework/utils"
 import { DunningCaseStatus } from "../../../../../../modules/dunning/types"
 import { dunningErrors } from "../../../../../../modules/dunning/utils/errors"
+import { dunningCaseLockKey } from "../../../../../../modules/dunning/utils/lock-key"
 import {
   RetryBlockedReason,
   toRetryBlockedError,
@@ -15,7 +16,7 @@ describe("mapStoreRetryError", () => {
     ["a retry whose charge awaits the provider", retryBlocked(RetryBlockedReason.PAYMENT_IN_PROGRESS)],
     ["a retry already running", retryBlocked(RetryBlockedReason.RETRY_IN_PROGRESS)],
     ["a case lock another run holds", serializeError(new Error("Timed-out acquiring lock."))],
-    ["a case lock another owner inserted first", serializeError(new Error("\"dunning:dc_1\" is already locked."))],
+    ["a case lock another owner inserted first", serializeError(new Error(`"${dunningCaseLockKey("dc_1")}" is already locked.`))],
   ])("answers %s as a retry in progress, in the storefront's vocabulary", (_name, error) => {
     const mapped = mapStoreRetryError("sub_1", error)
 

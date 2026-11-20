@@ -2,6 +2,7 @@ import { MedusaError, serializeError } from "@medusajs/framework/utils"
 import { mapStoreCancellationError } from "../route"
 import { cancellationErrors } from "../../../../../../../../modules/cancellation/utils/errors"
 import { dunningErrors } from "../../../../../../../../modules/dunning/utils/errors"
+import { renewalSubscriptionLockKey } from "../../../../../../../../modules/renewal/utils/lock-key"
 import { subscriptionErrors } from "../../../../../../../../modules/subscription/utils/errors"
 
 describe("mapStoreCancellationError", () => {
@@ -89,12 +90,12 @@ describe("mapStoreCancellationError", () => {
     },
     {
       name: "a lock acquisition failure",
-      error: { name: "Error", message: "Failed to acquire lock for key \"renewal:subscription:sub_123\"" },
+      error: { name: "Error", message: `Failed to acquire lock for key "${renewalSubscriptionLockKey("sub_123")}"` },
       message: /already being updated/,
     },
     {
       name: "a lock another owner inserted first",
-      error: { name: "Error", message: "\"renewal:subscription:sub_123\" is already locked." },
+      error: { name: "Error", message: `"${renewalSubscriptionLockKey("sub_123")}" is already locked.` },
       message: /already being updated/,
     },
     {

@@ -462,6 +462,10 @@ Response:
   A renewal run or a payment holds the subscription's `renewal:subscription:<id>` lock, or a dunning retry or a
   payment holds the `dunning:<case_id>` lock of one of its active dunning cases for more than 10 seconds; the
   message says it is being updated by a renewal or a payment, and nothing was changed.
+- `409 conflict`
+  A dunning case is `retrying` and its latest attempt started less than 10 minutes ago, so its retry may still be
+  waiting for the provider; the message names the case (`... can't be closed for subscription cancellation while retry
+  is in flight`), and nothing was changed. A case left `retrying` for 10 minutes is closed like any other.
 
 ## 6. Schedule Plan Change
 

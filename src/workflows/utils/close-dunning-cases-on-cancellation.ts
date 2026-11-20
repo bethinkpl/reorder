@@ -3,7 +3,9 @@ import { isActiveDunningCase } from "../../modules/cancellation/utils/retention-
 import { DUNNING_MODULE } from "../../modules/dunning"
 import type DunningModuleService from "../../modules/dunning/service"
 import { DunningCaseStatus, DunningRecoveryReason } from "../../modules/dunning/types"
+import { dunningErrors } from "../../modules/dunning/utils/errors"
 import { dunningCaseLockKey } from "../../modules/dunning/utils/lock-key"
+import { isStaleRetry } from "../../modules/dunning/utils/stale-retry"
 import { runUnderLock } from "./run-under-lock"
 
 const DUNNING_CASE_LOCK = { wait_seconds: 10, hold_seconds: 120 }
@@ -15,6 +17,7 @@ export type ClosedDunningCase = {
   closed_at: Date | string | null
   recovery_reason: string | null
   metadata: Record<string, unknown> | null
+  updated_at: Date | string
 }
 
 export type CloseDunningCasesOnCancellationInput = {
@@ -22,6 +25,18 @@ export type CloseDunningCasesOnCancellationInput = {
   triggered_by?: string | null
   reason?: string | null
   recovery_reason?: DunningRecoveryReason
+}
+
+async function isRetryOfCaseStale(
+  dunningModule: DunningModuleService,
+  dunningCase: ClosedDunningCase
+) {
+  const [latest] = await dunningModule.listDunningAttempts(
+    { dunning_case_id: dunningCase.id },
+    { order: { attempt_no: "DESC" }, take: 1 }
+  )
+
+  return isStaleRetry(latest?.started_at ?? dunningCase.updated_at)
 }
 
 function appendAuditMetadata(
@@ -49,10 +64,11 @@ function appendAuditMetadata(
 
 /**
  * Closes the subscription's active dunning cases as unrecovered, each under its own
- * `dunning:<case_id>` lock. A retry run holds that lock until it writes its outcome, so a case
- * still `retrying` here belongs to a run that died or failed to park it, and is closed too. An
- * attempt with a charge in flight is left processing, so its late signal still finds it. A throw
- * restores the cases closed before it.
+ * `dunning:<case_id>` lock. A retry run does not renew that lock, so a case still `retrying` is
+ * closed only once its retry is stale; a younger one is refused, since its run may still be waiting
+ * on the provider and would settle the case behind the cancellation. An attempt with a charge in
+ * flight is left processing, so its late signal still finds it. A throw restores the cases closed
+ * before it.
  */
 export async function closeDunningCasesOnCancellation(
   container: MedusaContainer,
@@ -77,6 +93,16 @@ export async function closeDunningCasesOnCancellation(
 
           if (!isActiveDunningCase(current.status)) {
             return
+          }
+
+          if (
+            current.status === DunningCaseStatus.RETRYING &&
+            !(await isRetryOfCaseStale(dunningModule, current))
+          ) {
+            throw dunningErrors.retryInFlightTransitionBlocked(
+              current.id,
+              "be closed for subscription cancellation"
+            )
           }
 
           closed.push(current)

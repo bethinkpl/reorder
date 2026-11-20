@@ -148,7 +148,9 @@ This means:
 - the cancellation module does not directly mutate dunning state as part of normal case progression; the cancelling
   workflows (customer cancel, admin cancel, finalize) close the subscription's active cases through the dunning
   step `close-subscription-dunning`, under the renewal lock and then each case's lock, leaving a submitted charge
-  tracked so its late capture is reported for a refund
+  tracked so its late capture is reported for a refund. A case still `retrying` is closed only once its latest attempt
+  is 10 minutes old (the margin the paid-case sweep also waits): a retry run does not renew its 120 s case lock, so a
+  younger one may still be waiting for the provider, and the cancellation is refused instead
 - a dunning recovery or a renewal settlement never applies a payment to a cancelled subscription
 
 ## 4. Read Path

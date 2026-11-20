@@ -46,6 +46,7 @@ import {
 } from "../workflows/utils/late-payment-capture"
 import { runUnderLock, tryUnderLock } from "../workflows/utils/run-under-lock"
 import { dunningCaseLockKey } from "../modules/dunning/utils/lock-key"
+import { isStaleRetry } from "../modules/dunning/utils/stale-retry"
 
 const JOB_NAME = "reconcile-paid-dunning-cases"
 const JOB_LOCK_KEY = "jobs:reconcile-paid-dunning-cases"
@@ -58,8 +59,6 @@ const JOB_LOCK = { wait_seconds: 1, hold_seconds: 25 * 60 }
 const BATCH_SIZE = 200
 const ALERT_LOCK_TIMEOUT_SECONDS = 5
 const CASE_LOCK_HOLD_SECONDS = 120
-/** Well past the 120 s a retry run holds its case's lock, so a run still in progress is never touched. */
-const STALE_RETRY_MINUTES = 10
 
 /** A running retry finds the paid order itself. */
 const IDLE_DUNNING_CASE_STATUSES = ACTIVE_DUNNING_CASE_STATUSES.filter(
@@ -381,10 +380,6 @@ type StaleRetryOutcome =
     park_reason: DunningParkReason
     error_code: string | null
   }
-
-function isStaleRetry(startedAt: Date | string, now: Date) {
-  return now.getTime() - new Date(startedAt).getTime() >= STALE_RETRY_MINUTES * 60 * 1000
-}
 
 async function findLatestAttempt(dunningModule: DunningModuleService, caseId: string) {
   const [latest] = await dunningModule.listDunningAttempts(

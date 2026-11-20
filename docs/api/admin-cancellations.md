@@ -423,6 +423,10 @@ Shape:
 - `409 conflict`
   A renewal run or a payment holds the subscription's `renewal:subscription:<id>` lock, or a dunning retry or a
   payment holds the `dunning:<case_id>` lock of one of its active dunning cases; nothing was changed.
+- `409 conflict`
+  A dunning case is `retrying` and its latest attempt started less than 10 minutes ago, so its retry may still be
+  waiting for the provider; the message names the case, and nothing was changed. A case left `retrying` for 10 minutes
+  is closed like any other.
 
 ## 5. Update Cancellation Reason
 

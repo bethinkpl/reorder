@@ -21,6 +21,7 @@ import {
   DunningRecoveryReason,
 } from "../../src/modules/dunning/types"
 import { dunningCaseLockKey } from "../../src/modules/dunning/utils/lock-key"
+import { STALE_RETRY_MINUTES } from "../../src/modules/dunning/utils/stale-retry"
 import { RetryBlockedReason } from "../../src/modules/dunning/utils/retry-eligibility"
 import { RENEWAL_MODULE } from "../../src/modules/renewal"
 import type RenewalModuleService from "../../src/modules/renewal/service"
@@ -96,6 +97,7 @@ const routeRetrySessionsToFixture = createRetrySessionRouter({
 })
 
 const HOUR_MS = 60 * 60 * 1000
+const MINUTE_MS = 60 * 1000
 
 async function cancelByCustomer(container: MedusaContainer, seeded: SeededDunningCase) {
   await cancelSubscriptionByCustomerWorkflow(container).run({
@@ -638,8 +640,6 @@ medusaIntegrationTestRunner({
     })
 
     describe("a case a retry left retrying", () => {
-      const MINUTE_MS = 60 * 1000
-
       beforeEach(() => {
         jest.restoreAllMocks()
         jest.clearAllMocks()
@@ -826,7 +826,7 @@ medusaIntegrationTestRunner({
         { submitted: "with its charge's session recorded", recorded: true },
         { submitted: "before recording its charge's session", recorded: false },
       ])(
-        "closes a case its retry left retrying $submitted when the customer cancels, keeping that charge tracked so its capture is reported once for a refund",
+        "closes a case its retry left retrying $submitted once that retry is stale when the customer cancels, keeping that charge tracked so its capture is reported once for a refund",
         async ({ recorded }) => {
           const container = getContainer()
           const dunningModule = container.resolve<DunningModuleService>(DUNNING_MODULE)
@@ -836,9 +836,11 @@ medusaIntegrationTestRunner({
           const caseId = seeded.dunningCase.id
           const [{ attempt, session }] = seeded.attempts
 
-          if (!recorded) {
-            await dunningModule.updateDunningAttempts({ id: attempt.id, payment_reference: null })
-          }
+          await dunningModule.updateDunningAttempts({
+            id: attempt.id,
+            started_at: new Date(Date.now() - (STALE_RETRY_MINUTES + 1) * MINUTE_MS),
+            ...(recorded ? {} : { payment_reference: null }),
+          })
 
           await cancelByCustomer(container, seeded)
 
@@ -874,6 +876,54 @@ medusaIntegrationTestRunner({
               reason: LatePaymentCapturedReason.SUBSCRIPTION_TERMINAL,
             }),
           ])
+        }
+      )
+
+      it.each(["store" as const, "admin" as const, "finalize" as const])(
+        "the %s cancellation route answers a readable 409 while the case's retry is younger than the stale-retry margin, writing nothing",
+        async (route) => {
+          const container = getContainer()
+          const customerId = `cus_dunning_young_retry_${route}`
+          const seeded = await seedDunningCase(container, `SUB-DUN-YOUNG-RETRY-${route}`, {
+            status: DunningCaseStatus.RETRYING,
+            customer_id: customerId,
+          })
+          const caseId = seeded.dunningCase.id
+          const subscriptionId = seeded.subscription.id
+          const admin = { headers: await createAdminAuthHeaders(container) }
+          const store = { headers: await createStoreCustomerHeaders(container, customerId) }
+          const cancellationCase = await createCancellationCaseSeed(container, {
+            subscription_id: subscriptionId,
+            reason: "customer left",
+          })
+          const before = await readDunningState(container, caseId)
+          const adminRefusal = `DunningCase '${caseId}' can't be closed for subscription cancellation while retry is in flight`
+          const cancel = {
+            store: () =>
+              api.post(
+                `/store/customers/me/subscriptions/${subscriptionId}/cancellation`,
+                { reason: "too expensive" },
+                store
+              ),
+            admin: () =>
+              api.post(`/admin/subscriptions/${subscriptionId}/cancel`, { reason: "customer left" }, admin),
+            finalize: () =>
+              api.post(`/admin/cancellations/${cancellationCase.id}/finalize`, {}, admin),
+          }[route]
+
+          await expect(cancel()).rejects.toMatchObject({
+            response: {
+              status: 409,
+              data: {
+                type: "conflict",
+                message:
+                  route === "store"
+                    ? "This subscription can't be cancelled right now. Please try again in a moment."
+                    : adminRefusal,
+              },
+            },
+          })
+          expect(await readDunningState(container, caseId)).toEqual(before)
         }
       )
 

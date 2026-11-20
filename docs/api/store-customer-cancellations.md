@@ -233,7 +233,7 @@ Cancellation timing:
 - access for the remaining paid window is enforced by the consuming application, which reads `cancel_effective_at`; the plugin only records and exposes it
 
 Side effects:
-- any open payment recovery case is closed as `unrecovered` with `recovery_reason: "subscription_cancelled_by_customer"`, so no further retries run. This includes a case whose retry is in flight: a charge it already submitted stays tracked, and if it is captured later the host app is asked to refund it (`subscription.late_payment_captured`)
+- any open payment recovery case is closed as `unrecovered` with `recovery_reason: "subscription_cancelled_by_customer"`, so no further retries run. This includes a case whose charge awaits the provider, and a case a retry left `retrying` for 10 minutes: a charge it already submitted stays tracked, and if it is captured later the host app is asked to refund it (`subscription.late_payment_captured`). A case whose retry started less than 10 minutes ago is not closed: the cancellation is refused with the "can't be cancelled right now" `409` and nothing changes
 - the upcoming scheduled renewal cycle is removed; any historical `failed` cycle is left in place but can no longer execute, because renewal execution rejects a cancelled subscription
 
 Authentication and ownership:

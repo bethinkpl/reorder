@@ -1,8 +1,10 @@
 import {
   createWorkflow,
+  transform,
   when,
   WorkflowResponse,
 } from "@medusajs/framework/workflows-sdk"
+import { acquireLockStep, releaseLockStep } from "@medusajs/medusa/core-flows"
 import { DunningEvents } from "../modules/dunning/events"
 import { emitDunningEventStep } from "./steps/emit-dunning-event"
 import {
@@ -13,6 +15,16 @@ import {
 export const markDunningUnrecoveredWorkflow = createWorkflow(
   "mark-dunning-unrecovered",
   function (input: MarkDunningUnrecoveredStepInput) {
+    const lockKey = transform({ input }, function ({ input }) {
+      return `dunning:${input.dunning_case_id}`
+    })
+
+    acquireLockStep({
+      key: lockKey,
+      timeout: 5,
+      ttl: 120,
+    })
+
     const result = markDunningUnrecoveredStep(input)
 
     // Only the run that actually moved the subscription may notify: a subscription that was
@@ -34,6 +46,10 @@ export const markDunningUnrecoveredWorkflow = createWorkflow(
       }).config({
         name: "emit-dunning-payment-failed-event",
       })
+    })
+
+    releaseLockStep({
+      key: lockKey,
     })
 
     return new WorkflowResponse(result)

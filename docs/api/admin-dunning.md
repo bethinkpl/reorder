@@ -307,7 +307,7 @@ Returns the refreshed `dunning_case` detail payload.
 
 ### Purpose
 
-Closes the case as recovered through a workflow-backed manual operator action.
+Closes the case as recovered through a workflow-backed manual operator action. Runs under the case's `dunning:<id>` lock, so it can't interleave with a retry or a payment signal.
 
 ### Request Body
 
@@ -331,7 +331,7 @@ Returns the refreshed `dunning_case` detail payload.
 - `404 not_found`
   The case does not exist.
 - `409 conflict`
-  The case is already recovered, already unrecovered, or retry is in flight.
+  The case is already recovered, already unrecovered, or its retry charge is in flight (`retrying` or `awaiting_payment`). The response `message` says which.
 
 ## 5. Mark Unrecovered
 
@@ -342,7 +342,7 @@ Returns the refreshed `dunning_case` detail payload.
 
 ### Purpose
 
-Closes the case as unrecovered through a workflow-backed manual operator action.
+Closes the case as unrecovered through a workflow-backed manual operator action. Runs under the case's `dunning:<id>` lock, so it can't interleave with a retry or a payment signal.
 
 ### Request Body
 
@@ -366,7 +366,7 @@ Returns the refreshed `dunning_case` detail payload.
 - `404 not_found`
   The case does not exist.
 - `409 conflict`
-  The case is already recovered, already unrecovered, or retry is in flight.
+  The case is already recovered, already unrecovered, or its retry charge is in flight (`retrying` or `awaiting_payment`). The response `message` says which.
 
 ## 6. Update Retry Schedule
 

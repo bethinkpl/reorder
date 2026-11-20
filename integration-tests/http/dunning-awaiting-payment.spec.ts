@@ -487,7 +487,85 @@ medusaIntegrationTestRunner({
         ])
       })
     })
+
+    describe("admin actions on a case whose retry charge is in flight", () => {
+      beforeEach(() => {
+        jest.restoreAllMocks()
+        jest.clearAllMocks()
+      })
+
+      it.each([DunningCaseStatus.AWAITING_PAYMENT, DunningCaseStatus.RETRYING])(
+        "refuses to mark a %s case recovered or unrecovered with a conflict that says why, writing nothing",
+        async (status) => {
+          const container = getContainer()
+          const admin = { headers: await createAdminAuthHeaders(container) }
+          const seeded = await seedDunningCase(container, `SUB-DUN-MARK-${status}`, { status })
+          const caseId = seeded.dunningCase.id
+          const before = await readDunningState(container, caseId)
+          const events = watchEvents(container)
+
+          for (const [action, body] of [
+            ["mark-recovered", {}],
+            ["mark-unrecovered", { reason: "customer unreachable" }],
+          ] as const) {
+            await expect(api.post(`/admin/dunning/${caseId}/${action}`, body, admin)).rejects.toMatchObject({
+              response: {
+                status: 409,
+                data: {
+                  type: "conflict",
+                  message: `DunningCase '${caseId}' can't be marked ${action === "mark-recovered" ? "recovered" : "unrecovered"} while retry is in flight`,
+                },
+              },
+            })
+          }
+
+          expect(await readDunningState(container, caseId)).toEqual(before)
+          expect(events(DunningEvents.RECOVERED)).toHaveLength(0)
+          expect(events(DunningEvents.PAYMENT_FAILED)).toHaveLength(0)
+        }
+      )
+
+      it("marks a case recovered only once the case's lock is free, answering a readable conflict while a retry holds it", async () => {
+        const container = getContainer()
+        const admin = { headers: await createAdminAuthHeaders(container) }
+        const seeded = await seedDunningCase(container, "SUB-DUN-MARK-LOCKED", {
+          status: DunningCaseStatus.RETRY_SCHEDULED,
+          attempts: [DunningAttemptStatus.FAILED],
+        })
+        const caseId = seeded.dunningCase.id
+        const before = await readDunningState(container, caseId)
+        const markRecovered = () => api.post(`/admin/dunning/${caseId}/mark-recovered`, {}, admin)
+
+        const refusal = await whileLockHeld(container, `dunning:${caseId}`, () =>
+          markRecovered().catch((error: { response?: unknown }) => error.response)
+        )
+
+        expect(refusal).toMatchObject({
+          status: 409,
+          data: { type: "conflict", message: expect.stringMatching(/being updated by a retry or a payment/) },
+        })
+        expect(await readDunningState(container, caseId)).toEqual(before)
+
+        expect((await markRecovered()).status).toEqual(200)
+        expect((await readDunningState(container, caseId)).dunningCase.status).toEqual(
+          DunningCaseStatus.RECOVERED
+        )
+      })
+    })
   },
 })
+
+async function whileLockHeld<T>(container: MedusaContainer, key: string, run: () => Promise<T>) {
+  const locking = container.resolve(Modules.LOCKING)
+  const ownerId = `test-holder-${key}`
+
+  await locking.acquire(key, { ownerId, expire: 60 })
+
+  try {
+    return await run()
+  } finally {
+    await locking.release(key, { ownerId })
+  }
+}
 
 jest.setTimeout(60 * 1000)

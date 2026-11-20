@@ -61,6 +61,11 @@ const terminalStatuses = new Set<DunningCaseAdminStatus>([
   DunningCaseAdminStatus.UNRECOVERED,
 ])
 
+const chargeInFlightStatuses = new Set<DunningCaseAdminStatus>([
+  DunningCaseAdminStatus.RETRYING,
+  DunningCaseAdminStatus.AWAITING_PAYMENT,
+])
+
 const DunningDetailPage = () => {
   const { id } = useParams()
   const queryClient = useQueryClient()
@@ -227,10 +232,13 @@ const DunningDetailPage = () => {
     }))
   }, [dunningCase])
 
-  const isCaseOpen = dunningCase
-    ? !terminalStatuses.has(dunningCase.status) &&
-    dunningCase.status !== DunningCaseAdminStatus.RETRYING
+  const isCaseActive = dunningCase
+    ? !terminalStatuses.has(dunningCase.status)
     : false
+  const isChargeInFlight = dunningCase
+    ? chargeInFlightStatuses.has(dunningCase.status)
+    : false
+  const isCaseOpen = isCaseActive && !isChargeInFlight
   const canRetryNow = dunningCase?.retry_eligible ?? false
   const retryBlockedReason = dunningCase?.retry_blocked_reason ?? null
   const canMarkRecovered = isCaseOpen
@@ -480,7 +488,7 @@ const DunningDetailPage = () => {
                         <span>{retryNowMutation.isPending ? "Retrying..." : "Retry now"}</span>
                       </DropdownMenu.Item>
                     )
-                  : isCaseOpen && retryBlockedReason
+                  : isCaseActive && retryBlockedReason
                     ? (
                         <DropdownMenu.Item className="flex items-center gap-x-2" disabled>
                           <TriangleRightMini className="text-ui-fg-subtle" />

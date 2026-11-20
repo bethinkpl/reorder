@@ -164,13 +164,13 @@ The detail page action menu includes:
 Current action rules in the UI:
 
 - `Retry now`
-  Available for active retryable cases and blocked for terminal or in-flight states.
+  Available for active retryable cases. For a non-terminal case that can't be retried (including `retrying` and `awaiting_payment`) the menu shows a disabled `Retry unavailable: …` item with the reason.
 - `Mark recovered`
-  Available for active non-terminal cases and blocked while retry is in flight.
+  Available for active non-terminal cases and hidden while the retry charge is in flight (`retrying` or `awaiting_payment`).
 - `Mark unrecovered`
-  Available for active non-terminal cases and blocked while retry is in flight.
+  Available for active non-terminal cases and hidden while the retry charge is in flight (`retrying` or `awaiting_payment`).
 - `Edit retry schedule`
-  Available for non-terminal cases and blocked while retry is in flight.
+  Available for non-terminal cases and hidden while the retry charge is in flight (`retrying` or `awaiting_payment`).
 
 Actions are disabled while the corresponding mutation is pending.
 

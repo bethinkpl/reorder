@@ -221,8 +221,7 @@ describe("runDunningRetry - recovery branch", () => {
     )
   })
 
-  it("leaves the next cycle alone when billing has moved past this one", async () => {
-    // Scheduling one here would delete the cycle that is actually due.
+  it("still ensures the next cycle when billing has moved past this one", async () => {
     const { container } = buildContainer()
     ;(settleRenewalCycleSucceeded as jest.Mock).mockResolvedValueOnce({
       settled: false,
@@ -232,7 +231,7 @@ describe("runDunningRetry - recovery branch", () => {
     const response = await runDunningRetry(container, { dunning_case_id: "dun_1" })
 
     expect(response.output.outcome).toBe("recovered")
-    expect(ensureNextRenewalCycleRun).not.toHaveBeenCalled()
+    expect(ensureNextRenewalCycleRun).toHaveBeenCalledWith({ input: { subscription_id: "sub_1" } })
   })
 
   it("still schedules the next cycle when the settlement found this one done", async () => {

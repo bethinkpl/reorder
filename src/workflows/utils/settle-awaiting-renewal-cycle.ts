@@ -212,15 +212,15 @@ export async function settleAwaitingRenewalCycleUnderLock(
       message: `RenewalCycle '${cycle.id}' was paid after the subscription's next renewal date moved past it: closed as succeeded, billing dates left as they are`,
       metadata: { order_id: orderId },
     })
-
-    return "closed_superseded"
   }
 
+  // Also after a supersession: an earlier settlement of this cycle may have moved the dates and
+  // failed before it scheduled the next cycle.
   await ensureNextRenewalCycleWorkflow(container).run({
     input: { subscription_id: cycle.subscription_id },
   })
 
-  return "settled"
+  return settlement.reason === "cycle_superseded" ? "closed_superseded" : "settled"
 }
 
 export async function settleAwaitingRenewalCycle(

@@ -624,6 +624,42 @@ medusaIntegrationTestRunner({
         expect(state.subscription.last_renewal_at).toBeNull()
       })
 
+      it("schedules the next renewal of a settlement that moved the dates but could not close its cycle, once the sweep closes that cycle as superseded", async () => {
+        const container = getContainer()
+        const renewalModule = container.resolve<RenewalModuleService>(RENEWAL_MODULE)
+        const seeded = await seedAwaitingRenewal(container, { reference: "SUB-AWAIT-HALF-SETTLED" })
+        const updateCycles = renewalModule.updateRenewalCycles.bind(renewalModule)
+        let failed = false
+
+        jest.spyOn(renewalModule, "updateRenewalCycles").mockImplementation(((data: { status?: string }) => {
+          if (!failed && data?.status === RenewalCycleStatus.SUCCEEDED) {
+            failed = true
+
+            return Promise.reject(new Error("the cycle could not be written"))
+          }
+
+          return updateCycles(data as never)
+        }) as never)
+
+        const payment = await captureOnOrder(container, seeded.order.id, seeded.session.id)
+
+        await deliverCapture(container, payment.id)
+
+        const halfSettled = await readRenewalState(container, seeded)
+
+        await reconcileAwaitingRenewalCycles(container)
+
+        const state = await readRenewalState(container, seeded)
+        const nextRenewalAt = oneMonthAfter(seeded.scheduledFor)
+
+        expect(halfSettled.cycle.status).toEqual(RenewalCycleStatus.AWAITING_PAYMENT)
+        expect(halfSettled.subscription.next_renewal_at).toEqual(nextRenewalAt)
+        expect(state.cycle.status).toEqual(RenewalCycleStatus.SUCCEEDED)
+        expect(state.otherCycles).toEqual([
+          expect.objectContaining({ status: RenewalCycleStatus.SCHEDULED, scheduled_for: nextRenewalAt }),
+        ])
+      })
+
       it("settles when refreshing the payment context fails", async () => {
         const seeded = await seedAwaitingWithSavedCard("SUB-AWAIT-REFRESH-FAILS")
         const payment = await captureOnOrder(getContainer(), seeded.order.id, seeded.session.id)

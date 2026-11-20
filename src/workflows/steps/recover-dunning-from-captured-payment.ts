@@ -240,9 +240,9 @@ export async function recoverDunningFromCapturedPayment(
         source,
       })
 
-      // Billing already moved past this cycle, so the upcoming cycle is somebody else's and
-      // re-deriving it here would delete the one that is actually due.
-      if (settlement.reason === "cycle_superseded" || settlement.reason === "subscription_cancelled") {
+      // Also after a supersession: an earlier settlement of this cycle may have moved the dates
+      // and failed before it scheduled the next cycle.
+      if (settlement.reason === "subscription_cancelled") {
         return
       }
 

@@ -104,12 +104,11 @@ async function failUnpaidUnderLock(
   container: MedusaContainer,
   input: ResolveAwaitingPaymentInput
 ): Promise<DunningAwaitingPaymentAdminResolution> {
-  const [latest] = await container
-    .resolve<DunningModuleService>(DUNNING_MODULE)
-    .listDunningAttempts(
-      { dunning_case_id: input.dunning_case_id },
-      { order: { attempt_no: "DESC" }, take: 1 }
-    )
+  const dunningModule = container.resolve<DunningModuleService>(DUNNING_MODULE)
+  const [latest] = await dunningModule.listDunningAttempts(
+    { dunning_case_id: input.dunning_case_id },
+    { order: { attempt_no: "DESC" }, take: 1 }
+  )
 
   if (!latest || latest.status !== DunningAttemptStatus.PROCESSING) {
     throw noAttemptToFail(input.dunning_case_id)
@@ -127,14 +126,18 @@ async function failUnpaidUnderLock(
     session_id: latest.payment_reference,
     action: PaymentAttemptErrorCode.RESOLVED_UNPAID,
     reason: null,
-    message: input.reason
-      ? `Retry payment never arrived; resolved as failed by an admin: ${input.reason}`
-      : "Retry payment never arrived; resolved as failed by an admin",
+    // Shown to the customer as the retry's error; the admin's reason stays on the attempt's metadata.
+    message: "Retry payment never arrived",
   })
 
   if (!output) {
     throw noAttemptToFail(input.dunning_case_id)
   }
+
+  await dunningModule.updateDunningAttempts({
+    id: latest.id,
+    metadata: { admin_resolution: { reason: input.reason, resolved_by: input.triggered_by } },
+  })
 
   await emitDunningAttemptOutcomeEvents(container, output)
 

@@ -773,6 +773,30 @@ medusaIntegrationTestRunner({
         })
       })
 
+      it("keeps the admin's reason off the storefront when it fails the renewal, showing the customer a fixed message", async () => {
+        const container = getContainer()
+        const headers = await createAdminAuthHeaders(container)
+        const seeded = await seedAwaitingRenewal(container, {
+          reference: "SUB-AWL-RESOLVE-REASON",
+          submitted_at: new Date(Date.now() - (DEFAULT_AWAITING_PAYMENT_RESOLVE_MIN_HOURS + 1) * HOUR_MS),
+        })
+        const note = "card flagged by fraud team, ticket OPS-1234"
+
+        expect((await api.post(route(seeded.cycle.id), { reason: note }, { headers })).data).toMatchObject({
+          resolution: "failed",
+        })
+
+        const store = { headers: await createStoreCustomerHeaders(container, seeded.subscription.customer_id) }
+        const { subscription } = (
+          await api.get(`/store/customers/me/subscriptions/${seeded.subscription.id}`, store)
+        ).data
+        const { attempts } = await readRenewalState(container, seeded)
+
+        expect(subscription.payment_recovery.last_error_message).toEqual("Renewal payment never arrived")
+        expect(JSON.stringify(subscription)).not.toContain(note)
+        expect(attempts[0].metadata).toMatchObject({ admin_resolution: { reason: note } })
+      })
+
       it("measures the age an unpaid charge needs before it can be resolved as failed by its own setting, not by the alert hours", async () => {
         const container = getContainer()
         const headers = await createAdminAuthHeaders(container)
@@ -870,10 +894,16 @@ medusaIntegrationTestRunner({
           expect(lost).toMatchObject(notAwaiting)
           expect(state.cycle).toMatchObject({
             status: RenewalCycleStatus.FAILED,
-            last_error: expect.stringContaining("bank confirmed no transfer"),
+            last_error: "Renewal payment never arrived",
           })
           expect(state.attempts).toEqual([
-            expect.objectContaining({ id: seeded.attempt.id, status: RenewalAttemptStatus.FAILED }),
+            expect.objectContaining({
+              id: seeded.attempt.id,
+              status: RenewalAttemptStatus.FAILED,
+              metadata: expect.objectContaining({
+                admin_resolution: expect.objectContaining({ reason: "bank confirmed no transfer" }),
+              }),
+            }),
           ])
           expect(state.subscription.status).toEqual(SubscriptionStatus.PAST_DUE)
           expect(state.cases).toEqual([

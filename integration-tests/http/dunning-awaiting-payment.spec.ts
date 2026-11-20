@@ -1661,6 +1661,30 @@ medusaIntegrationTestRunner({
         }
       })
 
+      it("keeps the admin's reason off the storefront when it fails the retry, showing the customer a fixed message", async () => {
+        const container = getContainer()
+        const admin = { headers: await createAdminAuthHeaders(container) }
+        const customerId = "cus_dunning_resolve_reason"
+        const seeded = await seedDunningCase(container, "SUB-DUN-RESOLVE-REASON", { customer_id: customerId })
+        const note = "card flagged by fraud team, ticket OPS-1234"
+
+        await ageInFlightAttempt(container, seeded, DEFAULT_AWAITING_PAYMENT_RESOLVE_MIN_HOURS + 1)
+
+        expect((await api.post(route(seeded.dunningCase.id), { reason: note }, admin)).data).toMatchObject({
+          resolution: "failed",
+        })
+
+        const store = { headers: await createStoreCustomerHeaders(container, customerId) }
+        const { subscription } = (
+          await api.get(`/store/customers/me/subscriptions/${seeded.subscription.id}`, store)
+        ).data
+        const { attempts } = await readDunningState(container, seeded.dunningCase.id)
+
+        expect(subscription.payment_recovery.last_error_message).toEqual("Retry payment never arrived")
+        expect(JSON.stringify(subscription)).not.toContain(note)
+        expect(attempts[0].metadata).toMatchObject({ admin_resolution: { reason: note } })
+      })
+
       it("recovers the case through its in-flight attempt when the renewal order is already paid, however young the charge", async () => {
         const container = getContainer()
         const admin = { headers: await createAdminAuthHeaders(container) }
@@ -1745,7 +1769,10 @@ medusaIntegrationTestRunner({
               id: attempt.id,
               status: DunningAttemptStatus.FAILED,
               payment_reference: session.id,
-              error_message: expect.stringContaining("bank confirmed no transfer"),
+              error_message: "Retry payment never arrived",
+              metadata: expect.objectContaining({
+                admin_resolution: expect.objectContaining({ reason: "bank confirmed no transfer" }),
+              }),
             }),
           ])
           expect(state.subscription.status).toEqual(expected.subscription)

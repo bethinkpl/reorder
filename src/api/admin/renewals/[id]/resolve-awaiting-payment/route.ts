@@ -77,21 +77,25 @@ async function failUnpaidUnderLock(
     throw paymentMayStillArrive(input.renewal_cycle_id, minHours)
   }
 
-  const message = input.reason
-    ? `Renewal payment never arrived; resolved as failed by an admin: ${input.reason}`
-    : "Renewal payment never arrived; resolved as failed by an admin"
   const failed = await failAwaitingRenewalCycleUnderLock(container, {
     renewal_cycle_id: input.renewal_cycle_id,
     session_id: attempt.payment_reference,
     attempt_id: attempt.id,
     action: PaymentAttemptErrorCode.RESOLVED_UNPAID,
     reason: null,
-    message,
+    // Reaches the customer through the dunning case it opens; the admin's reason stays on the
+    // attempt's metadata.
+    message: "Renewal payment never arrived",
   })
 
   if (!failed) {
     throw noAttemptToFail(input.renewal_cycle_id)
   }
+
+  await container.resolve<RenewalModuleService>(RENEWAL_MODULE).updateRenewalAttempts({
+    id: attempt.id,
+    metadata: { admin_resolution: { reason: input.reason, resolved_by: input.triggered_by } },
+  })
 
   return RenewalAwaitingPaymentAdminResolution.FAILED
 }

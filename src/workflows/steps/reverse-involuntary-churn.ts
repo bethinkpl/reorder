@@ -7,7 +7,7 @@ import type CancellationModuleService from "../../modules/cancellation/service"
 import { CancellationFinalOutcome } from "../../modules/cancellation/types"
 import { DUNNING_MODULE } from "../../modules/dunning"
 import type DunningModuleService from "../../modules/dunning/service"
-import { DunningCaseStatus } from "../../modules/dunning/types"
+import { DunningCaseStatus, DunningRecoveryReason } from "../../modules/dunning/types"
 import { dunningErrors } from "../../modules/dunning/utils/errors"
 import { SUBSCRIPTION_MODULE } from "../../modules/subscription"
 import type SubscriptionModuleService from "../../modules/subscription/service"
@@ -223,7 +223,7 @@ export async function reverseInvoluntaryChurn(
     next_retry_at: null,
     recovered_at: now,
     closed_at: now,
-    recovery_reason: "reversed_by_admin",
+    recovery_reason: DunningRecoveryReason.REVERSED_BY_ADMIN,
     metadata: appendAuditMetadata(
       dunningCase.metadata,
       "reverse_involuntary_churn",

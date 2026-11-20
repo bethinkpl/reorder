@@ -4,12 +4,12 @@ import type { MedusaContainer } from "@medusajs/framework/types"
 import { isActiveDunningCase } from "../../modules/cancellation/utils/retention-offer-policy"
 import { DUNNING_MODULE } from "../../modules/dunning"
 import type DunningModuleService from "../../modules/dunning/service"
-import { DunningCaseStatus } from "../../modules/dunning/types"
+import { DunningCaseStatus, DunningRecoveryReason } from "../../modules/dunning/types"
 import { dunningErrors } from "../../modules/dunning/utils/errors"
 import { dunningCaseLockKey } from "../../modules/dunning/utils/lock-key"
 
 export const SUBSCRIPTION_CANCELLED_RECOVERY_REASON =
-  "subscription_cancelled_by_customer"
+  DunningRecoveryReason.SUBSCRIPTION_CANCELLED_BY_CUSTOMER
 
 const DUNNING_CASE_LOCK_TIMEOUT_SECONDS = 10
 

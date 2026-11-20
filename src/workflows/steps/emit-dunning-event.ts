@@ -6,6 +6,7 @@ import { Modules } from "@medusajs/framework/utils"
 import { createStep, StepResponse } from "@medusajs/framework/workflows-sdk"
 import {
   createDunningCorrelationId,
+  DunningLogEvents,
   getDunningErrorMessage,
   logDunningEvent,
 } from "../../modules/dunning/utils/observability"
@@ -50,7 +51,7 @@ export async function emitDunningEvent(
     const logger = container.resolve("logger")
 
     logDunningEvent(logger, "error", {
-      event: "dunning.event",
+      event: DunningLogEvents.EVENT,
       outcome: "failed",
       correlation_id:
         pickString(input.data, "correlation_id") ??

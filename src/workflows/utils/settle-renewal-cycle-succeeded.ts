@@ -33,6 +33,9 @@ import { persistSubscriptionLogEvent } from "../steps/create-subscription-log-ev
 import { buildPricingSnapshot } from "../steps/validate-subscription-cart"
 import { toISOStringOrNull } from "./date-output"
 
+/** Kept importable from here, where it was declared before it became an enum. */
+export { RenewalSettlementSource }
+
 type RenewalCycleRecord = {
   id: string
   subscription_id: string

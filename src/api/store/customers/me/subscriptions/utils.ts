@@ -998,10 +998,6 @@ export function sendStoreJson(res: MedusaResponse, body: unknown, status = 200) 
   return res.status(status).json(body)
 }
 
-/**
- * Medusa's error handler would replace both refusals' messages (and answer the busy lock with an
- * unexpected error), so the routes answer them.
- */
 export function mapStoreSubscriptionChangeConflict(error: unknown) {
   if (isRenewalPaymentInProgress(error)) {
     return {

@@ -206,7 +206,6 @@ async function recordRenewalPaymentFailure(
   return true
 }
 
-/** The caller holds the subscription's renewal lock. */
 export async function applyRenewalPaymentFailureUnderLock(
   container: MedusaContainer,
   input: FailAwaitingRenewalCycleInput
@@ -225,7 +224,6 @@ export async function applyRenewalPaymentFailureUnderLock(
     : await failAwaitingRenewalCycleUnderLock(container, input)
 }
 
-/** The caller holds the subscription's renewal lock. */
 export async function applyRecordedRenewalPaymentFailureUnderLock(
   container: MedusaContainer,
   attemptId: string

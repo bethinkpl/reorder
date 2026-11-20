@@ -240,7 +240,6 @@ export type DunningPaymentFailureApplication = {
   output: RunDunningRetryStepOutput | null
 }
 
-/** The caller holds `dunning:<case_id>`. */
 export async function applyDunningPaymentFailureUnderLock(
   container: MedusaContainer,
   input: FailAwaitingDunningAttemptInput & RetryMarkers
@@ -259,7 +258,6 @@ export async function applyDunningPaymentFailureUnderLock(
   return { applied: output !== null, output }
 }
 
-/** The caller holds `dunning:<case_id>` and emits the returned outcome's events. */
 export async function applyRecordedDunningPaymentFailureUnderLock(
   container: MedusaContainer,
   attemptId: string
@@ -305,10 +303,6 @@ export type FailAwaitingDunningAttemptUnderLockInput = RetryMarkers & {
   message?: string
 }
 
-/**
- * The caller holds `dunning:<case_id>` and emits the outcome's events with
- * `emitDunningAttemptOutcomeEvents`.
- */
 export async function failAwaitingDunningAttemptUnderLock(
   container: MedusaContainer,
   input: FailAwaitingDunningAttemptUnderLockInput

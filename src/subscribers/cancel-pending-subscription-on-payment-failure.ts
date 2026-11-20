@@ -98,6 +98,8 @@ async function reportingFailure(
       logger.warn(line)
     }
 
+    // Medusa emits `payment.webhook_received` with retry attempts, so a throw has the bus deliver
+    // it again; `payment.captured` is emitted once, which is why the capture subscriber never throws.
     if (retryable) {
       throw error
     }

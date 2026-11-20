@@ -290,6 +290,35 @@ medusaIntegrationTestRunner({
         ).toMatchObject({ retry_blocked_reason: RetryBlockedReason.PAYMENT_IN_PROGRESS })
       })
 
+      it("answers a storefront retry that finds another run holding the case as a retry in progress, as the eligibility check does", async () => {
+        const container = getContainer()
+        const customerId = "cus_dunning_store_retry_locked"
+        const seeded = await seedDunningCase(container, "SUB-DUN-STORE-RETRY-LOCKED", {
+          customer_id: customerId,
+          status: DunningCaseStatus.RETRY_SCHEDULED,
+          attempts: [DunningAttemptStatus.FAILED],
+        })
+        const caseId = seeded.dunningCase.id
+        const store = { headers: await createStoreCustomerHeaders(container, customerId) }
+        const before = await readDunningState(container, caseId)
+
+        const refusal = await whileLockHeld(container, `dunning:${caseId}`, () =>
+          api
+            .post(`/store/customers/me/subscriptions/${seeded.subscription.id}/retry-payment`, {}, store)
+            .catch((error: { response: unknown }) => error.response)
+        )
+
+        expect(refusal).toMatchObject({
+          status: 409,
+          data: {
+            type: "conflict",
+            blocked_reason: RetryBlockedReason.RETRY_IN_PROGRESS,
+            message: expect.stringContaining(`(${RetryBlockedReason.RETRY_IN_PROGRESS})`),
+          },
+        })
+        expect(await readDunningState(container, caseId)).toEqual(before)
+      })
+
       it.each([
         {
           signal: "the capture of its own awaiting attempt",

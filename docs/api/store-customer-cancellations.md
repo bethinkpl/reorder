@@ -197,6 +197,9 @@ Response:
 - a retry whose charge is still running, or is waiting for the payment provider's answer, is reported as
   `retry_in_progress` in both places, with `payment_recovery.state: "retrying"`; the admin API tells the two apart
   (`payment_in_progress` for the latter)
+- the same `409` with `blocked_reason` answers a retry that passed this check but was refused by the retry itself:
+  another run (a retry, a payment's capture or failure, an admin action) holding the case reads as
+  `retry_in_progress`, and so does a charge that started in the meantime
 
 ### `POST /store/customers/me/subscriptions/:id/cancellation`
 

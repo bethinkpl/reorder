@@ -3,6 +3,7 @@ import type {
   MedusaResponse,
 } from "@medusajs/framework/http"
 import { MedusaError } from "@medusajs/framework/utils"
+import { isLockBusyError } from "../../../../../../../common/utils/lock-busy-error"
 import type { PostStoreStartCancellationSchemaType } from "../../validators"
 import { cancelSubscriptionByCustomerWorkflow } from "../../../../../../../workflows"
 import { SubscriptionStatus } from "../../../../../../../modules/subscription/types"
@@ -12,24 +13,6 @@ import {
   requireStoreCustomer,
   sendStoreJson,
 } from "../../utils"
-
-function getNestedMessage(value: unknown): string | null {
-  if (!value) {
-    return null
-  }
-
-  if (typeof value === "string") {
-    return value
-  }
-
-  if (typeof value === "object") {
-    const { message, cause } = value as { message?: unknown, cause?: unknown }
-
-    return (typeof message === "string" && message) || getNestedMessage(cause)
-  }
-
-  return null
-}
 
 /** A workflow rethrows its step's error as a serialised plain object, which keeps the flag. */
 function findMedusaError(error: unknown): Pick<MedusaError, "type" | "message"> | null {
@@ -51,24 +34,37 @@ function findMedusaError(error: unknown): Pick<MedusaError, "type" | "message"> 
   return null
 }
 
+const CONFLICT_TYPES: readonly string[] = [
+  MedusaError.Types.CONFLICT,
+  MedusaError.Types.NOT_ALLOWED,
+]
+
 export function mapStoreCancellationError(error: unknown) {
+  if (isLockBusyError(error)) {
+    return {
+      status: 409,
+      type: MedusaError.Types.CONFLICT,
+      message:
+        "This subscription is already being updated. Please try again in a moment.",
+    }
+  }
+
   const medusaError = findMedusaError(error)
 
   if (medusaError) {
     const typeToStatus: Record<string, number> = {
       [MedusaError.Types.NOT_FOUND]: 404,
       [MedusaError.Types.INVALID_DATA]: 400,
-      [MedusaError.Types.CONFLICT]: 409,
     }
 
-    if (medusaError.type === MedusaError.Types.CONFLICT) {
+    if (CONFLICT_TYPES.includes(medusaError.type)) {
       const isRetryInFlight = medusaError.message
         .toLowerCase()
         .includes("retry is in flight")
 
       return {
         status: 409,
-        type: medusaError.type,
+        type: MedusaError.Types.CONFLICT,
         message: isRetryInFlight
           ? "A payment recovery attempt is in progress. Please try again in a moment."
           : "This subscription can't be cancelled right now. Please try again in a moment.",
@@ -79,21 +75,6 @@ export function mapStoreCancellationError(error: unknown) {
       status: typeToStatus[medusaError.type] ?? 500,
       type: medusaError.type,
       message: medusaError.message,
-    }
-  }
-
-  const message = getNestedMessage(error) ?? ""
-  const normalized = message.toLowerCase()
-
-  if (
-    normalized.includes("failed to acquire lock") ||
-    normalized.includes("acquiring lock")
-  ) {
-    return {
-      status: 409,
-      type: MedusaError.Types.CONFLICT,
-      message:
-        "This subscription is already being updated. Please try again in a moment.",
     }
   }
 

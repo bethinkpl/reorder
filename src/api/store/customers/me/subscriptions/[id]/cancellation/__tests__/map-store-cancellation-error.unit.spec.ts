@@ -1,4 +1,4 @@
-import { MedusaError } from "@medusajs/framework/utils"
+import { MedusaError, serializeError } from "@medusajs/framework/utils"
 import { mapStoreCancellationError } from "../route"
 import { cancellationErrors } from "../../../../../../../../modules/cancellation/utils/errors"
 import { dunningErrors } from "../../../../../../../../modules/dunning/utils/errors"
@@ -91,6 +91,21 @@ describe("mapStoreCancellationError", () => {
       name: "a lock acquisition failure",
       error: { name: "Error", message: "Failed to acquire lock for key \"renewal:subscription:sub_123\"" },
       message: /already being updated/,
+    },
+    {
+      name: "a lock another owner inserted first",
+      error: { name: "Error", message: "\"renewal:subscription:sub_123\" is already locked." },
+      message: /already being updated/,
+    },
+    {
+      name: "a lock timeout the provider raised as a conflict",
+      error: serializeError(new MedusaError(MedusaError.Types.CONFLICT, "Timed-out acquiring lock.")),
+      message: /already being updated/,
+    },
+    {
+      name: "a transition the workflow does not allow",
+      error: serializeError(new MedusaError(MedusaError.Types.NOT_ALLOWED, "Subscription 'sub_123' can't be cancelled")),
+      message: /can't be cancelled right now/,
     },
   ])("reads $name that a workflow rethrew as a serialised plain object", ({ error, message }) => {
     const mapped = mapStoreCancellationError(error)

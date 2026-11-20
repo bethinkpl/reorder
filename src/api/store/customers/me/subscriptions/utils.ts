@@ -6,8 +6,10 @@ import type {
 import { ContainerRegistrationKeys, MedusaError } from "@medusajs/framework/utils"
 import { CancellationCaseStatus } from "../../../../../modules/cancellation/types"
 import { DunningCaseStatus } from "../../../../../modules/dunning/types"
+import { getDunningErrorMessage } from "../../../../../modules/dunning/utils/observability"
 import {
   RetryBlockedReason,
+  readRetryBlockedReason,
   resolveRetryEligibility,
 } from "../../../../../modules/dunning/utils/retry-eligibility"
 import { resolveProductSubscriptionConfig } from "../../../../../modules/plan-offer/utils/effective-config"
@@ -27,6 +29,7 @@ import {
 } from "../../../../../workflows/utils/subscription-discount"
 import type { FrequencyInterval } from "../../../../../common/types/frequency-interval"
 import { isLockBusyError } from "../../../../../common/utils/lock-busy-error"
+import { type RouteError, mapMedusaErrorByType } from "../../../../route-errors"
 
 const ACTIVE_CANCELLATION_STATUSES = [
   CancellationCaseStatus.REQUESTED,
@@ -836,6 +839,54 @@ export class StoreRetryNotEligibleError extends MedusaError {
     )
     this.blocked_reason = storeReason
   }
+}
+
+export type StoreRetryRouteError = RouteError & {
+  blocked_reason?: RetryBlockedReason
+}
+
+/**
+ * A retry the workflow refused, also as the plain object a workflow run rethrows. A refusal naming
+ * why the case can't be retried, and a case another run holds, answer as the eligibility check
+ * does: with `blocked_reason` in the storefront's vocabulary.
+ */
+export function mapStoreRetryError(
+  subscriptionId: string,
+  error: unknown
+): StoreRetryRouteError {
+  const blockedReason = isLockBusyError(error)
+    ? RetryBlockedReason.RETRY_IN_PROGRESS
+    : readRetryBlockedReason(error)
+
+  if (blockedReason) {
+    const refusal = new StoreRetryNotEligibleError(subscriptionId, blockedReason)
+
+    return {
+      status: 409,
+      type: refusal.type,
+      message: refusal.message,
+      blocked_reason: refusal.blocked_reason,
+    }
+  }
+
+  const message = getDunningErrorMessage(error)
+  const byType = mapMedusaErrorByType(error, message)
+
+  if (byType) {
+    return byType
+  }
+
+  const normalized = message.toLowerCase()
+
+  if (normalized.includes("was not found")) {
+    return { status: 404, type: MedusaError.Types.NOT_FOUND, message }
+  }
+
+  if (normalized.includes("invalid") || normalized.includes("missing")) {
+    return { status: 400, type: MedusaError.Types.INVALID_DATA, message }
+  }
+
+  return { status: 409, type: MedusaError.Types.CONFLICT, message }
 }
 
 export async function getRetryableDunningCaseForSubscription(

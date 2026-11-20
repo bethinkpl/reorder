@@ -132,10 +132,39 @@ export function resolveRetryEligibility(input: RetryEligibilityInput): RetryElig
 }
 
 /**
- * The error `runDunningRetryStep` raises for a blocked retry. `SUBSCRIPTION_NOT_RETRYABLE` is
- * absent on purpose: the workflow settles the case before throwing, so it owns that branch.
+ * The error `runDunningRetryStep` raises for a blocked retry, carrying the reason as its `code`.
+ * `SUBSCRIPTION_NOT_RETRYABLE` is absent on purpose: the workflow settles the case before
+ * throwing, so it owns that branch.
  */
 export function toRetryBlockedError(
+  reason: RetryBlockedReason,
+  dunningCase: { id: string, status: DunningCaseStatus }
+) {
+  const error = describeRetryBlocked(reason, dunningCase)
+
+  error.code = reason
+
+  return error
+}
+
+const RETRY_BLOCKED_REASONS = new Set<string>(Object.values(RetryBlockedReason))
+
+/**
+ * The reason a `toRetryBlockedError` names, also read from the plain object a workflow run
+ * rethrows in its place; `null` for any other error.
+ */
+export function readRetryBlockedReason(error: unknown): RetryBlockedReason | null {
+  const code =
+    typeof error === "object" && error !== null && "code" in error
+      ? error.code
+      : null
+
+  return typeof code === "string" && RETRY_BLOCKED_REASONS.has(code)
+    ? (code as RetryBlockedReason)
+    : null
+}
+
+function describeRetryBlocked(
   reason: RetryBlockedReason,
   dunningCase: { id: string, status: DunningCaseStatus }
 ) {

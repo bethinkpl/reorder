@@ -1081,7 +1081,64 @@ medusaIntegrationTestRunner({
             payment_collection_id: seeded.session.payment_collection_id,
             renewal_cycle_id: seeded.cycle.id,
             reason: LatePaymentCapturedReason.ORDER_OVERPAID,
+            refund_amount: AWAITING_ORDER_TOTAL,
+            currency_code: "pln",
           },
+        ])
+      })
+
+      it("asks for only the surplus of a capture that over-pays the order, and still reports a later capture that surplus leaves unclaimed", async () => {
+        const container = getContainer()
+        const seeded = await seedAwaitingRenewal(container, { reference: "SUB-OVERPAID-PARTLY" })
+        const customer = await createPaymentSessionFixture(container, { amount: 40 })
+        const customerPayment = await captureOnOrder(container, seeded.order.id, customer.session.id, {
+          linkCollection: true,
+        })
+
+        await deliverCapture(container, customerPayment.id)
+
+        const renewalPayment = await captureOnOrder(container, seeded.order.id, seeded.session.id)
+        const emitted = watchEvents(container)
+
+        await deliverCapture(container, renewalPayment.id)
+
+        const late = await createPaymentSessionFixture(container, {
+          amount: 25,
+          context: { renewal_cycle_id: seeded.cycle.id },
+        })
+
+        await createRenewalAttemptSeed(container, {
+          renewal_cycle_id: seeded.cycle.id,
+          attempt_no: 2,
+          status: RenewalAttemptStatus.FAILED,
+          error_code: "declined",
+          payment_reference: late.session.id,
+          order_id: seeded.order.id,
+        })
+
+        const latePayment = await captureOnOrder(container, seeded.order.id, late.session.id, {
+          linkCollection: true,
+        })
+
+        await deliverCapture(container, latePayment.id)
+        await deliverCapture(container, latePayment.id)
+
+        expect((await readRenewalState(container, seeded)).cycle.status).toEqual(
+          RenewalCycleStatus.SUCCEEDED
+        )
+        expect(emitted(SubscriptionEvents.LATE_PAYMENT_CAPTURED).map((message) => message.data)).toEqual([
+          expect.objectContaining({
+            payment_id: renewalPayment.id,
+            reason: LatePaymentCapturedReason.ORDER_OVERPAID,
+            refund_amount: 40,
+            currency_code: "pln",
+          }),
+          expect.objectContaining({
+            payment_id: latePayment.id,
+            reason: LatePaymentCapturedReason.CYCLE_CLOSED,
+            refund_amount: 25,
+            currency_code: "pln",
+          }),
         ])
       })
 
@@ -1153,6 +1210,8 @@ medusaIntegrationTestRunner({
             subscription_id: seeded.subscription.id,
             order_id: seeded.order.id,
             payment_id: expect.stringMatching(new RegExp(`^(${retryPayment.id}|${renewalPayment.id})$`)),
+            refund_amount: RENEWAL_AMOUNT,
+            currency_code: "pln",
           }),
         ])
         expect((await readDunningState(container, seeded.dunningCase.id)).dunningCase.status).toEqual(

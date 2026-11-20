@@ -22,4 +22,11 @@ export type LatePaymentCapturedEventData = {
   dunning_case_id?: string
   dunning_attempt_id?: string
   reason: LatePaymentCapturedReason
+  /**
+   * What the host should refund, in the payment's currency as Medusa stores it: the payment's
+   * captured amount less its refunds, or for `order_overpaid` only the order's surplus not already
+   * claimed by another reported capture, never more than that.
+   */
+  refund_amount: number
+  currency_code: string
 }

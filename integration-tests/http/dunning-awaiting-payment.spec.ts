@@ -660,6 +660,8 @@ medusaIntegrationTestRunner({
             dunning_case_id: caseId,
             dunning_attempt_id: attempt.id,
             reason: LatePaymentCapturedReason.SUBSCRIPTION_TERMINAL,
+            refund_amount: RENEWAL_AMOUNT,
+            currency_code: "pln",
           },
         ])
         expect(events(DunningEvents.RECOVERED)).toHaveLength(0)
@@ -776,6 +778,8 @@ medusaIntegrationTestRunner({
             dunning_case_id: caseId,
             dunning_attempt_id: attempt.id,
             reason: LatePaymentCapturedReason.CASE_CLOSED,
+            refund_amount: RENEWAL_AMOUNT,
+            currency_code: "pln",
           }),
         ])
       })

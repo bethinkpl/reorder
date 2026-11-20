@@ -35,6 +35,7 @@ import {
   processRenewalCycleWorkflow,
 } from "../../src/workflows"
 import {
+  AWAITING_ORDER_TOTAL,
   type RenewalRefs,
   readRenewalState,
   seedAwaitingRenewal,
@@ -270,6 +271,8 @@ medusaIntegrationTestRunner({
               payment_collection_id: seeded.session.payment_collection_id,
               renewal_cycle_id: seeded.cycle.id,
               reason: LatePaymentCapturedReason.SUBSCRIPTION_TERMINAL,
+              refund_amount: AWAITING_ORDER_TOTAL,
+              currency_code: "pln",
             },
           ])
           expect(emitted(DunningEvents.STARTED)).toHaveLength(0)

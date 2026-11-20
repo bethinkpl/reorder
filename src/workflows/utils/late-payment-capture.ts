@@ -3,7 +3,7 @@ import type {
   IPaymentModuleService,
   MedusaContainer,
 } from "@medusajs/framework/types"
-import { Modules } from "@medusajs/framework/utils"
+import { MathBN, Modules } from "@medusajs/framework/utils"
 import { DUNNING_MODULE } from "../../modules/dunning"
 import type DunningModuleService from "../../modules/dunning/service"
 import {
@@ -74,7 +74,15 @@ type AttemptRecord = {
 type LateCaptureMarker = {
   payment_id: string
   reason: LatePaymentCapturedReason | null
+  /** What the reported event asked the host to refund. */
+  refund_amount?: number | null
   at: string
+}
+
+type PaymentBalance = {
+  currency_code: string
+  captured: number
+  refunded: number
 }
 
 type TrackedState = {
@@ -184,6 +192,30 @@ async function loadTrackedState(
   }
 }
 
+async function loadPaymentBalances(
+  container: MedusaContainer,
+  paymentIds: string[]
+): Promise<Map<string, PaymentBalance>> {
+  const payments = await container
+    .resolve<IPaymentModuleService>(Modules.PAYMENT)
+    .listPayments({ id: paymentIds }, { relations: ["captures", "refunds"] })
+
+  return new Map(
+    payments.map((payment) => [
+      payment.id,
+      {
+        currency_code: payment.currency_code,
+        captured: MathBN.sum(0, ...(payment.captures ?? []).map(({ amount }) => amount)).toNumber(),
+        refunded: MathBN.sum(0, ...(payment.refunds ?? []).map(({ amount }) => amount)).toNumber(),
+      },
+    ])
+  )
+}
+
+function unrefunded(balance: PaymentBalance, of: number = balance.captured): number {
+  return MathBN.max(0, MathBN.sub(of, balance.refunded)).toNumber()
+}
+
 /**
  * The renewal order's over-payment not yet claimed by a capture this plugin already asked the host
  * to refund. Without it two late captures on one order would both be reported as the surplus.
@@ -215,29 +247,32 @@ async function unclaimedOverpayment(
         })
       : []),
   ]
-  const claimedIds = attempts
+  const claims = attempts
     .map(readMarker)
-    .filter((marker): marker is LateCaptureMarker => Boolean(marker?.reason))
-    .map((marker) => marker.payment_id)
-    .filter((id) => id !== paymentId)
+    .filter((marker): marker is LateCaptureMarker =>
+      Boolean(marker?.reason && marker.payment_id !== paymentId)
+    )
 
-  if (!claimedIds.length) {
+  if (!claims.length) {
     return overpaid
   }
 
-  const claimed = await container
-    .resolve<IPaymentModuleService>(Modules.PAYMENT)
-    .listPayments({ id: claimedIds }, { relations: ["refunds"] })
-  const awaitingRefund = claimed.reduce((sum, payment) => {
-    const refunded = (payment.refunds ?? []).reduce(
-      (total, refund) => total + Number(refund.amount),
-      0
-    )
+  const balances = await loadPaymentBalances(
+    container,
+    claims.map(({ payment_id }) => payment_id)
+  )
+  // A claim the host has refunded is already out of the order's paid total; only what it still
+  // owes stands against the surplus.
+  const awaitingRefund = MathBN.sum(
+    0,
+    ...claims.map((claim) => {
+      const balance = balances.get(claim.payment_id)
 
-    return sum + Math.max(Number(payment.amount) - refunded, 0)
-  }, 0)
+      return balance ? unrefunded(balance, claim.refund_amount ?? balance.captured) : 0
+    })
+  )
 
-  return overpaid - awaitingRefund
+  return MathBN.sub(overpaid, awaitingRefund).toNumber()
 }
 
 function resolveReason(input: {
@@ -321,17 +356,18 @@ async function reconcileUnderLock(
   }
 
   const terminal = TERMINAL_SUBSCRIPTION_STATUSES.includes(subscription.status)
-  const overpaid = input.order_id
-    ? (await unclaimedOverpayment(container, input.order_id, input.payment_id)) > 0
-    : false
+  const surplus = input.order_id
+    ? await unclaimedOverpayment(container, input.order_id, input.payment_id)
+    : 0
   const reason = resolveReason({
     charge,
     terminal,
     kept_for_churn_reversal: input.kept_for_churn_reversal,
     attempt_unapplied: state.attempt_unapplied,
     parent_closed: state.parent_closed,
-    overpaid,
+    overpaid: surplus > 0,
   })
+  const refund = reason ? await refundFor(container, input.payment_id, reason, surplus) : null
   const close =
     (state.attempt_open && (terminal || state.parent_closed)) ||
     (state.attempt_unapplied && reason === LatePaymentCapturedReason.SUBSCRIPTION_TERMINAL)
@@ -343,11 +379,16 @@ async function reconcileUnderLock(
   if (attempt && (close || reason || failedBefore)) {
     await recordOnAttempt(container, charge, attempt, {
       close,
-      marker: { payment_id: input.payment_id, reason, at: new Date().toISOString() },
+      marker: {
+        payment_id: input.payment_id,
+        reason,
+        refund_amount: refund?.refund_amount ?? null,
+        at: new Date().toISOString(),
+      },
     })
   }
 
-  if (!reason) {
+  if (!reason || !refund) {
     return null
   }
 
@@ -364,6 +405,31 @@ async function reconcileUnderLock(
           dunning_attempt_id: charge.dunning_attempt_id,
         }),
     reason,
+    ...refund,
+  }
+}
+
+/** The whole unrefunded capture, except that an over-paid order only gives back its surplus. */
+async function refundFor(
+  container: MedusaContainer,
+  paymentId: string,
+  reason: LatePaymentCapturedReason,
+  surplus: number
+): Promise<Pick<LatePaymentCapturedEventData, "refund_amount" | "currency_code">> {
+  const balance = (await loadPaymentBalances(container, [paymentId])).get(paymentId)
+
+  if (!balance) {
+    throw new Error(`Payment '${paymentId}' was not found`)
+  }
+
+  const refundable = unrefunded(balance)
+
+  return {
+    refund_amount:
+      reason === LatePaymentCapturedReason.ORDER_OVERPAID
+        ? MathBN.min(surplus, refundable).toNumber()
+        : refundable,
+    currency_code: balance.currency_code,
   }
 }
 
@@ -379,7 +445,7 @@ async function emitLatePaymentCaptured(
       event: SubscriptionEvents.LATE_PAYMENT_CAPTURED,
       ...data,
       alertable: true,
-      message: `Payment '${data.payment_id}' was captured but not applied to subscription '${data.subscription_id}' (${data.reason}); the host app is asked to refund it`,
+      message: `Payment '${data.payment_id}' was captured but not applied to subscription '${data.subscription_id}' (${data.reason}); the host app is asked to refund ${data.refund_amount} ${data.currency_code} of it`,
     })
   )
 

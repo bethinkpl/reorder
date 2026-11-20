@@ -1123,6 +1123,58 @@ medusaIntegrationTestRunner({
         ])
       })
 
+      it("asks for a cancelled subscription's capture less what was already refunded on it", async () => {
+        const container = getContainer()
+        const seeded = await seedAwaitingRenewal(container, { reference: "SUB-LATE-CAPTURE-PART-REFUNDED" })
+
+        await cancelSubscriptionWorkflow(container).run({ input: { id: seeded.subscription.id } })
+
+        const payment = await captureOnOrder(container, seeded.order.id, seeded.session.id)
+
+        await paymentModule().refundPayment({ payment_id: payment.id, amount: 30 })
+
+        const emitted = watchEvents(container)
+
+        await deliverCapture(container, payment.id)
+
+        expect(emitted(SubscriptionEvents.LATE_PAYMENT_CAPTURED).map((message) => message.data)).toEqual([
+          expect.objectContaining({
+            payment_id: payment.id,
+            reason: LatePaymentCapturedReason.SUBSCRIPTION_TERMINAL,
+            refund_amount: AWAITING_ORDER_TOTAL - 30,
+            currency_code: "pln",
+          }),
+        ])
+      })
+
+      it("never asks for more of an over-paying capture than is left unrefunded on it", async () => {
+        const container = getContainer()
+        const seeded = await seedAwaitingRenewal(container, { reference: "SUB-OVERPAID-MOSTLY-REFUNDED" })
+        const customer = await createPaymentSessionFixture(container, { amount: AWAITING_ORDER_TOTAL })
+        const customerPayment = await captureOnOrder(container, seeded.order.id, customer.session.id, {
+          linkCollection: true,
+        })
+
+        await deliverCapture(container, customerPayment.id)
+
+        const renewalPayment = await captureOnOrder(container, seeded.order.id, seeded.session.id)
+
+        await paymentModule().refundPayment({ payment_id: renewalPayment.id, amount: 80 })
+
+        const emitted = watchEvents(container)
+
+        await deliverCapture(container, renewalPayment.id)
+
+        expect(emitted(SubscriptionEvents.LATE_PAYMENT_CAPTURED).map((message) => message.data)).toEqual([
+          expect.objectContaining({
+            payment_id: renewalPayment.id,
+            reason: LatePaymentCapturedReason.ORDER_OVERPAID,
+            refund_amount: AWAITING_ORDER_TOTAL - 80,
+            currency_code: "pln",
+          }),
+        ])
+      })
+
       it("asks for only the surplus of a capture that over-pays the order, and still reports a later capture that surplus leaves unclaimed", async () => {
         const container = getContainer()
         const seeded = await seedAwaitingRenewal(container, { reference: "SUB-OVERPAID-PARTLY" })

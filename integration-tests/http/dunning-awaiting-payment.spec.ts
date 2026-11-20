@@ -262,7 +262,7 @@ medusaIntegrationTestRunner({
         const detail = await api.get(storeUrl, store)
         const refusal = await api
           .post(`${storeUrl}/retry-payment`, {}, store)
-          .catch((error) => error.response)
+          .catch((error: { response: { status: number, data: Record<string, unknown> } }) => error.response)
 
         expect(list.data.subscriptions).toEqual([
           expect.objectContaining({ payment_recovery: expect.objectContaining(retryInProgress) }),

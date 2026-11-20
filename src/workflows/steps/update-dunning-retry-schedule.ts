@@ -2,6 +2,7 @@ import { createStep, StepResponse } from "@medusajs/framework/workflows-sdk"
 import { DUNNING_MODULE } from "../../modules/dunning"
 import type DunningModuleService from "../../modules/dunning/service"
 import {
+  CHARGE_IN_FLIGHT_DUNNING_CASE_STATUSES,
   DunningCaseStatus,
   type DunningRetrySchedule,
 } from "../../modules/dunning/types"
@@ -76,10 +77,7 @@ export const updateDunningRetryScheduleStep = createStep(
       throw dunningErrors.alreadyUnrecovered(dunningCase.id)
     }
 
-    if (
-      dunningCase.status === DunningCaseStatus.RETRYING ||
-      dunningCase.status === DunningCaseStatus.AWAITING_PAYMENT
-    ) {
+    if (CHARGE_IN_FLIGHT_DUNNING_CASE_STATUSES.includes(dunningCase.status)) {
       throw dunningErrors.retryInFlightTransitionBlocked(
         dunningCase.id,
         "update retry schedule"

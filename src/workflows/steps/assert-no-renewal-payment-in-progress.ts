@@ -12,6 +12,7 @@ import { dunningCaseLockKey } from "../../modules/dunning/utils/lock-key"
 import { RENEWAL_MODULE } from "../../modules/renewal"
 import type RenewalModuleService from "../../modules/renewal/service"
 import {
+  CHARGE_IN_FLIGHT_RENEWAL_CYCLE_STATUSES,
   RenewalAttemptStatus,
   RenewalCycleStatus,
 } from "../../modules/renewal/types"
@@ -42,7 +43,7 @@ async function describeRenewalPaymentInProgress(
   const renewalModule = container.resolve<RenewalModuleService>(RENEWAL_MODULE)
   const cycles = await renewalModule.listRenewalCycles({
     subscription_id: subscriptionId,
-    status: [RenewalCycleStatus.AWAITING_PAYMENT, RenewalCycleStatus.PROCESSING],
+    status: [...CHARGE_IN_FLIGHT_RENEWAL_CYCLE_STATUSES],
   })
 
   for (const cycle of cycles) {

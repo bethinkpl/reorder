@@ -16,6 +16,7 @@ import {
 } from "./steps/shared-cancellation-log"
 import { startCancellationCaseStep } from "./steps/start-cancellation-case"
 import { renewalSubscriptionLockKey } from "../modules/renewal/utils/lock-key"
+import { subscriptionLockKey } from "../modules/subscription/utils/lock-key"
 
 const CUSTOMER_ENTRY_SOURCE = "customer_self_service" as const
 const CUSTOMER_LOG_SOURCE = "storefront" as const
@@ -33,15 +34,15 @@ export type CancelSubscriptionByCustomerWorkflowInput = {
 export const cancelSubscriptionByCustomerWorkflow = createWorkflow(
   "cancel-subscription-by-customer",
   function (input: CancelSubscriptionByCustomerWorkflowInput) {
-    const subscriptionLockKey = transform({ input }, function ({ input }) {
-      return `subscription:${input.subscription_id}`
+    const customerLockKey = transform({ input }, function ({ input }) {
+      return subscriptionLockKey(input.subscription_id)
     })
     const renewalLockKey = transform({ input }, function ({ input }) {
       return renewalSubscriptionLockKey(input.subscription_id)
     })
 
     acquireLockStep({
-      key: subscriptionLockKey,
+      key: customerLockKey,
       timeout: 5,
       ttl: 120,
       executeOnSubWorkflow: true,
@@ -169,7 +170,7 @@ export const cancelSubscriptionByCustomerWorkflow = createWorkflow(
     })
 
     releaseLockStep({
-      key: subscriptionLockKey,
+      key: customerLockKey,
       executeOnSubWorkflow: true,
     }).config({
       name: "release-customer-cancellation-subscription-lock",

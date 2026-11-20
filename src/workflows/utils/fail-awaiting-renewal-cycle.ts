@@ -1,7 +1,9 @@
 import type { MedusaContainer } from "@medusajs/framework/types"
 import {
   type PaymentFailureAction,
+  type PaymentFailureHandling,
   readReportedPaymentFailure,
+  type RecordedPaymentFailureOutcome,
   type ReportedPaymentFailure,
 } from "../../common/types/reported-payment-failure"
 import {
@@ -26,6 +28,7 @@ import {
   getRenewalErrorMessage,
   isAlertableRenewalFailure,
   logRenewalEvent,
+  RenewalLogEvents,
 } from "../../modules/renewal/utils/observability"
 import { SUBSCRIPTION_MODULE } from "../../modules/subscription"
 import type SubscriptionModuleService from "../../modules/subscription/service"
@@ -117,8 +120,6 @@ async function findAttemptForSession(
     : null
 }
 
-export type RenewalPaymentFailureHandling = "applied" | "recorded" | "ignored"
-
 /**
  * Applies a provider's failure report under the subscription's renewal lock. When another holder
  * keeps the lock for the whole wait, the report is recorded on the attempt it names instead, for
@@ -128,7 +129,7 @@ export type RenewalPaymentFailureHandling = "applied" | "recorded" | "ignored"
 export async function failAwaitingRenewalCycle(
   container: MedusaContainer,
   input: FailAwaitingRenewalCycleInput & { session_id: string }
-): Promise<RenewalPaymentFailureHandling> {
+): Promise<PaymentFailureHandling> {
   const renewalModule = container.resolve<RenewalModuleService>(RENEWAL_MODULE)
 
   const cycle = await loadCycle(renewalModule, input.renewal_cycle_id)
@@ -194,7 +195,7 @@ async function recordRenewalPaymentFailure(
   })
 
   logRenewalEvent(container.resolve("logger"), "info", {
-    event: "renewal.payment_failure_recorded",
+    event: RenewalLogEvents.PAYMENT_FAILURE_RECORDED,
     correlation_id: createRenewalCorrelationId("renewal-payment-failure"),
     renewal_cycle_id: cycle.id,
     subscription_id: cycle.subscription_id,
@@ -228,8 +229,6 @@ export async function applyRenewalPaymentFailureUnderLock(
     : await failAwaitingRenewalCycleUnderLock(container, input)
 }
 
-export type RecordedRenewalFailureOutcome = "applied" | "order_paid" | "stale"
-
 /**
  * Applies the failure recorded on an attempt while its lock was busy, unless the renewal order has
  * been paid since (a capture wins), and clears it either way. The caller holds the subscription's
@@ -238,7 +237,7 @@ export type RecordedRenewalFailureOutcome = "applied" | "order_paid" | "stale"
 export async function applyRecordedRenewalPaymentFailureUnderLock(
   container: MedusaContainer,
   attemptId: string
-): Promise<RecordedRenewalFailureOutcome | null> {
+): Promise<RecordedPaymentFailureOutcome | null> {
   const renewalModule = container.resolve<RenewalModuleService>(RENEWAL_MODULE)
   const [attempt] = await renewalModule.listRenewalAttempts({ id: attemptId })
   const failure = readReportedPaymentFailure(attempt?.reported_payment_failure)
@@ -313,7 +312,7 @@ async function failAttemptOfClosedCycleUnderLock(
   })
 
   logRenewalEvent(container.resolve("logger"), "info", {
-    event: "renewal.late_payment_failure",
+    event: RenewalLogEvents.LATE_PAYMENT_FAILURE,
     outcome: "failed",
     correlation_id: createRenewalCorrelationId("renewal-late-payment-failure"),
     renewal_cycle_id: cycle.id,
@@ -471,7 +470,7 @@ export async function failAwaitingRenewalCycleUnderLock(
       })
     } catch (dunningError) {
       logRenewalEvent(logger, "warn", {
-        event: "renewal.dunning",
+        event: RenewalLogEvents.DUNNING,
         outcome: "failed",
         correlation_id: correlationId,
         renewal_cycle_id: cycle.id,
@@ -488,7 +487,7 @@ export async function failAwaitingRenewalCycleUnderLock(
     }
   } else {
     logRenewalEvent(logger, "warn", {
-      event: "renewal.dunning",
+      event: RenewalLogEvents.DUNNING,
       outcome: "blocked",
       correlation_id: correlationId,
       renewal_cycle_id: cycle.id,
@@ -503,7 +502,7 @@ export async function failAwaitingRenewalCycleUnderLock(
   }
 
   logRenewalEvent(logger, "error", {
-    event: "renewal.execution",
+    event: RenewalLogEvents.EXECUTION,
     outcome: "failed",
     correlation_id: correlationId,
     renewal_cycle_id: cycle.id,

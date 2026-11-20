@@ -18,6 +18,7 @@ import {
   isAlertableRenewalFailure,
   logRenewalEvent,
   type RenewalFailureKind,
+  RenewalLogEvents,
 } from "../modules/renewal/utils/observability"
 import { processRenewalCycleWorkflow, RenewalRunOutcome } from "../workflows"
 
@@ -105,7 +106,7 @@ async function processCycle(
     const { outcome } = result
 
     logRenewalEvent(logger, outcome === RenewalRunOutcome.FAILED ? "warn" : "info", {
-      event: "renewal.job.cycle",
+      event: RenewalLogEvents.JOB_CYCLE,
       job_name: JOB_NAME,
       outcome,
       correlation_id: cycleCorrelationId,
@@ -125,7 +126,7 @@ async function processCycle(
     const level = isBlockedKind ? "warn" : "error"
 
     logRenewalEvent(logger, level, {
-      event: "renewal.job.cycle",
+      event: RenewalLogEvents.JOB_CYCLE,
       job_name: JOB_NAME,
       outcome: isBlockedKind ? "blocked" : "failed",
       correlation_id: cycleCorrelationId,
@@ -163,7 +164,7 @@ export default async function processRenewalCyclesJob(
   const dueBefore = nowUtc.plus({ days: 1 }).startOf("day").toJSDate()
 
   logRenewalEvent(logger, "info", {
-    event: "renewal.job",
+    event: RenewalLogEvents.JOB,
     job_name: JOB_NAME,
     outcome: "started",
     correlation_id: jobCorrelationId,
@@ -182,7 +183,7 @@ export default async function processRenewalCyclesJob(
     // Contention is expected (fail-fast skip), but a provider outage lands
     // here too — surface the underlying error so ops can tell them apart.
     logRenewalEvent(logger, "warn", {
-      event: "renewal.job",
+      event: RenewalLogEvents.JOB,
       job_name: JOB_NAME,
       outcome: "blocked",
       correlation_id: jobCorrelationId,
@@ -203,7 +204,7 @@ export default async function processRenewalCyclesJob(
 
     if (fetched.length === 0) {
       logRenewalEvent(logger, "info", {
-        event: "renewal.job",
+        event: RenewalLogEvents.JOB,
         job_name: JOB_NAME,
         outcome: "completed",
         correlation_id: jobCorrelationId,
@@ -268,7 +269,7 @@ export default async function processRenewalCyclesJob(
     await renewalModule.advanceRenewalJobCursor(JOB_NAME, windowKey, nextCursor)
 
     logRenewalEvent(logger, "info", {
-      event: "renewal.job",
+      event: RenewalLogEvents.JOB,
       job_name: JOB_NAME,
       outcome: "completed",
       correlation_id: jobCorrelationId,
@@ -285,7 +286,7 @@ export default async function processRenewalCyclesJob(
     })
   } catch (error) {
     logRenewalEvent(logger, "error", {
-      event: "renewal.job",
+      event: RenewalLogEvents.JOB,
       job_name: JOB_NAME,
       outcome: "failed",
       correlation_id: jobCorrelationId,

@@ -20,6 +20,7 @@ import { renewalErrors } from "../../../../../modules/renewal/utils/errors"
 import {
   createRenewalCorrelationId,
   logRenewalEvent,
+  RenewalLogEvents,
 } from "../../../../../modules/renewal/utils/observability"
 import { failAwaitingRenewalCycleUnderLock } from "../../../../../workflows/utils/fail-awaiting-renewal-cycle"
 import { settleAwaitingRenewalCycleUnderLock } from "../../../../../workflows/utils/settle-awaiting-renewal-cycle"
@@ -152,7 +153,7 @@ async function resolveAwaitingPayment(
     )
 
   logRenewalEvent(container.resolve("logger"), "info", {
-    event: "renewal.awaiting_payment_resolved",
+    event: RenewalLogEvents.AWAITING_PAYMENT_RESOLVED,
     outcome: resolution === RenewalAwaitingPaymentAdminResolution.SETTLED ? "succeeded" : "failed",
     correlation_id: createRenewalCorrelationId("renewal-admin-resolve"),
     renewal_cycle_id: cycle.id,

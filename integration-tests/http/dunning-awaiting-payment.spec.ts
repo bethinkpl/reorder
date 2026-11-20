@@ -4,10 +4,7 @@ import type { MedusaContainer } from "@medusajs/framework/types"
 import { Modules, PaymentActions } from "@medusajs/framework/utils"
 import { PaymentAttemptErrorCode } from "../../src/common/types/payment-attempt-error-code"
 import processDunningRetriesJob from "../../src/jobs/process-dunning-retries"
-import {
-  DUNNING_AWAITING_PAYMENT_OVERDUE_EVENT,
-  reconcilePaidDunningCases,
-} from "../../src/jobs/reconcile-paid-dunning-cases"
+import { reconcilePaidDunningCases } from "../../src/jobs/reconcile-paid-dunning-cases"
 import { getAdminCancellationDetail } from "../../src/modules/cancellation/utils/admin-query"
 import { DUNNING_MODULE } from "../../src/modules/dunning"
 import { DunningEvents } from "../../src/modules/dunning/events"
@@ -64,6 +61,7 @@ import {
 } from "../helpers/payment-fixtures"
 import { RENEWAL_AMOUNT, answerAuthorizationWithNull } from "../helpers/renewal-charge-fixtures"
 import { atTime, watchEvents, watchLogs } from "../helpers/spy-fixtures"
+import { DunningLogEvents } from "../../src/modules/dunning/utils/observability"
 
 const mockCreateOrUpdateOrderPaymentCollectionRun = jest.fn()
 const mockCreatePaymentSessionsRun = jest.fn()
@@ -139,10 +137,10 @@ medusaIntegrationTestRunner({
           }),
         ])
         expect(events(DunningEvents.ATTEMPT_FAILED).length).toBe(0)
-        expect(logs({ event: "dunning.job.case", dunning_case_id: caseId })).toEqual([
+        expect(logs({ event: DunningLogEvents.JOB_CASE, dunning_case_id: caseId })).toEqual([
           expect.objectContaining({ outcome: "awaiting_payment", success_count: 0, failure_count: 0 }),
         ])
-        expect(logs({ event: "dunning.job", outcome: "completed" })).toEqual([
+        expect(logs({ event: DunningLogEvents.JOB, outcome: "completed" })).toEqual([
           expect.objectContaining({
             processed_count: 1,
             recovered_count: 0,
@@ -555,7 +553,7 @@ medusaIntegrationTestRunner({
         const submittedAt = new Date(seeded.attempts[0].attempt.started_at).getTime()
         const logs = watchLogs(container)
         const overdueAlerts = () =>
-          logs({ event: DUNNING_AWAITING_PAYMENT_OVERDUE_EVENT, alertable: true })
+          logs({ event: DunningLogEvents.AWAITING_PAYMENT_OVERDUE, alertable: true })
         const sweepAt = (offsetMs: number) =>
           atTime(submittedAt + offsetMs, () => reconcilePaidDunningCases(container))
 
@@ -685,7 +683,7 @@ medusaIntegrationTestRunner({
           }),
         ])
         expect(
-          logs({ event: "dunning.stale_retry", alertable: true, dunning_case_id: seeded.dunningCase.id })
+          logs({ event: DunningLogEvents.STALE_RETRY, alertable: true, dunning_case_id: seeded.dunningCase.id })
         ).toHaveLength(1)
 
         await expect(
@@ -825,7 +823,7 @@ medusaIntegrationTestRunner({
         ])
         expect(state.dunningCase.status).toEqual(DunningCaseStatus.UNRECOVERED)
         expect(state.subscription.status).toEqual(SubscriptionStatus.PAYMENT_FAILED)
-        expect(logs({ event: "dunning.customer_recovery", outcome: "blocked" })).toHaveLength(1)
+        expect(logs({ event: DunningLogEvents.CUSTOMER_RECOVERY, outcome: "blocked" })).toHaveLength(1)
         expect(events(SubscriptionEvents.LATE_PAYMENT_CAPTURED)).toHaveLength(0)
       })
 
@@ -907,7 +905,7 @@ medusaIntegrationTestRunner({
             error_code: PaymentAttemptErrorCode.NO_PAYMENT_SIGNAL,
           }),
         ])
-        expect(logs({ event: "dunning.stale_attempt_closed" })).toEqual([
+        expect(logs({ event: DunningLogEvents.STALE_ATTEMPT_CLOSED })).toEqual([
           expect.objectContaining({ dunning_case_id: seeded.dunningCase.id, alertable: false }),
         ])
       })

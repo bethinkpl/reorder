@@ -9,6 +9,12 @@ export type PaymentFailureAction =
   | `${PaymentActions}`
   | PaymentAttemptErrorCode.RESOLVED_UNPAID
 
+/** What became of a failure report: applied now, recorded for the sweep, or nothing it could fail. */
+export type PaymentFailureHandling = "applied" | "recorded" | "ignored"
+
+/** What the sweep did with a recorded failure: applied it, dropped it for a paid order, or found it stale. */
+export type RecordedPaymentFailureOutcome = "applied" | "order_paid" | "stale"
+
 /**
  * A provider's failure report for an attempt's charge that could not be applied when it arrived,
  * because another holder kept the attempt's lock. The awaiting-payment sweeps apply it later.

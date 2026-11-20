@@ -18,6 +18,7 @@ import {
 import {
   createRenewalCorrelationId,
   logRenewalEvent,
+  RenewalLogEvents,
 } from "../../modules/renewal/utils/observability"
 import { SUBSCRIPTION_MODULE } from "../../modules/subscription"
 import type SubscriptionModuleService from "../../modules/subscription/service"
@@ -403,7 +404,7 @@ export async function settleRenewalCycleSucceeded(
   }
 
   logRenewalEvent(logger, "info", {
-    event: "renewal.execution",
+    event: RenewalLogEvents.EXECUTION,
     outcome: "succeeded",
     correlation_id: correlationId,
     renewal_cycle_id: cycle.id,

@@ -33,6 +33,7 @@ import {
 import { runUnderLock } from "./run-under-lock"
 import { renewalSubscriptionLockKey } from "../../modules/renewal/utils/lock-key"
 import { dunningCaseLockKey } from "../../modules/dunning/utils/lock-key"
+import { SubscriptionLogEvents } from "../../modules/subscription/utils/observability"
 
 const LOCK_WAIT_SECONDS = 30
 const LOCK_HOLD_SECONDS = 120
@@ -507,7 +508,7 @@ export async function reconcileTrackedCapture(
     container.resolve("logger").error(
       JSON.stringify({
         domain: "subscriptions",
-        event: "tracked_capture_reconciliation_failed",
+        event: SubscriptionLogEvents.TRACKED_CAPTURE_RECONCILIATION_FAILED,
         subscription_id: input.subscription_id,
         payment_id: input.payment_id,
         payment_session_id: charge.session_id,

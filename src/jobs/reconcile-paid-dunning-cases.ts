@@ -13,6 +13,7 @@ import {
 } from "../modules/dunning/types"
 import {
   createDunningCorrelationId,
+  DunningLogEvents,
   getDunningErrorMessage,
   logDunningEvent,
 } from "../modules/dunning/utils/observability"
@@ -45,9 +46,6 @@ const ALERT_LOCK_TIMEOUT_SECONDS = 5
 const CASE_LOCK_HOLD_SECONDS = 120
 /** Well past the 120 s a retry run holds its case's lock, so a run still in progress is never touched. */
 const STALE_RETRY_MINUTES = 10
-
-export const DUNNING_AWAITING_PAYMENT_OVERDUE_EVENT =
-  "dunning.awaiting_payment_overdue"
 
 /** Active cases no retry run is working on: a running retry finds the paid order itself. */
 const IDLE_DUNNING_CASE_STATUSES = ACTIVE_DUNNING_CASE_STATUSES.filter(
@@ -139,7 +137,7 @@ async function raiseOverdueAlertOnce(
         })
 
         logDunningEvent(container.resolve("logger"), "warn", {
-          event: DUNNING_AWAITING_PAYMENT_OVERDUE_EVENT,
+          event: DunningLogEvents.AWAITING_PAYMENT_OVERDUE,
           outcome: "awaiting_payment",
           correlation_id: input.correlationId,
           dunning_case_id: caseId,
@@ -264,7 +262,7 @@ async function failStaleAttemptUnderLock(
   })
 
   logDunningEvent(container.resolve("logger"), "warn", {
-    event: "dunning.stale_attempt_closed",
+    event: DunningLogEvents.STALE_ATTEMPT_CLOSED,
     outcome: "failed",
     correlation_id: input.correlationId,
     dunning_case_id: dunningCase.id,
@@ -344,7 +342,7 @@ async function settleStaleRetryUnderLock(
     })
 
     logDunningEvent(logger, "warn", {
-      event: "dunning.stale_retry",
+      event: DunningLogEvents.STALE_RETRY,
       outcome: "awaiting_payment",
       correlation_id: input.correlationId,
       dunning_case_id: caseId,
@@ -373,7 +371,7 @@ async function settleStaleRetryUnderLock(
   })
 
   logDunningEvent(logger, "error", {
-    event: "dunning.stale_retry",
+    event: DunningLogEvents.STALE_RETRY,
     outcome: "failed",
     correlation_id: input.correlationId,
     dunning_case_id: caseId,
@@ -516,7 +514,7 @@ async function applyRecordedPaymentFailures(
         }
 
         logDunningEvent(container.resolve("logger"), "info", {
-          event: "dunning.recorded_payment_failure",
+          event: DunningLogEvents.RECORDED_PAYMENT_FAILURE,
           correlation_id: input.correlationId,
           dunning_case_id: attempt.dunning_case_id,
           job_name: JOB_NAME,

@@ -26,6 +26,7 @@ import {
   reconcileTrackedCapture,
 } from "../workflows/utils/late-payment-capture"
 import { settleAwaitingRenewalCycle } from "../workflows/utils/settle-awaiting-renewal-cycle"
+import { SubscriptionLogEvents } from "../modules/subscription/utils/observability"
 
 type PaymentRecord = {
   id: string
@@ -119,7 +120,7 @@ async function runDunningRecovery(
     container.resolve("logger").error(
       JSON.stringify({
         domain: "subscriptions",
-        event: "dunning_recovery_from_capture_failed",
+        event: SubscriptionLogEvents.DUNNING_RECOVERY_FROM_CAPTURE_FAILED,
         subscription_id: input.subscription_id,
         order_id: input.order_id,
         dunning_case_id: dunningCaseId,
@@ -150,7 +151,7 @@ async function runAwaitingRenewalSettlement(
     container.resolve("logger").error(
       JSON.stringify({
         domain: "subscriptions",
-        event: "renewal_settlement_from_capture_failed",
+        event: SubscriptionLogEvents.RENEWAL_SETTLEMENT_FROM_CAPTURE_FAILED,
         subscription_id: input.subscription_id,
         renewal_cycle_id: input.renewal_cycle_id,
         payment_id: input.payment_id,
@@ -245,7 +246,7 @@ export async function activateSubscriptionOnPaymentCaptured(
       container.resolve("logger").error(
         JSON.stringify({
           domain: "subscriptions",
-          event: "payment_captured_on_terminal_subscription",
+          event: SubscriptionLogEvents.PAYMENT_CAPTURED_ON_TERMINAL_SUBSCRIPTION,
           subscription_id: subscription.id,
           payment_id: paymentId,
           status: subscription.status,

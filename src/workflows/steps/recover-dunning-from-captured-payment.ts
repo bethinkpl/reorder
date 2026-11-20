@@ -12,6 +12,7 @@ import {
 import { dunningErrors } from "../../modules/dunning/utils/errors"
 import {
   createDunningCorrelationId,
+  DunningLogEvents,
   getDunningErrorMessage,
   logDunningEvent,
 } from "../../modules/dunning/utils/observability"
@@ -244,7 +245,7 @@ export async function recoverDunningFromCapturedPayment(
       })
     } catch (error) {
       logDunningEvent(logger, "error", {
-        event: "dunning.customer_recovery",
+        event: DunningLogEvents.CUSTOMER_RECOVERY,
         outcome: "failed",
         correlation_id: correlationId,
         dunning_case_id: dunningCase.id,
@@ -262,7 +263,7 @@ export async function recoverDunningFromCapturedPayment(
 
   if (dunningCase.status === DunningCaseStatus.UNRECOVERED) {
     logDunningEvent(logger, "error", {
-      event: "dunning.customer_recovery",
+      event: DunningLogEvents.CUSTOMER_RECOVERY,
       outcome: "blocked",
       correlation_id: correlationId,
       dunning_case_id: dunningCase.id,
@@ -323,7 +324,7 @@ export async function recoverDunningFromCapturedPayment(
   )
 
   logDunningEvent(logger, "info", {
-    event: "dunning.customer_recovery",
+    event: DunningLogEvents.CUSTOMER_RECOVERY,
     outcome: "succeeded",
     correlation_id: correlationId,
     dunning_case_id: dunningCase.id,

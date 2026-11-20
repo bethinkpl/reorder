@@ -16,6 +16,7 @@ import {
 import { dunningErrors } from "../../../../../modules/dunning/utils/errors"
 import {
   createDunningCorrelationId,
+  DunningLogEvents,
   logDunningEvent,
 } from "../../../../../modules/dunning/utils/observability"
 import {
@@ -184,7 +185,7 @@ async function resolveAwaitingPayment(
     )
 
   logDunningEvent(container.resolve("logger"), "info", {
-    event: "dunning.awaiting_payment_resolved",
+    event: DunningLogEvents.AWAITING_PAYMENT_RESOLVED,
     outcome: resolution === DunningAwaitingPaymentAdminResolution.RECOVERED ? "succeeded" : "failed",
     correlation_id: createDunningCorrelationId("dunning-admin-resolve"),
     dunning_case_id: dunningCase.id,

@@ -24,6 +24,7 @@ import { dunningErrors } from "../../modules/dunning/utils/errors"
 import {
   classifyDunningFailure,
   createDunningCorrelationId,
+  DunningLogEvents,
   getDunningErrorMessage,
   isAlertableDunningFailure,
   logDunningEvent,
@@ -950,7 +951,7 @@ async function parkForManualResolution(
   } as any)
 
   logDunningEvent(logger, "error", {
-    event: "dunning.retry",
+    event: DunningLogEvents.RETRY,
     outcome: "failed",
     correlation_id: input.correlationId,
     dunning_case_id: updatedCase.id,
@@ -1098,7 +1099,7 @@ async function awaitProviderAnswer(
     })
   } catch (error) {
     logDunningEvent(container.resolve("logger"), "error", {
-      event: "dunning.retry",
+      event: DunningLogEvents.RETRY,
       outcome: "failed",
       correlation_id: input.correlationId,
       dunning_case_id: input.dunningCase.id,
@@ -1130,7 +1131,7 @@ async function awaitProviderAnswer(
   })
 
   logDunningEvent(container.resolve("logger"), "info", {
-    event: "dunning.retry",
+    event: DunningLogEvents.RETRY,
     outcome: "completed",
     correlation_id: input.correlationId,
     dunning_case_id: input.dunningCase.id,
@@ -1173,7 +1174,7 @@ async function finalizeRecoveredRenewal(
       await run()
     } catch (error) {
       logDunningEvent(container.resolve("logger"), "error", {
-        event: "dunning.retry",
+        event: DunningLogEvents.RETRY,
         outcome: "failed",
         correlation_id: input.correlationId,
         dunning_case_id: dunningCase.id,
@@ -1247,7 +1248,7 @@ export async function runDunningRetry(
   }
 
   logDunningEvent(logger, "info", {
-    event: "dunning.retry",
+    event: DunningLogEvents.RETRY,
     outcome: "started",
     correlation_id: correlationId,
     dunning_case_id: dunningCase.id,
@@ -1441,7 +1442,7 @@ export async function runDunningRetry(
         : null
 
       logDunningEvent(logger, "info", {
-        event: "dunning.retry",
+        event: DunningLogEvents.RETRY,
         outcome: "succeeded",
         correlation_id: correlationId,
         dunning_case_id: updatedCase.id,
@@ -1542,7 +1543,7 @@ export async function runDunningRetry(
       )
 
       logDunningEvent(logger, "info", {
-        event: "dunning.retry",
+        event: DunningLogEvents.RETRY,
         outcome: "blocked",
         correlation_id: correlationId,
         dunning_case_id: updatedCase.id,
@@ -1612,7 +1613,7 @@ export async function runDunningRetry(
       )
 
       logDunningEvent(logger, "warn", {
-        event: "dunning.retry",
+        event: DunningLogEvents.RETRY,
         outcome: "failed",
         correlation_id: correlationId,
         dunning_case_id: updatedCase.id,
@@ -1697,7 +1698,7 @@ export async function runDunningRetry(
   } catch (error) {
     const failureKind = classifyDunningFailure(error)
     logDunningEvent(logger, isAlertableDunningFailure(failureKind) ? "error" : "warn", {
-      event: "dunning.retry",
+      event: DunningLogEvents.RETRY,
       outcome: isAlertableDunningFailure(failureKind) ? "failed" : "blocked",
       correlation_id: correlationId,
       dunning_case_id: dunningCase.id,
@@ -1722,7 +1723,7 @@ export async function runDunningRetry(
     // attempt row may be left processing, which the admin can see.
     if (parked.output) {
       logDunningEvent(logger, "error", {
-        event: "dunning.retry",
+        event: DunningLogEvents.RETRY,
         outcome: "failed",
         correlation_id: correlationId,
         dunning_case_id: dunningCase.id,
@@ -1855,7 +1856,7 @@ export async function settleDeclinedRetryAttempt(
     } as any)
 
     logDunningEvent(logger, "warn", {
-      event: "dunning.retry",
+      event: DunningLogEvents.RETRY,
       outcome: "failed",
       correlation_id: correlationId,
       dunning_case_id: updatedCase.id,
@@ -1941,7 +1942,7 @@ export async function settleDeclinedRetryAttempt(
     } as any)
 
     logDunningEvent(logger, "warn", {
-      event: "dunning.retry",
+      event: DunningLogEvents.RETRY,
       outcome: "failed",
       correlation_id: correlationId,
       dunning_case_id: updatedCase.id,
@@ -1995,7 +1996,7 @@ export async function settleDeclinedRetryAttempt(
   } as any)
 
   logDunningEvent(logger, "warn", {
-    event: "dunning.retry",
+    event: DunningLogEvents.RETRY,
     outcome: "failed",
     correlation_id: correlationId,
     dunning_case_id: updatedCase.id,

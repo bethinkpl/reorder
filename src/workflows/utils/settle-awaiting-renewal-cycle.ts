@@ -11,6 +11,7 @@ import {
 import {
   createRenewalCorrelationId,
   logRenewalEvent,
+  RenewalLogEvents,
 } from "../../modules/renewal/utils/observability"
 import { SUBSCRIPTION_MODULE } from "../../modules/subscription"
 import type SubscriptionModuleService from "../../modules/subscription/service"
@@ -198,7 +199,7 @@ export async function settleAwaitingRenewalCycleUnderLock(
     }
 
     logRenewalEvent(container.resolve("logger"), "warn", {
-      event: "renewal.awaiting_payment_settlement",
+      event: RenewalLogEvents.AWAITING_PAYMENT_SETTLEMENT,
       outcome: "succeeded",
       correlation_id:
         stored.audit?.correlation_id ??
@@ -255,7 +256,7 @@ export async function settleAwaitingRenewalCycle(
   // Most likely the run that submitted the charge, which parks the cycle for the capture to be
   // settled by the awaiting-payment sweep; a cycle it fails to park is settled there as well.
   logRenewalEvent(container.resolve("logger"), "info", {
-    event: "renewal.awaiting_payment_settlement",
+    event: RenewalLogEvents.AWAITING_PAYMENT_SETTLEMENT,
     correlation_id: createRenewalCorrelationId("renewal-awaiting-payment"),
     renewal_cycle_id: cycle.id,
     subscription_id: cycle.subscription_id,

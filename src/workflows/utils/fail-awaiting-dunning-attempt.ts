@@ -2,7 +2,9 @@ import type { MedusaContainer } from "@medusajs/framework/types"
 import { ContainerRegistrationKeys } from "@medusajs/framework/utils"
 import {
   type PaymentFailureAction,
+  type PaymentFailureHandling,
   readReportedPaymentFailure,
+  type RecordedPaymentFailureOutcome,
   type ReportedPaymentFailure,
 } from "../../common/types/reported-payment-failure"
 import { DUNNING_MODULE } from "../../modules/dunning"
@@ -16,6 +18,7 @@ import {
 } from "../../modules/dunning/types"
 import {
   createDunningCorrelationId,
+  DunningLogEvents,
   logDunningEvent,
 } from "../../modules/dunning/utils/observability"
 import { SUBSCRIPTION_MODULE } from "../../modules/subscription"
@@ -133,7 +136,7 @@ async function failAttemptOfClosedCaseUnderLock(
   })
 
   logDunningEvent(container.resolve("logger"), "info", {
-    event: "dunning.late_payment_failure",
+    event: DunningLogEvents.LATE_PAYMENT_FAILURE,
     outcome: "failed",
     correlation_id: createDunningCorrelationId("dunning-late-payment-failure"),
     dunning_case_id: input.dunning_case_id,
@@ -146,8 +149,6 @@ async function failAttemptOfClosedCaseUnderLock(
   return true
 }
 
-export type DunningPaymentFailureHandling = "applied" | "recorded" | "ignored"
-
 /**
  * Applies a provider's failure report for a retry charge under the case's lock. When another
  * holder keeps the lock for the whole wait, the report is recorded on the attempt instead, for the
@@ -157,7 +158,7 @@ export type DunningPaymentFailureHandling = "applied" | "recorded" | "ignored"
 export async function failAwaitingDunningAttempt(
   container: MedusaContainer,
   input: FailAwaitingDunningAttemptInput
-): Promise<DunningPaymentFailureHandling> {
+): Promise<PaymentFailureHandling> {
   const markers = await readRetryMarkers(container, input.session_id)
 
   if (!markers) {
@@ -228,7 +229,7 @@ async function recordDunningPaymentFailure(
   })
 
   logDunningEvent(container.resolve("logger"), "info", {
-    event: "dunning.payment_failure_recorded",
+    event: DunningLogEvents.PAYMENT_FAILURE_RECORDED,
     correlation_id: createDunningCorrelationId("dunning-payment-failure"),
     dunning_case_id: input.dunning_case_id,
     attempt_no: attempt.attempt_no,
@@ -268,8 +269,6 @@ export async function applyDunningPaymentFailureUnderLock(
   return { applied: output !== null, output }
 }
 
-export type RecordedDunningFailureOutcome = "applied" | "order_paid" | "stale"
-
 /**
  * Applies the failure recorded on an attempt while its case's lock was busy, unless the renewal
  * order has been paid since (a capture wins), and clears it either way. The caller holds
@@ -279,7 +278,7 @@ export async function applyRecordedDunningPaymentFailureUnderLock(
   container: MedusaContainer,
   attemptId: string
 ): Promise<{
-  outcome: RecordedDunningFailureOutcome
+  outcome: RecordedPaymentFailureOutcome
   output: RunDunningRetryStepOutput | null
 } | null> {
   const dunningModule = container.resolve<DunningModuleService>(DUNNING_MODULE)

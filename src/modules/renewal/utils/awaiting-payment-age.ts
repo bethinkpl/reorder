@@ -12,8 +12,6 @@ export const DEFAULT_AWAITING_PAYMENT_RESOLVE_MIN_HOURS = 96
 export const AWAITING_PAYMENT_RESOLVE_MIN_HOURS_ENV =
   "RENEWAL_AWAITING_PAYMENT_RESOLVE_MIN_HOURS"
 
-export const AWAITING_PAYMENT_OVERDUE_EVENT = "renewal.awaiting_payment_overdue"
-
 const HOUR_MS = 60 * 60 * 1000
 
 function parsePositiveHours(raw: string | undefined, fallback: number): number {

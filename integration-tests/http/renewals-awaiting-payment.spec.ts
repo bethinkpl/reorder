@@ -62,6 +62,8 @@ import {
   createSubscriptionSeed,
 } from "../helpers/renewal-fixtures"
 import { watchEvents, watchLogs } from "../helpers/spy-fixtures"
+import { RenewalLogEvents } from "../../src/modules/renewal/utils/observability"
+import { SubscriptionLogEvents } from "../../src/modules/subscription/utils/observability"
 
 const mockCreateOrderRun = jest.fn()
 const mockCreateOrUpdateOrderPaymentCollectionRun = jest.fn()
@@ -238,7 +240,7 @@ medusaIntegrationTestRunner({
         expect(state.failedLogs).toHaveLength(0)
         expect(state.cases).toHaveLength(0)
         expect(
-          logEntries({ event: "renewal.execution" })
+          logEntries({ event: RenewalLogEvents.EXECUTION })
             .filter((entry) => entry.renewal_cycle_id === seeded.cycle.id)
             .map((entry) => entry.outcome)
         ).toEqual(["started", "awaiting_payment"])
@@ -654,7 +656,7 @@ medusaIntegrationTestRunner({
         await expect(deliverCapture(getContainer(), payment.id)).resolves.toBeUndefined()
 
         expect((await readRenewalState(getContainer(), seeded)).cycle.status).toEqual(RenewalCycleStatus.SUCCEEDED)
-        expect(logEntries({ event: "dunning_recovery_from_capture_failed" })).toEqual(
+        expect(logEntries({ event: SubscriptionLogEvents.DUNNING_RECOVERY_FROM_CAPTURE_FAILED })).toEqual(
           only({
             subscription_id: seeded.subscription.id,
             order_id: seeded.order.id,
@@ -687,7 +689,7 @@ medusaIntegrationTestRunner({
 
         const state = await readRenewalState(getContainer(), seeded)
 
-        expect(logEntries({ event: "renewal_settlement_from_capture_failed" })).toEqual(
+        expect(logEntries({ event: SubscriptionLogEvents.RENEWAL_SETTLEMENT_FROM_CAPTURE_FAILED })).toEqual(
           only({
             renewal_cycle_id: seeded.cycle.id,
             subscription_id: seeded.subscription.id,

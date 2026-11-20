@@ -16,6 +16,7 @@ import { failAwaitingDunningAttempt } from "../workflows/utils/fail-awaiting-dun
 import { failAwaitingRenewalCycle } from "../workflows/utils/fail-awaiting-renewal-cycle"
 import { readRenewalSessionMarkers } from "../workflows/utils/renewal-session-marker"
 import { isLockBusyError } from "../common/utils/lock-busy-error"
+import { SubscriptionLogEvents } from "../modules/subscription/utils/observability"
 
 type WebhookEventData = {
   provider: string
@@ -145,7 +146,7 @@ export async function cancelPendingSubscriptionOnPaymentFailure(
     await reportingFailure(
       container,
       {
-        event: "renewal_payment_failure_handling_failed",
+        event: SubscriptionLogEvents.RENEWAL_PAYMENT_FAILURE_HANDLING_FAILED,
         payment_session_id: sessionId,
         renewal_cycle_id: renewalCycleId,
       },
@@ -166,7 +167,7 @@ export async function cancelPendingSubscriptionOnPaymentFailure(
     await reportingFailure(
       container,
       {
-        event: "dunning_payment_failure_handling_failed",
+        event: SubscriptionLogEvents.DUNNING_PAYMENT_FAILURE_HANDLING_FAILED,
         payment_session_id: sessionId,
         dunning_case_id: dunningCaseId,
       },

@@ -31,6 +31,7 @@ import {
   getRenewalErrorMessage,
   isAlertableRenewalFailure,
   logRenewalEvent,
+  RenewalLogEvents,
 } from "../../modules/renewal/utils/observability"
 import { normalizeActivityLogEvent } from "../../modules/activity-log/utils/normalize-log-event"
 import {
@@ -1220,7 +1221,7 @@ async function recordRenewalFailure(
       })
     } catch (dunningError) {
       logRenewalEvent(logger, "warn", {
-        event: "renewal.dunning",
+        event: RenewalLogEvents.DUNNING,
         outcome: "failed",
         correlation_id: context.correlation_id,
         renewal_cycle_id: context.renewal_cycle_id,
@@ -1238,7 +1239,7 @@ async function recordRenewalFailure(
   }
 
   logRenewalEvent(logger, "error", {
-    event: "renewal.execution",
+    event: RenewalLogEvents.EXECUTION,
     outcome: "failed",
     correlation_id: context.correlation_id,
     renewal_cycle_id: context.renewal_cycle_id,
@@ -1342,7 +1343,7 @@ export const prepareRenewalCycleStep = createStep(
     const subscription = await loadSubscription(container, cycle.subscription_id)
 
     logRenewalEvent(logger, "info", {
-      event: "renewal.execution",
+      event: RenewalLogEvents.EXECUTION,
       outcome: "started",
       correlation_id: correlationId,
       renewal_cycle_id: cycle.id,
@@ -1371,7 +1372,7 @@ export const prepareRenewalCycleStep = createStep(
       const failureKind = classifyRenewalFailure(error)
 
       logRenewalEvent(logger, "warn", {
-        event: "renewal.execution",
+        event: RenewalLogEvents.EXECUTION,
         outcome: "blocked",
         correlation_id: correlationId,
         renewal_cycle_id: cycle.id,
@@ -1678,7 +1679,7 @@ async function parkRenewalCycleAwaitingPayment(
 
   if (cycle.status === RenewalCycleStatus.FAILED) {
     logRenewalEvent(container.resolve("logger"), "error", {
-      event: "renewal.awaiting_payment_park",
+      event: RenewalLogEvents.AWAITING_PAYMENT_PARK,
       outcome: "failed",
       correlation_id: context.correlation_id,
       renewal_cycle_id: context.renewal_cycle_id,
@@ -1714,7 +1715,7 @@ async function parkRenewalCycleAwaitingPayment(
   })
 
   logRenewalEvent(container.resolve("logger"), "info", {
-    event: "renewal.execution",
+    event: RenewalLogEvents.EXECUTION,
     outcome: "awaiting_payment",
     correlation_id: context.correlation_id,
     renewal_cycle_id: context.renewal_cycle_id,
@@ -1747,7 +1748,7 @@ async function parkOrReportRenewalCycle(
     )
   } catch (error) {
     logRenewalEvent(container.resolve("logger"), "error", {
-      event: "renewal.awaiting_payment_park",
+      event: RenewalLogEvents.AWAITING_PAYMENT_PARK,
       outcome: "failed",
       correlation_id: context.correlation_id,
       renewal_cycle_id: context.renewal_cycle_id,

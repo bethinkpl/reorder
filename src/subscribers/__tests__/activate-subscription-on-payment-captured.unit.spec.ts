@@ -5,6 +5,7 @@ import { DunningCaseStatus } from "../../modules/dunning/types"
 import { SUBSCRIPTION_MODULE } from "../../modules/subscription"
 import { SubscriptionStatus } from "../../modules/subscription/types"
 import { activateSubscriptionOnPaymentCaptured } from "../activate-subscription-on-payment-captured"
+import { SubscriptionLogEvents } from "../../modules/subscription/utils/observability"
 
 const ensureNextRenewalCycleRun = jest.fn(
   async (_input: { input: { subscription_id: string } }) => ({ result: {} })
@@ -276,7 +277,7 @@ describe("activateSubscriptionOnPaymentCaptured", () => {
     expect(errorLogs).toEqual([
       JSON.stringify({
         domain: "subscriptions",
-        event: "payment_captured_on_terminal_subscription",
+        event: SubscriptionLogEvents.PAYMENT_CAPTURED_ON_TERMINAL_SUBSCRIPTION,
         subscription_id: "sub_1",
         payment_id: "pay_1",
         status: SubscriptionStatus.PAYMENT_FAILED,
@@ -394,7 +395,7 @@ describe("activateSubscriptionOnPaymentCaptured", () => {
     expect(errorLogs).toHaveLength(1)
     expect(JSON.parse(errorLogs[0])).toEqual({
       domain: "subscriptions",
-      event: "dunning_recovery_from_capture_failed",
+      event: SubscriptionLogEvents.DUNNING_RECOVERY_FROM_CAPTURE_FAILED,
       subscription_id: "sub_1",
       order_id: "order_1",
       dunning_case_id: "dun_1",
@@ -442,7 +443,7 @@ describe("activateSubscriptionOnPaymentCaptured", () => {
     expect(recoverDunningRun).not.toHaveBeenCalled()
     expect(errorLogs).toHaveLength(1)
     expect(JSON.parse(errorLogs[0]).event).toBe(
-      "payment_captured_on_terminal_subscription"
+      SubscriptionLogEvents.PAYMENT_CAPTURED_ON_TERMINAL_SUBSCRIPTION
     )
   })
 

@@ -11,7 +11,6 @@ import {
   RenewalCycleStatus,
 } from "../modules/renewal/types"
 import {
-  AWAITING_PAYMENT_OVERDUE_EVENT,
   isAwaitingPaymentOverdue,
   isOverdueAlertDue,
   resolveAwaitingPaymentAlertHours,
@@ -22,6 +21,7 @@ import {
   createRenewalCorrelationId,
   getRenewalErrorMessage,
   logRenewalEvent,
+  RenewalLogEvents,
 } from "../modules/renewal/utils/observability"
 import { SUBSCRIPTION_MODULE } from "../modules/subscription"
 import type SubscriptionModuleService from "../modules/subscription/service"
@@ -136,7 +136,7 @@ async function raiseOverdueAlertOnce(
         })
 
         logRenewalEvent(container.resolve("logger"), "warn", {
-          event: AWAITING_PAYMENT_OVERDUE_EVENT,
+          event: RenewalLogEvents.AWAITING_PAYMENT_OVERDUE,
           outcome: "awaiting_payment",
           correlation_id: input.correlationId,
           renewal_cycle_id: cycle.id,
@@ -268,7 +268,7 @@ async function failStaleAttemptUnderLock(
   })
 
   logRenewalEvent(container.resolve("logger"), "warn", {
-    event: "renewal.stale_attempt_closed",
+    event: RenewalLogEvents.STALE_ATTEMPT_CLOSED,
     outcome: "failed",
     correlation_id: input.correlationId,
     renewal_cycle_id: cycle.id,
@@ -349,7 +349,7 @@ async function applyRecordedPaymentFailures(
         }
 
         logRenewalEvent(container.resolve("logger"), "info", {
-          event: "renewal.recorded_payment_failure",
+          event: RenewalLogEvents.RECORDED_PAYMENT_FAILURE,
           correlation_id: input.correlationId,
           renewal_cycle_id: cycle.id,
           subscription_id: cycle.subscription_id,
@@ -514,7 +514,7 @@ async function settlePaidProcessingCycle(
   }
 
   logRenewalEvent(container.resolve("logger"), "warn", {
-    event: "renewal.processing_settlement",
+    event: RenewalLogEvents.PROCESSING_SETTLEMENT,
     outcome: "succeeded",
     correlation_id: input.correlationId,
     renewal_cycle_id: cycle.id,

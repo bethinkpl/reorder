@@ -14,10 +14,8 @@ jest.mock("../../workflows/recover-dunning-from-captured-payment", () => ({
 
 import type { MedusaContainer } from "@medusajs/framework/types"
 import { DunningCaseStatus } from "../../modules/dunning/types"
-import {
-  DUNNING_AWAITING_PAYMENT_OVERDUE_EVENT,
-  reconcilePaidDunningCases,
-} from "../reconcile-paid-dunning-cases"
+import { DunningLogEvents } from "../../modules/dunning/utils/observability"
+import { reconcilePaidDunningCases } from "../reconcile-paid-dunning-cases"
 
 const recoverRun = jest.fn(async () => ({ result: {} }))
 
@@ -232,7 +230,7 @@ describe("reconcilePaidDunningCases", () => {
       .map((line) => JSON.parse(line))
       .filter(
         (entry) =>
-          entry.event === DUNNING_AWAITING_PAYMENT_OVERDUE_EVENT &&
+          entry.event === DunningLogEvents.AWAITING_PAYMENT_OVERDUE &&
           entry.alertable === true
       )
       .map((entry) => entry.dunning_case_id)

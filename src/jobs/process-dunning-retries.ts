@@ -3,6 +3,7 @@ import { Modules } from "@medusajs/framework/utils"
 import {
   classifyDunningFailure,
   createDunningCorrelationId,
+  DunningLogEvents,
   getDunningErrorMessage,
   isAlertableDunningFailure,
   logDunningEvent,
@@ -41,7 +42,7 @@ async function processCase(
     const awaiting = result.outcome === "awaiting_payment"
 
     logDunningEvent(logger, "info", {
-      event: "dunning.job.case",
+      event: DunningLogEvents.JOB_CASE,
       job_name: JOB_NAME,
       outcome: awaiting ? "awaiting_payment" : "succeeded",
       correlation_id: caseCorrelationId,
@@ -68,7 +69,7 @@ async function processCase(
     const alertable = isAlertableDunningFailure(failureKind)
 
     logDunningEvent(logger, alertable ? "error" : "warn", {
-      event: "dunning.job.case",
+      event: DunningLogEvents.JOB_CASE,
       job_name: JOB_NAME,
       outcome: alertable ? "failed" : "blocked",
       correlation_id: caseCorrelationId,
@@ -99,7 +100,7 @@ async function runJob(container: MedusaContainer) {
   const jobCorrelationId = createDunningCorrelationId(JOB_NAME)
 
   logDunningEvent(logger, "info", {
-    event: "dunning.job",
+    event: DunningLogEvents.JOB,
     job_name: JOB_NAME,
     outcome: "started",
     correlation_id: jobCorrelationId,
@@ -131,7 +132,7 @@ async function runJob(container: MedusaContainer) {
         rawCount = result.count
 
         logDunningEvent(logger, "info", {
-          event: "dunning.job.discovery",
+          event: DunningLogEvents.JOB_DISCOVERY,
           job_name: JOB_NAME,
           outcome: "completed",
           correlation_id: jobCorrelationId,
@@ -146,7 +147,7 @@ async function runJob(container: MedusaContainer) {
       }
 
       logDunningEvent(logger, "info", {
-        event: "dunning.job.batch",
+        event: DunningLogEvents.JOB_BATCH,
         job_name: JOB_NAME,
         outcome: "started",
         correlation_id: jobCorrelationId,
@@ -195,7 +196,7 @@ async function runJob(container: MedusaContainer) {
     }
 
     logDunningEvent(logger, "info", {
-      event: "dunning.job",
+      event: DunningLogEvents.JOB,
       job_name: JOB_NAME,
       outcome: "completed",
       correlation_id: jobCorrelationId,
@@ -227,7 +228,7 @@ async function runJob(container: MedusaContainer) {
     })
   } catch (error) {
     logDunningEvent(logger, "error", {
-      event: "dunning.job",
+      event: DunningLogEvents.JOB,
       job_name: JOB_NAME,
       outcome: "failed",
       correlation_id: jobCorrelationId,
@@ -264,7 +265,7 @@ export default async function processDunningRetriesJob(
       message.toLowerCase().includes("timeout")
 
     logDunningEvent(logger, blocked ? "warn" : "error", {
-      event: "dunning.job",
+      event: DunningLogEvents.JOB,
       job_name: JOB_NAME,
       outcome: blocked ? "blocked" : "failed",
       correlation_id: jobCorrelationId,

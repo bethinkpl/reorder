@@ -19,7 +19,6 @@ import type RenewalModuleService from "../../src/modules/renewal/service"
 import { RenewalAttemptStatus, RenewalCycleStatus } from "../../src/modules/renewal/types"
 import {
   AWAITING_PAYMENT_ALERT_HOURS_ENV,
-  AWAITING_PAYMENT_OVERDUE_EVENT,
   AWAITING_PAYMENT_RESOLVE_MIN_HOURS_ENV,
   DEFAULT_AWAITING_PAYMENT_RESOLVE_MIN_HOURS,
 } from "../../src/modules/renewal/utils/awaiting-payment-age"
@@ -56,6 +55,7 @@ import {
 } from "../helpers/renewal-fixtures"
 import { atTime, watchEvents, watchLogs } from "../helpers/spy-fixtures"
 import { createStoreCustomerHeaders } from "../helpers/subscription-fixtures"
+import { RenewalLogEvents } from "../../src/modules/renewal/utils/observability"
 
 jest.setTimeout(120 * 1000)
 
@@ -537,7 +537,7 @@ medusaIntegrationTestRunner({
         ])
         expect(state.failedLogs).toEqual([expect.objectContaining({ actor_type: ActivityLogActorType.SYSTEM })])
         expect(state.cases).toHaveLength(0)
-        expect(entries({ event: AWAITING_PAYMENT_OVERDUE_EVENT })).toHaveLength(0)
+        expect(entries({ event: RenewalLogEvents.AWAITING_PAYMENT_OVERDUE })).toHaveLength(0)
       })
 
       it("fails a charge left in flight on a closed cycle once it is past the minimum age with no signal, leaves a younger one alone, and still reports a capture that arrives after that once", async () => {
@@ -572,7 +572,7 @@ medusaIntegrationTestRunner({
             error_code: PaymentAttemptErrorCode.NO_PAYMENT_SIGNAL,
           }),
         ])
-        expect(entries({ event: "renewal.stale_attempt_closed" })).toEqual([
+        expect(entries({ event: RenewalLogEvents.STALE_ATTEMPT_CLOSED })).toEqual([
           expect.objectContaining({ renewal_cycle_id: seeded.cycle.id, alertable: false }),
         ])
         expect(emitted(SubscriptionEvents.LATE_PAYMENT_CAPTURED)).toHaveLength(0)
@@ -629,7 +629,7 @@ medusaIntegrationTestRunner({
         const seeded = await seedAwaitingRenewal(container, { reference: "SUB-AWL-OVERDUE" })
         const entries = watchLogs(container)
         const alerts = () =>
-          entries({ event: AWAITING_PAYMENT_OVERDUE_EVENT }).filter((entry) => entry.alertable === true)
+          entries({ event: RenewalLogEvents.AWAITING_PAYMENT_OVERDUE }).filter((entry) => entry.alertable === true)
         const raisedOnce = [expect.objectContaining({ renewal_cycle_id: seeded.cycle.id })]
 
         process.env[AWAITING_PAYMENT_ALERT_HOURS_ENV] = "2"
@@ -885,7 +885,7 @@ medusaIntegrationTestRunner({
         await processRenewalCyclesJob(container)
 
         const cycleEntries = (cycleId: string) =>
-          entries({ event: "renewal.job.cycle" }).filter((entry) => entry.renewal_cycle_id === cycleId)
+          entries({ event: RenewalLogEvents.JOB_CYCLE }).filter((entry) => entry.renewal_cycle_id === cycleId)
 
         expect((await readRenewalState(container, { subscription, cycle })).cycle.status).toEqual(
           RenewalCycleStatus.AWAITING_PAYMENT
@@ -896,7 +896,7 @@ medusaIntegrationTestRunner({
         expect(cycleEntries(owned.cycle.id)).toEqual([
           expect.objectContaining({ outcome: "blocked", alertable: false }),
         ])
-        expect(entries({ event: "renewal.job" }).filter((entry) => entry.outcome === "completed")).toEqual([
+        expect(entries({ event: RenewalLogEvents.JOB }).filter((entry) => entry.outcome === "completed")).toEqual([
           expect.objectContaining({ success_count: 0, failure_count: 0, blocked_count: 1, awaiting_count: 1 }),
         ])
         expect(await readRenewalState(container, owned)).toEqual(ownedBefore)
@@ -933,7 +933,7 @@ medusaIntegrationTestRunner({
 
           expect(await readRenewalState(container, owned)).toEqual(before)
           expect(
-            entries({ event: "renewal.force" }).filter(
+            entries({ event: RenewalLogEvents.FORCE }).filter(
               (entry) => entry.renewal_cycle_id === owned.cycle.id && entry.outcome !== "started"
             )
           ).toEqual([

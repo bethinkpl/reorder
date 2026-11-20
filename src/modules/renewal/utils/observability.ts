@@ -1,4 +1,5 @@
 import { randomUUID } from "crypto"
+import type { OperationLogOutcome } from "../../../common/types/log-outcome"
 import type { RenewalTriggerType } from "../types"
 
 type LoggerLike = {
@@ -8,6 +9,24 @@ type LoggerLike = {
 }
 
 type LogLevel = "info" | "warn" | "error"
+
+/** The `event` of each renewal log line. */
+export const RenewalLogEvents = {
+  EXECUTION: "renewal.execution",
+  DUNNING: "renewal.dunning",
+  FORCE: "renewal.force",
+  JOB: "renewal.job",
+  JOB_CYCLE: "renewal.job.cycle",
+  AWAITING_PAYMENT_PARK: "renewal.awaiting_payment_park",
+  AWAITING_PAYMENT_SETTLEMENT: "renewal.awaiting_payment_settlement",
+  AWAITING_PAYMENT_RESOLVED: "renewal.awaiting_payment_resolved",
+  AWAITING_PAYMENT_OVERDUE: "renewal.awaiting_payment_overdue",
+  PROCESSING_SETTLEMENT: "renewal.processing_settlement",
+  PAYMENT_FAILURE_RECORDED: "renewal.payment_failure_recorded",
+  RECORDED_PAYMENT_FAILURE: "renewal.recorded_payment_failure",
+  LATE_PAYMENT_FAILURE: "renewal.late_payment_failure",
+  STALE_ATTEMPT_CLOSED: "renewal.stale_attempt_closed",
+} as const
 
 export type RenewalFailureKind =
   | "already_processing"
@@ -39,14 +58,7 @@ type RenewalLogPayload = {
   processed_count?: number
   batch_size?: number
   job_name?: string
-  outcome?:
-    | "started"
-    | "succeeded"
-    | "failed"
-    | "blocked"
-    | "completed"
-    | "awaiting_payment"
-    | "park_failed"
+  outcome?: OperationLogOutcome | "park_failed"
   failure_kind?: RenewalFailureKind
   alertable?: boolean
   message?: string

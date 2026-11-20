@@ -16,6 +16,7 @@ import {
   getRenewalErrorMessage,
   isAlertableRenewalFailure,
   logRenewalEvent,
+  RenewalLogEvents,
 } from "../../modules/renewal/utils/observability"
 import { normalizeActivityLogEvent } from "../../modules/activity-log/utils/normalize-log-event"
 import {
@@ -71,7 +72,7 @@ export const forceRenewalCycleStep = createStep(
     )) as unknown as ForceRenewalSubscriptionDisplayRecord
 
     logRenewalEvent(logger, "info", {
-      event: "renewal.force",
+      event: RenewalLogEvents.FORCE,
       outcome: "started",
       correlation_id: correlationId,
       renewal_cycle_id: cycle.id,
@@ -159,7 +160,7 @@ export const forceRenewalCycleStep = createStep(
       const blocked = CYCLE_STATE_BLOCKED_RENEWAL_FAILURE_KINDS.includes(failureKind)
 
       logRenewalEvent(logger, blocked ? "warn" : "error", {
-        event: "renewal.force",
+        event: RenewalLogEvents.FORCE,
         outcome: blocked ? "blocked" : "failed",
         correlation_id: correlationId,
         renewal_cycle_id: cycle.id,
@@ -175,7 +176,7 @@ export const forceRenewalCycleStep = createStep(
     }
 
     logRenewalEvent(logger, outcome === RenewalRunOutcome.FAILED ? "warn" : "info", {
-      event: "renewal.force",
+      event: RenewalLogEvents.FORCE,
       outcome,
       correlation_id: correlationId,
       renewal_cycle_id: cycle.id,

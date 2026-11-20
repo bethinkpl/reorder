@@ -30,10 +30,7 @@ import {
   RenewalCycleStatus,
 } from "../../src/modules/renewal/types"
 import { renewalSubscriptionLockKey } from "../../src/modules/renewal/utils/lock-key"
-import {
-  AWAITING_PAYMENT_OVERDUE_EVENT,
-  DEFAULT_AWAITING_PAYMENT_ALERT_HOURS,
-} from "../../src/modules/renewal/utils/awaiting-payment-age"
+import { DEFAULT_AWAITING_PAYMENT_ALERT_HOURS } from "../../src/modules/renewal/utils/awaiting-payment-age"
 import { SUBSCRIPTION_MODULE } from "../../src/modules/subscription"
 import type SubscriptionModuleService from "../../src/modules/subscription/service"
 import {
@@ -81,6 +78,8 @@ import {
   createSubscriptionSeed,
 } from "../helpers/renewal-fixtures"
 import { atTime, watchEvents, watchLogs } from "../helpers/spy-fixtures"
+import { DunningLogEvents } from "../../src/modules/dunning/utils/observability"
+import { RenewalLogEvents } from "../../src/modules/renewal/utils/observability"
 
 const mockCreateOrderRun = jest.fn()
 const mockCreateOrUpdateOrderPaymentCollectionRun = jest.fn()
@@ -628,7 +627,7 @@ medusaIntegrationTestRunner({
 
         expect(alerts(seeded.cycle.id)).toHaveLength(0)
         expect(
-          logs({ event: "renewal.payment_failure_recorded", alertable: false, renewal_cycle_id: seeded.cycle.id })
+          logs({ event: RenewalLogEvents.PAYMENT_FAILURE_RECORDED, alertable: false, renewal_cycle_id: seeded.cycle.id })
         ).toHaveLength(2)
 
         const recorded = await readRenewalState(container, seeded)
@@ -750,7 +749,7 @@ medusaIntegrationTestRunner({
 
         expect(alerts(dunningCase.id)).toHaveLength(0)
         expect(
-          logs({ event: "dunning.payment_failure_recorded", alertable: false, dunning_case_id: dunningCase.id })
+          logs({ event: DunningLogEvents.PAYMENT_FAILURE_RECORDED, alertable: false, dunning_case_id: dunningCase.id })
         ).toHaveLength(2)
         expect(await readDunningState(container, dunningCase.id)).toMatchObject({
           dunningCase: { status: DunningCaseStatus.AWAITING_PAYMENT },
@@ -811,7 +810,7 @@ medusaIntegrationTestRunner({
         expect(alerts(seeded.cycle.id)).toHaveLength(0)
         expect(
           logs({
-            event: "renewal.awaiting_payment_settlement",
+            event: RenewalLogEvents.AWAITING_PAYMENT_SETTLEMENT,
             alertable: false,
             renewal_cycle_id: seeded.cycle.id,
           })
@@ -958,7 +957,7 @@ medusaIntegrationTestRunner({
       const alerts = watchAlerts(container)
       const overdueCycleIds = () =>
         alerts()
-          .filter((entry) => entry.event === AWAITING_PAYMENT_OVERDUE_EVENT)
+          .filter((entry) => entry.event === RenewalLogEvents.AWAITING_PAYMENT_OVERDUE)
           .map((entry) => entry.renewal_cycle_id)
 
       await sweepAt(DEFAULT_AWAITING_PAYMENT_ALERT_HOURS - 1)
@@ -1056,7 +1055,7 @@ medusaIntegrationTestRunner({
       expect(
         logs().filter(
           (entry) =>
-            entry.event === "renewal.force" &&
+            entry.event === RenewalLogEvents.FORCE &&
             entry.renewal_cycle_id === cycle.id &&
             entry.outcome !== "started"
         )
@@ -1075,14 +1074,14 @@ medusaIntegrationTestRunner({
 
       await processRenewalCyclesJob(container)
 
-      expect(logs({ event: "renewal.job.cycle", renewal_cycle_id: cycle.id })).toEqual([
+      expect(logs({ event: RenewalLogEvents.JOB_CYCLE, renewal_cycle_id: cycle.id })).toEqual([
         expect.objectContaining({
           outcome: RenewalRunOutcome.PARK_FAILED,
           success_count: 0,
           failure_count: 0,
         }),
       ])
-      expect(logs({ event: "renewal.job", outcome: "completed" })).toEqual([
+      expect(logs({ event: RenewalLogEvents.JOB, outcome: "completed" })).toEqual([
         expect.objectContaining({ success_count: 0, failure_count: 0, awaiting_count: 1 }),
       ])
     })

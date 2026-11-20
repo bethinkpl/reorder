@@ -1,6 +1,6 @@
 import { MedusaError } from "@medusajs/framework/utils"
 
-export type AdminRouteError = {
+export type RouteError = {
   status: number
   type: string
   message: string
@@ -38,7 +38,7 @@ function getMedusaErrorType(error: unknown): string | null {
 export function mapMedusaErrorByType(
   error: unknown,
   message: string
-): AdminRouteError | null {
+): RouteError | null {
   const type = getMedusaErrorType(error)
 
   if (!type) {

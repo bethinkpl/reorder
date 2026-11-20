@@ -469,6 +469,6 @@ The admin dunning route layer answers a domain error with its own message and a 
 
 An error without a `MedusaError` type (for example a lock held by another run) is mapped from its message: `404`
 when it reports something not found, `400` for invalid or missing input, `409` otherwise. The renewal and
-cancellation admin routes apply the same rules (`src/api/admin/route-errors.ts`).
+cancellation admin routes apply the same rules (`src/api/route-errors.ts`).
 
 This keeps the API aligned with the workflow-driven Medusa pattern used by the rest of the plugin.

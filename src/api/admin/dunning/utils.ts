@@ -8,7 +8,7 @@ import {
 } from "../../../modules/dunning/utils/admin-query"
 import { getDunningErrorMessage } from "../../../modules/dunning/utils/observability"
 import { isLockBusyError } from "../../../common/utils/lock-busy-error"
-import { type AdminRouteError, mapMedusaErrorByType } from "../route-errors"
+import { type RouteError, mapMedusaErrorByType } from "../../route-errors"
 
 export function normalizeAdminDunningCasesListQuery(
   query: GetAdminDunningCasesSchemaType
@@ -62,7 +62,7 @@ export async function getAdminDunningCasesListResponse(
   )
 }
 
-export function mapDunningAdminRouteError(error: unknown): AdminRouteError {
+export function mapDunningAdminRouteError(error: unknown): RouteError {
   if (isLockBusyError(error)) {
     return {
       status: 409,

@@ -470,7 +470,7 @@ Across the mutation routes, the current runtime exposes domain-aware errors for:
 
 Routes map these to HTTP responses through shared error helpers in:
 - `src/api/admin/cancellations/utils.ts`
-- `src/api/admin/route-errors.ts`
+- `src/api/route-errors.ts`
 
 The status comes from the error's `MedusaError` type, also when a workflow run rethrows it as a plain object:
 `not_found` is `404`, `invalid_data` is `400` (for example an empty reason update), `conflict` and `not_allowed`

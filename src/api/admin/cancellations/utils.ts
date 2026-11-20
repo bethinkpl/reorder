@@ -7,7 +7,7 @@ import {
   type ListAdminCancellationCasesInput,
 } from "../../../modules/cancellation/utils/admin-query"
 import { isLockBusyError } from "../../../common/utils/lock-busy-error"
-import { type AdminRouteError, mapMedusaErrorByType } from "../route-errors"
+import { type RouteError, mapMedusaErrorByType } from "../../route-errors"
 
 export function normalizeAdminCancellationsListQuery(
   query: GetAdminCancellationsSchemaType
@@ -97,7 +97,7 @@ function getNestedMessage(value: unknown): string | null {
   return null
 }
 
-export function mapCancellationAdminRouteError(error: unknown): AdminRouteError {
+export function mapCancellationAdminRouteError(error: unknown): RouteError {
   if (isLockBusyError(error)) {
     return {
       status: 409,

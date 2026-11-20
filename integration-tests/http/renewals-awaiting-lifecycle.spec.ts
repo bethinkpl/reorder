@@ -1,7 +1,7 @@
 import { medusaIntegrationTestRunner } from "@medusajs/test-utils"
 import path from "path"
 import { MedusaError } from "@medusajs/framework/utils"
-import { createStep, createWorkflow, type StepFunction, WorkflowResponse } from "@medusajs/framework/workflows-sdk"
+import { createStep, createWorkflow, type StepFunction, type WorkflowData, WorkflowResponse } from "@medusajs/framework/workflows-sdk"
 import { DateTime } from "luxon"
 import processRenewalCyclesJob from "../../src/jobs/process-renewal-cycles"
 import { reconcileAwaitingRenewalCycles } from "../../src/jobs/reconcile-awaiting-renewal-cycles"
@@ -98,7 +98,7 @@ const STEPS_THEN_FAIL = [
   { name: "finalize-cancellation", workflow: failingAfter("finalize", finalizeCancellationStep) },
 ]
 
-function asStep(name: string, run: (input: CancellationInput) => unknown) {
+function asStep(name: string, run: (input: CancellationInput) => WorkflowData) {
   return createWorkflow(`awaiting-lifecycle-${name}-as-step`, function (input: CancellationInput) {
     return new WorkflowResponse(run(input))
   })
@@ -191,7 +191,9 @@ medusaIntegrationTestRunner({
               : api.post(`/admin/subscriptions/${input.id}/cancel`, { reason: input.reason }, { headers })
           const before = await readRenewalState(container, seeded)
 
-          const refusal = await whileRenewalLockHeld(container, input.id, () => cancel().catch((error: unknown) => error))
+          const refusal = (await whileRenewalLockHeld(container, input.id, () => cancel().catch((error: unknown) => error))) as {
+            response?: unknown
+          }
 
           expect(refusal.response).toMatchObject({ status: 409, data: { type: "conflict" } })
           expect(await readRenewalState(container, seeded)).toEqual(before)

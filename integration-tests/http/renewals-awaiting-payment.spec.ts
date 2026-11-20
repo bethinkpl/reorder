@@ -37,6 +37,7 @@ import {
 import { createDunningCaseSeed } from "../helpers/dunning-fixtures"
 import {
   SYSTEM_PAYMENT_PROVIDER_ID,
+  authorizePaymentSessionOrThrow,
   captureOnOrder,
   createPaymentSessionFixture,
   deliverCapture,
@@ -452,7 +453,7 @@ medusaIntegrationTestRunner({
       it("leaves the cycle awaiting until the order is paid up", async () => {
         const container = getContainer()
         const seeded = await seedAwaitingRenewal(container, { reference: "SUB-AWAIT-PARTIAL" })
-        const payment = await payments().authorizePaymentSession(seeded.session.id, {})
+        const payment = await authorizePaymentSessionOrThrow(container, seeded.session.id)
 
         await payments().capturePayment({ payment_id: payment.id, amount: 40 })
         await recordOrderCaptureTransactions(container, seeded.order.id, payment.id)

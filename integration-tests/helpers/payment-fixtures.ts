@@ -49,12 +49,26 @@ export async function createPaymentSessionFixture(
   return { collection, session }
 }
 
-export async function authorizeAndCapturePaymentSession(
+export async function authorizePaymentSessionOrThrow(
   container: MedusaContainer,
   sessionId: string
 ) {
   const paymentModule = container.resolve<IPaymentModuleService>(Modules.PAYMENT)
   const payment = await paymentModule.authorizePaymentSession(sessionId, {})
+
+  if (!payment) {
+    throw new Error(`Session ${sessionId} was left pending by its authorisation`)
+  }
+
+  return payment
+}
+
+export async function authorizeAndCapturePaymentSession(
+  container: MedusaContainer,
+  sessionId: string
+) {
+  const paymentModule = container.resolve<IPaymentModuleService>(Modules.PAYMENT)
+  const payment = await authorizePaymentSessionOrThrow(container, sessionId)
 
   return await paymentModule.capturePayment({
     payment_id: payment.id,

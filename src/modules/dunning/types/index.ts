@@ -15,6 +15,14 @@ export const CLOSED_DUNNING_CASE_STATUSES: readonly DunningCaseStatus[] = [
   DunningCaseStatus.UNRECOVERED,
 ]
 
+export const ACTIVE_DUNNING_CASE_STATUSES: readonly DunningCaseStatus[] = [
+  DunningCaseStatus.OPEN,
+  DunningCaseStatus.RETRY_SCHEDULED,
+  DunningCaseStatus.RETRYING,
+  DunningCaseStatus.AWAITING_PAYMENT,
+  DunningCaseStatus.AWAITING_MANUAL_RESOLUTION,
+]
+
 /** A case in one of these has a retry charge the provider may still settle. */
 export const CHARGE_IN_FLIGHT_DUNNING_CASE_STATUSES: readonly DunningCaseStatus[] = [
   DunningCaseStatus.RETRYING,

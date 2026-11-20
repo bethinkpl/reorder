@@ -116,15 +116,23 @@ export function classifyRenewalFailure(error: unknown): RenewalFailureKind {
   return "unexpected_error"
 }
 
+/** The refusals a cycle's own state raises before anything is charged. */
+export const CYCLE_STATE_BLOCKED_RENEWAL_FAILURE_KINDS: readonly RenewalFailureKind[] = [
+  "already_processing",
+  "duplicate_execution",
+  "awaiting_payment",
+  "dunning_owns_cycle",
+]
+
+/** The failures that mean "not now", not "something is wrong". */
+export const BLOCKED_RENEWAL_FAILURE_KINDS: readonly RenewalFailureKind[] = [
+  ...CYCLE_STATE_BLOCKED_RENEWAL_FAILURE_KINDS,
+  "cycle_superseded",
+  "customer_payment_in_progress",
+]
+
 export function isAlertableRenewalFailure(kind: RenewalFailureKind) {
-  return ![
-    "already_processing",
-    "duplicate_execution",
-    "cycle_superseded",
-    "customer_payment_in_progress",
-    "awaiting_payment",
-    "dunning_owns_cycle",
-  ].includes(kind)
+  return !BLOCKED_RENEWAL_FAILURE_KINDS.includes(kind)
 }
 
 export function getRenewalErrorMessage(error: unknown) {

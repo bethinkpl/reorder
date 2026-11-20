@@ -1,14 +1,6 @@
 import { RetentionOfferType } from "../types"
 import { SubscriptionStatus } from "../../subscription/types"
-import { DunningCaseStatus } from "../../dunning/types"
-
-const ACTIVE_DUNNING_CASE_STATUSES = new Set<DunningCaseStatus>([
-  DunningCaseStatus.OPEN,
-  DunningCaseStatus.RETRY_SCHEDULED,
-  DunningCaseStatus.RETRYING,
-  DunningCaseStatus.AWAITING_PAYMENT,
-  DunningCaseStatus.AWAITING_MANUAL_RESOLUTION,
-])
+import { ACTIVE_DUNNING_CASE_STATUSES, DunningCaseStatus } from "../../dunning/types"
 
 type RetentionOfferPolicyInput = {
   subscription_status: SubscriptionStatus
@@ -16,7 +8,7 @@ type RetentionOfferPolicyInput = {
 }
 
 export function isActiveDunningCase(status: DunningCaseStatus) {
-  return ACTIVE_DUNNING_CASE_STATUSES.has(status)
+  return ACTIVE_DUNNING_CASE_STATUSES.includes(status)
 }
 
 export function getEligibleRetentionOfferTypes(

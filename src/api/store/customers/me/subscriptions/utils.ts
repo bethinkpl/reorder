@@ -5,7 +5,7 @@ import type {
 } from "@medusajs/framework/http"
 import { ContainerRegistrationKeys, MedusaError } from "@medusajs/framework/utils"
 import { CancellationCaseStatus } from "../../../../../modules/cancellation/types"
-import { DunningCaseStatus } from "../../../../../modules/dunning/types"
+import { ACTIVE_DUNNING_CASE_STATUSES, DunningCaseStatus } from "../../../../../modules/dunning/types"
 import { getDunningErrorMessage } from "../../../../../modules/dunning/utils/observability"
 import {
   RetryBlockedReason,
@@ -356,11 +356,8 @@ export function mapPaymentStatus(
 
   if (
     subscriptionStatus === SubscriptionStatus.PAST_DUE ||
-    dunningCase?.status === DunningCaseStatus.OPEN ||
-    dunningCase?.status === DunningCaseStatus.RETRY_SCHEDULED ||
-    dunningCase?.status === DunningCaseStatus.RETRYING ||
-    dunningCase?.status === DunningCaseStatus.AWAITING_PAYMENT ||
-    dunningCase?.status === DunningCaseStatus.AWAITING_MANUAL_RESOLUTION
+    (dunningCase &&
+      ACTIVE_DUNNING_CASE_STATUSES.includes(dunningCase.status as DunningCaseStatus))
   ) {
     return dunningCase ? "recovery_required" : "recovery_failed"
   }
@@ -474,7 +471,7 @@ async function getSubscriptionDunningCase(
     ],
     filters: {
       subscription_id: [subscriptionId],
-      status: ACTIVE_DUNNING_STATUSES,
+      status: [...ACTIVE_DUNNING_CASE_STATUSES],
     },
   })
 
@@ -509,14 +506,6 @@ async function getLatestDunningAttempt(
   return latest ?? null
 }
 
-const ACTIVE_DUNNING_STATUSES = [
-  DunningCaseStatus.OPEN,
-  DunningCaseStatus.RETRY_SCHEDULED,
-  DunningCaseStatus.RETRYING,
-  DunningCaseStatus.AWAITING_PAYMENT,
-  DunningCaseStatus.AWAITING_MANUAL_RESOLUTION,
-]
-
 async function getDunningCasesForSubscriptions(
   query: any,
   subscriptionIds: string[]
@@ -544,7 +533,7 @@ async function getDunningCasesForSubscriptions(
     ],
     filters: {
       subscription_id: subscriptionIds,
-      status: ACTIVE_DUNNING_STATUSES,
+      status: [...ACTIVE_DUNNING_CASE_STATUSES],
     },
   })
 

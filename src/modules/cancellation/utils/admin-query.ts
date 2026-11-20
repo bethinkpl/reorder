@@ -19,6 +19,8 @@ import {
   RetentionOfferType,
   RetentionOfferDecisionStatus,
 } from "../types"
+import { DunningCaseStatus } from "../../dunning/types"
+import { RenewalCycleStatus } from "../../renewal/types"
 import { cancellationErrors } from "./errors"
 
 export type ListAdminCancellationCasesInput = {
@@ -89,14 +91,7 @@ type SubscriptionRecord = {
 type DunningCaseRecord = {
   id: string
   subscription_id: string
-  status:
-    | "open"
-    | "retry_scheduled"
-    | "retrying"
-    | "awaiting_payment"
-    | "awaiting_manual_resolution"
-    | "recovered"
-    | "unrecovered"
+  status: DunningCaseStatus
   attempt_count: number
   next_retry_at: string | null
   last_payment_error_message: string | null
@@ -105,12 +100,7 @@ type DunningCaseRecord = {
 type RenewalCycleRecord = {
   id: string
   subscription_id: string
-  status:
-    | "scheduled"
-    | "processing"
-    | "succeeded"
-    | "failed"
-    | "awaiting_payment"
+  status: RenewalCycleStatus
   scheduled_for: string | Date
   approval_status: "pending" | "approved" | "rejected" | null
   generated_order_id: string | null
@@ -389,11 +379,11 @@ async function getActiveDunningSummaryMap(
   })
 
   const activeStatusOrder = new Map([
-    ["retrying", 0],
-    ["awaiting_payment", 1],
-    ["retry_scheduled", 2],
-    ["awaiting_manual_resolution", 3],
-    ["open", 4],
+    [DunningCaseStatus.RETRYING, 0],
+    [DunningCaseStatus.AWAITING_PAYMENT, 1],
+    [DunningCaseStatus.RETRY_SCHEDULED, 2],
+    [DunningCaseStatus.AWAITING_MANUAL_RESOLUTION, 3],
+    [DunningCaseStatus.OPEN, 4],
   ])
 
   const grouped = new Map<string, DunningCaseRecord[]>()

@@ -3,7 +3,7 @@ import type { MedusaContainer } from "@medusajs/framework/types"
 import { ContainerRegistrationKeys, PaymentEvents } from "@medusajs/framework/utils"
 import { DUNNING_MODULE } from "../modules/dunning"
 import type DunningModuleService from "../modules/dunning/service"
-import { DunningCaseStatus } from "../modules/dunning/types"
+import { CLOSED_DUNNING_CASE_STATUSES, DunningCaseStatus } from "../modules/dunning/types"
 import { getDunningErrorMessage } from "../modules/dunning/utils/observability"
 import { getRenewalErrorMessage } from "../modules/renewal/utils/observability"
 import { SUBSCRIPTION_MODULE } from "../modules/subscription"
@@ -45,11 +45,6 @@ type DunningCaseRecord = {
   status: DunningCaseStatus
 }
 
-const CLOSED_DUNNING_STATUSES: readonly DunningCaseStatus[] = [
-  DunningCaseStatus.RECOVERED,
-  DunningCaseStatus.UNRECOVERED,
-]
-
 export default async function activateSubscriptionOnPaymentCapturedHandler({
   event: { data },
   container,
@@ -78,7 +73,7 @@ async function findDunningCaseForOrder(
   )) as DunningCaseRecord[]
 
   return (
-    cases.find((entry) => !CLOSED_DUNNING_STATUSES.includes(entry.status)) ??
+    cases.find((entry) => !CLOSED_DUNNING_CASE_STATUSES.includes(entry.status)) ??
     cases.find((entry) => entry.status === DunningCaseStatus.RECOVERED) ??
     (includeUnrecovered ? cases[0] ?? null : null)
   )

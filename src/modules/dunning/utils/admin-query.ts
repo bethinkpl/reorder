@@ -15,6 +15,7 @@ import {
   DunningCaseStatus,
   type DunningRetrySchedule,
 } from "../types"
+import { RenewalCycleStatus } from "../../renewal/types"
 import {
   awaitingPaymentLimitEndsAt,
   resolveAwaitingPaymentResolveMinHours,
@@ -77,12 +78,7 @@ type SubscriptionRecord = {
 
 type RenewalCycleRecord = {
   id: string
-  status:
-    | "scheduled"
-    | "processing"
-    | "succeeded"
-    | "failed"
-    | "awaiting_payment"
+  status: RenewalCycleStatus
   scheduled_for: string
   generated_order_id: string | null
 }

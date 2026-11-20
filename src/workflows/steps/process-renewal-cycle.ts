@@ -10,7 +10,7 @@ import {
 } from "@medusajs/medusa/core-flows"
 import { DUNNING_MODULE } from "../../modules/dunning"
 import type DunningModuleService from "../../modules/dunning/service"
-import { DunningCaseStatus } from "../../modules/dunning/types"
+import { ACTIVE_DUNNING_CASE_STATUSES } from "../../modules/dunning/types"
 import { RENEWAL_MODULE } from "../../modules/renewal"
 import RenewalModuleService from "../../modules/renewal/service"
 import {
@@ -1288,14 +1288,6 @@ export async function assertNoCustomerPaymentInProgress(
   )
 }
 
-const DUNNING_CASE_STATUSES_OWNING_FAILED_CYCLE = Object.values(
-  DunningCaseStatus
-).filter(
-  (status) =>
-    status !== DunningCaseStatus.RECOVERED &&
-    status !== DunningCaseStatus.UNRECOVERED
-)
-
 export async function assertNoDunningOwnsFailedCycle(
   container: MedusaContainer,
   cycle: { id: string, status: RenewalCycleStatus, subscription_id: string }
@@ -1308,7 +1300,7 @@ export async function assertNoDunningOwnsFailedCycle(
   const [activeCase] = await dunningModule.listDunningCases(
     {
       subscription_id: cycle.subscription_id,
-      status: DUNNING_CASE_STATUSES_OWNING_FAILED_CYCLE,
+      status: [...ACTIVE_DUNNING_CASE_STATUSES],
     },
     { select: ["id"], take: 1 }
   )

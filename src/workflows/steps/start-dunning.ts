@@ -2,6 +2,7 @@ import { createStep, StepResponse } from "@medusajs/framework/workflows-sdk"
 import { DUNNING_MODULE } from "../../modules/dunning"
 import type DunningModuleService from "../../modules/dunning/service"
 import {
+  ACTIVE_DUNNING_CASE_STATUSES,
   DunningCaseStatus,
   type DunningRetrySchedule,
 } from "../../modules/dunning/types"
@@ -22,14 +23,6 @@ import type { SubscriptionSettingsShape } from "../../modules/settings/utils/nor
 import { toISOStringOrNull } from "../utils/date-output"
 import { getEffectiveSubscriptionSettings } from "../utils/subscription-settings"
 import { withoutPaymentContext } from "./pause-subscription"
-
-const ACTIVE_DUNNING_CASE_STATUSES = new Set<DunningCaseStatus>([
-  DunningCaseStatus.OPEN,
-  DunningCaseStatus.RETRY_SCHEDULED,
-  DunningCaseStatus.RETRYING,
-  DunningCaseStatus.AWAITING_PAYMENT,
-  DunningCaseStatus.AWAITING_MANUAL_RESOLUTION,
-])
 
 const PAYMENT_FAILURE_SOURCES = new Set([
   "payment_provider",
@@ -110,7 +103,7 @@ type StartDunningCompensation =
   }
 
 function isActiveDunningCase(status: DunningCaseStatus) {
-  return ACTIVE_DUNNING_CASE_STATUSES.has(status)
+  return ACTIVE_DUNNING_CASE_STATUSES.includes(status)
 }
 
 async function loadSubscription(

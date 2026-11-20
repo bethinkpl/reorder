@@ -16,6 +16,7 @@ import {
   RenewalCycleAdminStatus,
 } from "../../../admin/types/renewal"
 import {
+  CHARGE_IN_FLIGHT_RENEWAL_CYCLE_STATUSES,
   RenewalApprovalStatus,
   RenewalAppliedPendingUpdateData,
   RenewalAttemptStatus,
@@ -49,12 +50,7 @@ type RenewalCycleRecord = {
   subscription_id: string
   scheduled_for: string
   processed_at: string | null
-  status:
-    | "scheduled"
-    | "processing"
-    | "succeeded"
-    | "failed"
-    | "awaiting_payment"
+  status: RenewalCycleStatus
   approval_required: boolean
   approval_status: "pending" | "approved" | "rejected" | null
   approval_decided_at: string | null
@@ -637,11 +633,6 @@ export async function listRenewalAttemptsForCycle(
   }))
 }
 
-const CHARGE_AWAITING_CYCLE_STATUSES: readonly string[] = [
-  RenewalCycleStatus.AWAITING_PAYMENT,
-  RenewalCycleStatus.PROCESSING,
-]
-
 /**
  * Judges the latest attempt, as `POST /admin/renewals/:id/resolve-awaiting-payment` does, so
  * `can_fail_after` never disagrees with that route's answer.
@@ -653,7 +644,7 @@ function mapAwaitingPayment(
   const latest = attempts[attempts.length - 1]
 
   if (
-    !CHARGE_AWAITING_CYCLE_STATUSES.includes(cycleStatus) ||
+    !CHARGE_IN_FLIGHT_RENEWAL_CYCLE_STATUSES.includes(cycleStatus) ||
     latest?.status !== RenewalAttemptAdminStatus.PROCESSING
   ) {
     return null

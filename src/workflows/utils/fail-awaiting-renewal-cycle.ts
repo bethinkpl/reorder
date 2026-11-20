@@ -11,6 +11,7 @@ import { normalizeActivityLogEvent } from "../../modules/activity-log/utils/norm
 import { RENEWAL_MODULE } from "../../modules/renewal"
 import type RenewalModuleService from "../../modules/renewal/service"
 import {
+  CHARGE_IN_FLIGHT_RENEWAL_CYCLE_STATUSES,
   CLOSED_RENEWAL_CYCLE_STATUSES,
   type RenewalAppliedPendingUpdateData,
   RenewalAttemptStatus,
@@ -26,7 +27,7 @@ import {
 import { SUBSCRIPTION_MODULE } from "../../modules/subscription"
 import type SubscriptionModuleService from "../../modules/subscription/service"
 import {
-  SubscriptionStatus,
+  CHARGEABLE_SUBSCRIPTION_STATUSES,
   type SubscriptionType,
 } from "../../modules/subscription/types"
 import { startDunningWorkflow } from "../start-dunning"
@@ -43,16 +44,6 @@ import { renewalSubscriptionLockKey } from "../../modules/renewal/utils/lock-key
 
 const RUN_LOCK_WAIT_SECONDS = 5
 const LOCK_HOLD_SECONDS = 120
-
-const LOCK_WORTHY_STATUSES: readonly RenewalCycleStatus[] = [
-  RenewalCycleStatus.AWAITING_PAYMENT,
-  RenewalCycleStatus.PROCESSING,
-]
-
-const DUNNING_SUBSCRIPTION_STATUSES = new Set<SubscriptionStatus>([
-  SubscriptionStatus.ACTIVE,
-  SubscriptionStatus.PAST_DUE,
-])
 
 export type FailAwaitingRenewalCycleInput = {
   renewal_cycle_id: string
@@ -142,7 +133,7 @@ export async function failAwaitingRenewalCycle(
   if (
     !cycle ||
     (!CLOSED_RENEWAL_CYCLE_STATUSES.includes(cycle.status) &&
-      !LOCK_WORTHY_STATUSES.includes(cycle.status))
+      !CHARGE_IN_FLIGHT_RENEWAL_CYCLE_STATUSES.includes(cycle.status))
   ) {
     return "ignored"
   }
@@ -344,7 +335,7 @@ export async function failAwaitingRenewalCycleUnderLock(
 
   const cycle = await loadCycle(renewalModule, input.renewal_cycle_id)
 
-  if (!cycle || !LOCK_WORTHY_STATUSES.includes(cycle.status)) {
+  if (!cycle || !CHARGE_IN_FLIGHT_RENEWAL_CYCLE_STATUSES.includes(cycle.status)) {
     return false
   }
 
@@ -454,7 +445,7 @@ export async function failAwaitingRenewalCycleUnderLock(
   const durationMs = () =>
     Date.now() - (audit?.operation_started_at ?? startedAtMs)
 
-  if (DUNNING_SUBSCRIPTION_STATUSES.has(subscription.status)) {
+  if (CHARGEABLE_SUBSCRIPTION_STATUSES.includes(subscription.status)) {
     try {
       await startDunningWorkflow(container).run({
         input: {

@@ -11,6 +11,7 @@ import { renewalErrors } from "../../modules/renewal/utils/errors"
 import {
   classifyRenewalFailure,
   createRenewalCorrelationId,
+  CYCLE_STATE_BLOCKED_RENEWAL_FAILURE_KINDS,
   getRenewalErrorMessage,
   isAlertableRenewalFailure,
   logRenewalEvent,
@@ -154,11 +155,7 @@ export const forceRenewalCycleStep = createStep(
       outcome = result.outcome
     } catch (error) {
       const failureKind = classifyRenewalFailure(error)
-      const blocked =
-        failureKind === "already_processing" ||
-        failureKind === "duplicate_execution" ||
-        failureKind === "awaiting_payment" ||
-        failureKind === "dunning_owns_cycle"
+      const blocked = CYCLE_STATE_BLOCKED_RENEWAL_FAILURE_KINDS.includes(failureKind)
 
       logRenewalEvent(logger, blocked ? "warn" : "error", {
         event: "renewal.force",

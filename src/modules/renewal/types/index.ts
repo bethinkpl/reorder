@@ -15,6 +15,16 @@ export const CLOSED_RENEWAL_CYCLE_STATUSES: readonly RenewalCycleStatus[] = [
   RenewalCycleStatus.FAILED,
 ]
 
+export type ChargeInFlightRenewalCycleStatus =
+  | RenewalCycleStatus.AWAITING_PAYMENT
+  | RenewalCycleStatus.PROCESSING
+
+/** A cycle in one of these may have a charge the provider has yet to settle. */
+export const CHARGE_IN_FLIGHT_RENEWAL_CYCLE_STATUSES: readonly RenewalCycleStatus[] = [
+  RenewalCycleStatus.AWAITING_PAYMENT,
+  RenewalCycleStatus.PROCESSING,
+] satisfies ChargeInFlightRenewalCycleStatus[]
+
 export enum RenewalAttemptStatus {
   PROCESSING = "processing",
   SUCCEEDED = "succeeded",

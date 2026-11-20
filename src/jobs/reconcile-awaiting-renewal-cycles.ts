@@ -4,6 +4,7 @@ import { ActivityLogActorType } from "../modules/activity-log/types"
 import { RENEWAL_MODULE } from "../modules/renewal"
 import type RenewalModuleService from "../modules/renewal/service"
 import {
+  type ChargeInFlightRenewalCycleStatus,
   CLOSED_RENEWAL_CYCLE_STATUSES,
   RenewalAttemptStatus,
   RenewalCycleStatus,
@@ -50,8 +51,6 @@ const RENEWAL_LOCK_HOLD_SECONDS = 120
 /** Well past the 120 s a renewal run holds its lock, so a run still in progress is never touched. */
 const STALE_PROCESSING_MINUTES = 10
 
-type OverdueStatus = RenewalCycleStatus.AWAITING_PAYMENT | RenewalCycleStatus.PROCESSING
-
 type OverdueAlertInput = {
   now: Date
   alertHours: number
@@ -75,7 +74,7 @@ export type ReconcileAwaitingRenewalCyclesResult = Record<
 async function findDueOverdueAlert(
   renewalModule: RenewalModuleService,
   cycleId: string,
-  status: OverdueStatus,
+  status: ChargeInFlightRenewalCycleStatus,
   input: OverdueAlertInput
 ) {
   const cycle = await renewalModule.retrieveRenewalCycle(cycleId)
@@ -114,7 +113,7 @@ async function findDueOverdueAlert(
 async function raiseOverdueAlertOnce(
   container: MedusaContainer,
   cycle: { id: string, subscription_id: string },
-  status: OverdueStatus,
+  status: ChargeInFlightRenewalCycleStatus,
   input: OverdueAlertInput
 ): Promise<boolean> {
   const renewalModule = container.resolve<RenewalModuleService>(RENEWAL_MODULE)

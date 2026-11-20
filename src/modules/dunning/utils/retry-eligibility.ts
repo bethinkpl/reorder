@@ -49,7 +49,7 @@ export type RetryEligibility = {
   blocked_reason: RetryBlockedReason | null
 }
 
-const RETRYABLE_CASE_STATUSES: readonly DunningCaseStatus[] = [
+const RETRYABLE_DUNNING_CASE_STATUSES: readonly DunningCaseStatus[] = [
   DunningCaseStatus.OPEN,
   DunningCaseStatus.RETRY_SCHEDULED,
   DunningCaseStatus.AWAITING_MANUAL_RESOLUTION,
@@ -92,7 +92,7 @@ export function resolveRetryEligibility(input: RetryEligibilityInput): RetryElig
     return blocked(RetryBlockedReason.PAYMENT_IN_PROGRESS)
   }
 
-  if (!RETRYABLE_CASE_STATUSES.includes(dunningCase.status)) {
+  if (!RETRYABLE_DUNNING_CASE_STATUSES.includes(dunningCase.status)) {
     return blocked(RetryBlockedReason.CASE_CLOSED)
   }
 

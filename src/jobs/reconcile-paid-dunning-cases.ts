@@ -5,6 +5,7 @@ import { DUNNING_MODULE } from "../modules/dunning"
 import { DunningEvents } from "../modules/dunning/events"
 import type DunningModuleService from "../modules/dunning/service"
 import {
+  ACTIVE_DUNNING_CASE_STATUSES,
   CLOSED_DUNNING_CASE_STATUSES,
   DunningAttemptStatus,
   DunningCaseStatus,
@@ -50,12 +51,10 @@ const STALE_RETRY_MINUTES = 10
 export const DUNNING_AWAITING_PAYMENT_OVERDUE_EVENT =
   "dunning.awaiting_payment_overdue"
 
-const OPEN_DUNNING_STATUSES = [
-  DunningCaseStatus.OPEN,
-  DunningCaseStatus.RETRY_SCHEDULED,
-  DunningCaseStatus.AWAITING_PAYMENT,
-  DunningCaseStatus.AWAITING_MANUAL_RESOLUTION,
-]
+/** Active cases no retry run is working on: a running retry finds the paid order itself. */
+const IDLE_DUNNING_CASE_STATUSES = ACTIVE_DUNNING_CASE_STATUSES.filter(
+  (status) => status !== DunningCaseStatus.RETRYING
+)
 
 type DunningCaseRecord = {
   id: string
@@ -673,7 +672,7 @@ export async function reconcilePaidDunningCases(
   await settleStaleRetries(container, alertInput, result)
 
   const cases = (await dunningModule.listDunningCases(
-    { status: OPEN_DUNNING_STATUSES } as never,
+    { status: IDLE_DUNNING_CASE_STATUSES } as never,
     { take: BATCH_SIZE, order: { updated_at: "ASC" } }
   )) as DunningCaseRecord[]
 

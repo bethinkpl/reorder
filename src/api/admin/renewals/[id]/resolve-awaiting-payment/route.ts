@@ -6,7 +6,7 @@ import type { MedusaContainer } from "@medusajs/framework/types"
 import { Modules } from "@medusajs/framework/utils"
 import { RENEWAL_MODULE } from "../../../../../modules/renewal"
 import type RenewalModuleService from "../../../../../modules/renewal/service"
-import { RenewalCycleStatus } from "../../../../../modules/renewal/types"
+import { CHARGE_IN_FLIGHT_RENEWAL_CYCLE_STATUSES } from "../../../../../modules/renewal/types"
 import {
   isAwaitingPaymentOverdue,
   resolveAwaitingPaymentResolveMinHours,
@@ -27,11 +27,6 @@ import { renewalSubscriptionLockKey } from "../../../../../modules/renewal/utils
 
 const RENEWAL_LOCK_TIMEOUT_SECONDS = 30
 const UNPAID_ERROR_CODE = "resolved_unpaid"
-
-const RESOLVABLE_STATUSES: readonly RenewalCycleStatus[] = [
-  RenewalCycleStatus.AWAITING_PAYMENT,
-  RenewalCycleStatus.PROCESSING,
-]
 
 type AwaitingPaymentResolution = "settled" | "failed"
 
@@ -142,7 +137,7 @@ async function resolveAwaitingPayment(
   const renewalModule = container.resolve<RenewalModuleService>(RENEWAL_MODULE)
   const cycle = await renewalModule.retrieveRenewalCycle(input.renewal_cycle_id)
 
-  if (!RESOLVABLE_STATUSES.includes(cycle.status)) {
+  if (!CHARGE_IN_FLIGHT_RENEWAL_CYCLE_STATUSES.includes(cycle.status)) {
     throw notAwaitingPayment(cycle.id)
   }
 

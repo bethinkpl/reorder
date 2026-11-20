@@ -10,6 +10,7 @@ import {
   type DueRenewalCycleRecord,
 } from "../modules/renewal/utils/scheduler-query"
 import {
+  BLOCKED_RENEWAL_FAILURE_KINDS,
   classifyRenewalFailure,
   createRenewalCorrelationId,
   getRenewalErrorMessage,
@@ -78,16 +79,9 @@ const CONCURRENT_RENEWAL_BATCH_SIZE = positiveIntFromEnv(
 // Gap between consecutive concurrent chunks, in ms.
 const RENEWAL_SEPARATION_DELAY = 1000
 
-/** The failures that mean "not now", not "something is wrong". Exported for unit tests. */
+/** Exported for unit tests. */
 export function isBlockedRenewalOutcome(failureKind: RenewalFailureKind) {
-  return (
-    failureKind === "already_processing" ||
-    failureKind === "duplicate_execution" ||
-    failureKind === "cycle_superseded" ||
-    failureKind === "customer_payment_in_progress" ||
-    failureKind === "awaiting_payment" ||
-    failureKind === "dunning_owns_cycle"
-  )
+  return BLOCKED_RENEWAL_FAILURE_KINDS.includes(failureKind)
 }
 
 async function processCycle(

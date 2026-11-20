@@ -45,7 +45,11 @@ import {
 } from "../utils/customer-payment-in-progress"
 import { recordOrderCaptureTransactions } from "../utils/record-order-capture-transactions"
 import { resolvePaymentCollection } from "../utils/resolve-payment-collection"
-import { settleDunningCaseRecovered } from "../utils/settle-dunning-recovery"
+import { readTrackedCharge, reconcileTrackedCapture } from "../utils/late-payment-capture"
+import {
+  settleDunningCaseRecovered,
+  type SettleDunningCaseRecoveredResult,
+} from "../utils/settle-dunning-recovery"
 import {
   settleRenewalCycleSucceeded,
   SUBSCRIPTION_CANCELLED_REFUSAL,
@@ -1226,6 +1230,106 @@ async function finalizeRecoveredRenewal(
   })
 }
 
+function outcomeOfCaseSettledElsewhere(
+  status: DunningCaseStatus
+): RunDunningRetryStepOutput["outcome"] {
+  if (status === DunningCaseStatus.RECOVERED) {
+    return "recovered"
+  }
+
+  return status === DunningCaseStatus.UNRECOVERED ? "unrecovered" : "awaiting_payment"
+}
+
+/**
+ * A charge the provider took after the case or its subscription moved on is not applied: its
+ * capture is reconciled as a late payment instead (a refund is asked for when the subscription was
+ * cancelled or the order is over-paid), and the attempt is left for whoever now owns the case.
+ */
+async function handOverUnappliedRecovery(
+  container: MedusaContainer,
+  input: {
+    dunningCase: DunningCaseRecord
+    settlement: SettleDunningCaseRecoveredResult
+    attempt: DunningAttemptRecord
+    attemptNo: number
+    paymentId: string | null
+    correlationId: string
+    durationMs: number
+  }
+): Promise<RunDunningRetryStepOutput> {
+  const { dunningCase, settlement } = input
+  const current = settlement.dunning_case
+
+  logDunningEvent(container.resolve("logger"), "warn", {
+    event: DunningLogEvents.RETRY,
+    outcome: "blocked",
+    correlation_id: input.correlationId,
+    dunning_case_id: dunningCase.id,
+    subscription_id: dunningCase.subscription_id,
+    renewal_cycle_id: dunningCase.renewal_cycle_id,
+    attempt_no: input.attemptNo,
+    duration_ms: input.durationMs,
+    message: `DunningCase '${dunningCase.id}' was '${current.status}' with its subscription '${settlement.subscription_status}' by the time its retry's charge went through (${settlement.reason}); the charge was not applied to it`,
+    metadata: { payment_id: input.paymentId, refusal: settlement.reason },
+  })
+
+  if (input.paymentId) {
+    await reconcileRetryCapture(container, {
+      dunningCase,
+      paymentId: input.paymentId,
+    })
+  }
+
+  return {
+    dunning_case_id: dunningCase.id,
+    dunning_attempt_id: input.attempt.id,
+    outcome: outcomeOfCaseSettledElsewhere(current.status),
+    subscription_id: dunningCase.subscription_id,
+    subscription_status: settlement.subscription_status,
+    renewal_order_id: dunningCase.renewal_order_id,
+    settled_now: false,
+    recovered_now: false,
+    correlation_id: input.correlationId,
+    attempt_no: input.attemptNo,
+    error_code: null,
+    next_retry_at: null,
+    recovery_reason: null,
+    park_reason: null,
+    attempt_counted: true,
+  }
+}
+
+async function reconcileRetryCapture(
+  container: MedusaContainer,
+  input: { dunningCase: DunningCaseRecord, paymentId: string }
+) {
+  const { data: payments } = await container.resolve(ContainerRegistrationKeys.QUERY).graph({
+    entity: "payment",
+    fields: ["id", "payment_collection_id", "payment_session.id", "payment_session.context"],
+    filters: { id: input.paymentId },
+  })
+  const payment = payments[0] as
+    | {
+      payment_collection_id: string
+      payment_session: { id: string, context: Record<string, unknown> | null } | null
+    }
+    | undefined
+  const charge = readTrackedCharge(payment?.payment_session)
+
+  if (!payment || !charge) {
+    return
+  }
+
+  await reconcileTrackedCapture(container, {
+    charge,
+    payment_id: input.paymentId,
+    payment_collection_id: payment.payment_collection_id,
+    subscription_id: input.dunningCase.subscription_id,
+    order_id: input.dunningCase.renewal_order_id,
+    kept_for_churn_reversal: false,
+  })
+}
+
 export async function runDunningRetry(
   container: MedusaContainer,
   input: RunDunningRetryStepInput
@@ -1396,19 +1500,6 @@ export async function runDunningRetry(
       : retryMetadata
 
     if (outcome.kind === "recovery") {
-      await dunningModule.updateDunningAttempts({
-        id: attempt.id,
-        finished_at: finishedAt,
-        status: DunningAttemptStatus.SUCCEEDED,
-        error_code: null,
-        error_message: null,
-        payment_reference: outcome.payment_reference,
-        metadata: {
-          ...(attempt.metadata ?? {}),
-          provider_reached: outcome.provider_reached,
-        },
-      } as any)
-
       // A recovery with no payment of its own is one the order came back already settled from, so
       // the credit belongs to whoever actually paid it rather than to this retry.
       const recoveryReason =
@@ -1416,17 +1507,37 @@ export async function runDunningRetry(
           ? DunningRecoveryReason.CUSTOMER_PAYMENT
           : DunningRecoveryReason.PAYMENT_RECOVERED
 
-      const { dunning_case: updatedCase } = await settleDunningCaseRecovered(
-        container,
-        {
-          dunning_case: dunningCase,
-          subscription,
-          finished_at: finishedAt,
-          recovery_reason: recoveryReason,
-          payment_reference: outcome.payment_reference,
-          metadata: caseMetadata,
-        }
-      )
+      const settlement = await settleDunningCaseRecovered(container, {
+        dunning_case: dunningCase,
+        expected_status: DunningCaseStatus.RETRYING,
+        attempt: {
+          id: attempt.id,
+          metadata: {
+            ...(attempt.metadata ?? {}),
+            provider_reached: outcome.provider_reached,
+          },
+        },
+        finished_at: finishedAt,
+        recovery_reason: recoveryReason,
+        payment_reference: outcome.payment_reference,
+        metadata: caseMetadata,
+      })
+
+      if (!settlement.recovered) {
+        return new StepResponse<RunDunningRetryStepOutput>(
+          await handOverUnappliedRecovery(container, {
+            dunningCase,
+            settlement,
+            attempt,
+            attemptNo,
+            paymentId: outcome.payment_reference,
+            correlationId,
+            durationMs: Date.now() - startedAtMs,
+          })
+        )
+      }
+
+      const updatedCase = settlement.dunning_case
 
       await finalizeRecoveredRenewal(container, {
         dunningCase,

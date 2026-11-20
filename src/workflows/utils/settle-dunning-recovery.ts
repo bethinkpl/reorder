@@ -1,10 +1,14 @@
 import type { MedusaContainer } from "@medusajs/framework/types"
 import { DUNNING_MODULE } from "../../modules/dunning"
 import type DunningModuleService from "../../modules/dunning/service"
-import { DunningCaseStatus } from "../../modules/dunning/types"
+import { DunningAttemptStatus, DunningCaseStatus } from "../../modules/dunning/types"
 import { SUBSCRIPTION_MODULE } from "../../modules/subscription"
 import type SubscriptionModuleService from "../../modules/subscription/service"
 import { SubscriptionStatus } from "../../modules/subscription/types"
+import { SUBSCRIPTION_CANCELLED_REFUSAL } from "./settle-renewal-cycle-succeeded"
+
+export const ALREADY_RECOVERED_REFUSAL = "already_recovered"
+export const CASE_MOVED_ON_REFUSAL = "case_moved_on"
 
 export type RecoverableDunningCase = {
   id: string
@@ -18,7 +22,10 @@ export type RecoverableDunningCase = {
 
 export type SettleDunningCaseRecoveredInput = {
   dunning_case: RecoverableDunningCase
-  subscription: { id: string, status: SubscriptionStatus }
+  /** The status the caller left the case in. Defaults to `dunning_case.status`. */
+  expected_status?: DunningCaseStatus
+  /** The attempt whose charge collected the money; closed as succeeded only when the case is. */
+  attempt?: { id: string, metadata?: Record<string, unknown> | null }
   finished_at: Date
   recovery_reason: string
   payment_reference?: string | null
@@ -27,33 +34,71 @@ export type SettleDunningCaseRecoveredInput = {
 }
 
 export type SettleDunningCaseRecoveredResult = {
-  /** False when the case was already `RECOVERED`, in which case nothing was written. */
   recovered: boolean
+  /** Why nothing was written; `null` on the recovering run. */
+  reason:
+    | typeof ALREADY_RECOVERED_REFUSAL
+    | typeof CASE_MOVED_ON_REFUSAL
+    | typeof SUBSCRIPTION_CANCELLED_REFUSAL
+    | null
   dunning_case: RecoverableDunningCase
+  subscription_status: SubscriptionStatus
 }
 
 /**
  * Closes a dunning case as recovered and hands its subscription back to `active`.
  *
  * Shared by the scheduled retry that collected the money and by the recovery the customer's own
- * payment triggers, so both leave the same case state behind. Idempotent on a closed case.
+ * payment triggers, so both leave the same case state behind. The case and the subscription are
+ * read again here: a retry run's lock is not renewed, so a cancellation or the paid-case sweep may
+ * have moved them on while its charge was out. Nothing is written then, and the attempt stays
+ * unapplied so its capture can still be reconciled.
  */
 export async function settleDunningCaseRecovered(
   container: MedusaContainer,
   input: SettleDunningCaseRecoveredInput
 ): Promise<SettleDunningCaseRecoveredResult> {
-  const dunningCase = input.dunning_case
-
-  if (dunningCase.status === DunningCaseStatus.RECOVERED) {
-    return { recovered: false, dunning_case: dunningCase }
-  }
-
   const dunningModule = container.resolve<DunningModuleService>(DUNNING_MODULE)
   const subscriptionModule =
     container.resolve<SubscriptionModuleService>(SUBSCRIPTION_MODULE)
 
+  const current = (await dunningModule.retrieveDunningCase(
+    input.dunning_case.id
+  )) as RecoverableDunningCase
+  const subscription = await subscriptionModule.retrieveSubscription(current.subscription_id)
+  const refuse = (reason: SettleDunningCaseRecoveredResult["reason"]) => ({
+    recovered: false,
+    reason,
+    dunning_case: current,
+    subscription_status: subscription.status,
+  })
+
+  if (current.status === DunningCaseStatus.RECOVERED) {
+    return refuse(ALREADY_RECOVERED_REFUSAL)
+  }
+
+  if (subscription.status === SubscriptionStatus.CANCELLED) {
+    return refuse(SUBSCRIPTION_CANCELLED_REFUSAL)
+  }
+
+  if (current.status !== (input.expected_status ?? input.dunning_case.status)) {
+    return refuse(CASE_MOVED_ON_REFUSAL)
+  }
+
+  if (input.attempt) {
+    await dunningModule.updateDunningAttempts({
+      id: input.attempt.id,
+      status: DunningAttemptStatus.SUCCEEDED,
+      finished_at: input.finished_at,
+      error_code: null,
+      error_message: null,
+      payment_reference: input.payment_reference ?? null,
+      ...(input.attempt.metadata ? { metadata: input.attempt.metadata } : {}),
+    })
+  }
+
   const metadata: Record<string, unknown> = {
-    ...(input.metadata ?? dunningCase.metadata ?? {}),
+    ...(input.metadata ?? current.metadata ?? {}),
     // Explicit nulls: the module merges JSON columns, so an omitted key would survive.
     park_reason: null,
     setup_failure_streak: null,
@@ -65,7 +110,7 @@ export async function settleDunningCaseRecovered(
   }
 
   const updatedCase = (await dunningModule.updateDunningCases({
-    id: dunningCase.id,
+    id: current.id,
     status: DunningCaseStatus.RECOVERED,
     next_retry_at: null,
     last_attempt_at: input.finished_at,
@@ -77,12 +122,20 @@ export async function settleDunningCaseRecovered(
     metadata,
   } as never)) as unknown as RecoverableDunningCase
 
-  if (input.subscription.status === SubscriptionStatus.PAST_DUE) {
+  if (subscription.status === SubscriptionStatus.PAST_DUE) {
     await subscriptionModule.updateSubscriptions({
-      id: input.subscription.id,
+      id: subscription.id,
       status: SubscriptionStatus.ACTIVE,
     })
   }
 
-  return { recovered: true, dunning_case: updatedCase }
+  return {
+    recovered: true,
+    reason: null,
+    dunning_case: updatedCase,
+    subscription_status:
+      subscription.status === SubscriptionStatus.PAST_DUE
+        ? SubscriptionStatus.ACTIVE
+        : subscription.status,
+  }
 }

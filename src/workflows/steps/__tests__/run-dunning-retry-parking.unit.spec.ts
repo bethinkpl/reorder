@@ -68,9 +68,9 @@ function buildContainer(options: BuildContainerOptions = {}) {
     },
   }
 
+  // Stateful, like the module: the recovery settlement reads the case back before writing it.
   const updateDunningCases = jest.fn(async (payload: Record<string, unknown>) => ({
-    ...dunningCase,
-    ...payload,
+    ...Object.assign(dunningCase, payload),
   }))
   const createDunningAttempts = jest.fn(
     async (payload: Record<string, unknown>) => ({ id: "dunatt_1", ...payload })
@@ -81,7 +81,7 @@ function buildContainer(options: BuildContainerOptions = {}) {
   const listDunningAttempts = jest.fn(async () => options.attempts ?? [])
 
   const dunningModule = {
-    retrieveDunningCase: jest.fn(async () => dunningCase),
+    retrieveDunningCase: jest.fn(async () => ({ ...dunningCase })),
     listDunningAttempts,
     updateDunningCases,
     createDunningAttempts,

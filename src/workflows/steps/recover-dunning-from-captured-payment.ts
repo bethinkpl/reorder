@@ -307,24 +307,17 @@ export async function recoverDunningFromCapturedPayment(
     ? DunningRecoveryReason.PAYMENT_RECOVERED
     : DunningRecoveryReason.CUSTOMER_PAYMENT
 
-  if (retryPayment) {
-    await container.resolve<DunningModuleService>(DUNNING_MODULE).updateDunningAttempts({
-      id: retryPayment.attempt_id,
-      status: DunningAttemptStatus.SUCCEEDED,
-      finished_at: now,
-      error_code: null,
-      error_message: null,
-      payment_reference: retryPayment.payment_id,
-    })
-  }
-
-  await settleDunningCaseRecovered(container, {
+  const settlement = await settleDunningCaseRecovered(container, {
     dunning_case: dunningCase,
-    subscription,
+    attempt: retryPayment ? { id: retryPayment.attempt_id } : undefined,
     finished_at: now,
     recovery_reason: recoveryReason,
     payment_reference: retryPayment?.payment_id ?? input.payment_id,
   })
+
+  if (!settlement.recovered) {
+    return answer(false, settlement.reason)
+  }
 
   await healCycle(
     retryPayment

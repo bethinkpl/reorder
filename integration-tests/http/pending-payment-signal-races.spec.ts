@@ -23,6 +23,7 @@ import {
   DunningRecoveryReason,
 } from "../../src/modules/dunning/types"
 import { dunningCaseLockKey } from "../../src/modules/dunning/utils/lock-key"
+import { STALE_RETRY_MINUTES } from "../../src/modules/dunning/utils/stale-retry"
 import { RENEWAL_MODULE } from "../../src/modules/renewal"
 import type RenewalModuleService from "../../src/modules/renewal/service"
 import {
@@ -39,6 +40,7 @@ import {
 } from "../../src/modules/subscription/events"
 import { SubscriptionStatus } from "../../src/modules/subscription/types"
 import {
+  cancelSubscriptionByCustomerWorkflow,
   cancelSubscriptionWorkflow,
   ensureNextRenewalCycleWorkflow,
   forceRenewalCycleWorkflow,
@@ -839,6 +841,122 @@ medusaIntegrationTestRunner({
 
         await expectSettled(seeded, seeded.attempt.id)
         expect(alerts(seeded.cycle.id)).toHaveLength(0)
+      })
+    })
+
+    describe("a retry charge the provider takes after the run's case lock lapsed", () => {
+      /** Lets `interject` run once the run's lock has lapsed and its attempt is past the stale-retry margin. */
+      function authorizeAfterLapse(dunningCaseId: string, interject: () => Promise<unknown>) {
+        const payments = paymentModule()
+        const authorize = payments.authorizePaymentSession.bind(payments)
+
+        jest
+          .spyOn(payments, "authorizePaymentSession")
+          .mockImplementation(async (sessionId, context) => {
+            await locking().release(dunningCaseLockKey(dunningCaseId))
+
+            const [attempt] = await dunningModule().listDunningAttempts({
+              dunning_case_id: dunningCaseId,
+            })
+
+            await dunningModule().updateDunningAttempts({
+              id: attempt.id,
+              started_at: new Date(Date.now() - (STALE_RETRY_MINUTES + 1) * 60 * 1000),
+            })
+            await interject()
+
+            return await authorize(sessionId, context)
+          })
+      }
+
+      it("reports the capture once for a refund, leaving the subscription cancelled and the case unrecovered, when the customer's cancellation closed the case meanwhile", async () => {
+        const container = getContainer()
+        const { subscription, dunningCase } = await seedDunningCase(
+          container,
+          "SUB-RETRY-LAPSED-CANCELLED",
+          DUE_FOR_RETRY
+        )
+        const sessions = routeRetrySessionsToFixture(container)
+
+        authorizeAfterLapse(dunningCase.id, () =>
+          cancelSubscriptionByCustomerWorkflow(container).run({
+            input: { subscription_id: subscription.id, reason: "moving abroad" },
+          })
+        )
+
+        await expect(runRetry(container, dunningCase.id)).resolves.toMatchObject({
+          outcome: "unrecovered",
+          recovered_now: false,
+          settled_now: false,
+          subscription_status: SubscriptionStatus.CANCELLED,
+        })
+
+        const [payment] = await paymentModule().listPayments({ payment_session_id: sessions[0].id })
+
+        expect(emitted(SubscriptionEvents.LATE_PAYMENT_CAPTURED)).toHaveLength(1)
+
+        await deliverCapture(container, payment.id)
+        await reconcilePaidDunningCases(container)
+
+        expect(await readDunningState(container, dunningCase.id)).toMatchObject({
+          subscription: { status: SubscriptionStatus.CANCELLED },
+          dunningCase: {
+            status: DunningCaseStatus.UNRECOVERED,
+            recovery_reason: DunningRecoveryReason.SUBSCRIPTION_CANCELLED_BY_CUSTOMER,
+          },
+          attempts: [
+            {
+              status: DunningAttemptStatus.SUCCEEDED,
+              error_code: PaymentAttemptErrorCode.CAPTURED_AFTER_CLOSE,
+            },
+          ],
+        })
+        expect(emitted(SubscriptionEvents.LATE_PAYMENT_CAPTURED).map((message) => message.data)).toEqual([
+          expect.objectContaining({
+            subscription_id: subscription.id,
+            payment_id: payment.id,
+            dunning_case_id: dunningCase.id,
+            reason: LatePaymentCapturedReason.SUBSCRIPTION_TERMINAL,
+            refund_amount: RENEWAL_AMOUNT,
+          }),
+        ])
+        expect(emitted(DunningEvents.RECOVERED)).toHaveLength(0)
+      })
+
+      it("leaves a case the sweep made await the charge meanwhile to be recovered from its paid order, once", async () => {
+        const container = getContainer()
+        const { dunningCase } = await seedDunningCase(
+          container,
+          "SUB-RETRY-LAPSED-REPARKED",
+          DUE_FOR_RETRY
+        )
+        const sessions = routeRetrySessionsToFixture(container)
+
+        authorizeAfterLapse(dunningCase.id, () => reconcilePaidDunningCases(container))
+
+        await expect(runRetry(container, dunningCase.id)).resolves.toMatchObject({
+          outcome: "awaiting_payment",
+          recovered_now: false,
+        })
+        expect(await readDunningState(container, dunningCase.id)).toMatchObject({
+          dunningCase: { status: DunningCaseStatus.AWAITING_PAYMENT },
+          attempts: [{ status: DunningAttemptStatus.PROCESSING, payment_reference: sessions[0].id }],
+        })
+
+        await reconcilePaidDunningCases(container)
+
+        const [payment] = await paymentModule().listPayments({ payment_session_id: sessions[0].id })
+
+        expect(await readDunningState(container, dunningCase.id)).toMatchObject({
+          subscription: { status: SubscriptionStatus.ACTIVE },
+          dunningCase: {
+            status: DunningCaseStatus.RECOVERED,
+            recovery_reason: DunningRecoveryReason.PAYMENT_RECOVERED,
+          },
+          attempts: [{ status: DunningAttemptStatus.SUCCEEDED, payment_reference: payment.id }],
+        })
+        expect(emitted(DunningEvents.RECOVERED)).toHaveLength(1)
+        expect(emitted(SubscriptionEvents.LATE_PAYMENT_CAPTURED)).toHaveLength(0)
       })
     })
 

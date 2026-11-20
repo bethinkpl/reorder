@@ -151,7 +151,11 @@ This means:
   tracked so its late capture is reported for a refund. A case still `retrying` is closed only once its latest attempt
   is 10 minutes old (the margin the paid-case sweep also waits): a retry run does not renew its 120 s case lock, so a
   younger one may still be waiting for the provider, and the cancellation is refused instead
-- a dunning recovery or a renewal settlement never applies a payment to a cancelled subscription
+- a dunning recovery or a renewal settlement never applies a payment to a cancelled subscription. The recovery
+  settlement reads the case and the subscription again before it writes, and only closes a case still in the status
+  its caller left it in (`retrying` for a retry run): a retry whose charge outlived its lock leaves a case a
+  cancellation closed or the paid-case sweep moved on as it is, keeps its attempt unapplied and reconciles the capture
+  as a late payment
 
 ## 4. Read Path
 

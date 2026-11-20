@@ -1,10 +1,8 @@
 import type { MedusaContainer } from "@medusajs/framework/types"
 import { MedusaError } from "@medusajs/framework/utils"
 import type { GetAdminSubscriptionsSchemaType } from "./validators"
-import {
-  isLockAcquisitionFailure,
-  isRenewalPaymentInProgress,
-} from "../../../modules/subscription/utils/errors"
+import { isLockBusyError } from "../../../common/utils/lock-busy-error"
+import { isRenewalPaymentInProgress } from "../../../modules/subscription/utils/errors"
 import {
   getAdminSubscriptionDetail,
   listAdminSubscriptions,
@@ -72,7 +70,7 @@ export function mapAdminSubscriptionChangeConflict(
     return { type: MedusaError.Types.CONFLICT, message: error.message }
   }
 
-  if (isLockAcquisitionFailure(error)) {
+  if (isLockBusyError(error)) {
     return {
       type: MedusaError.Types.CONFLICT,
       message: `Subscription '${subscriptionId}' is being updated by a renewal or a payment right now; try again in a moment`,

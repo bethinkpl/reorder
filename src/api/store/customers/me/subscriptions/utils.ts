@@ -18,7 +18,6 @@ import {
 } from "../../../../../modules/subscription/types"
 import { getEffectiveNextRenewalAt } from "../../../../../modules/subscription/utils/effective-next-renewal"
 import {
-  isLockAcquisitionFailure,
   isRenewalPaymentInProgress,
   RENEWAL_PAYMENT_IN_PROGRESS,
 } from "../../../../../modules/subscription/utils/errors"
@@ -27,6 +26,7 @@ import {
   roundCurrency,
 } from "../../../../../workflows/utils/subscription-discount"
 import type { FrequencyInterval } from "../../../../../common/types/frequency-interval"
+import { isLockBusyError } from "../../../../../common/utils/lock-busy-error"
 
 const ACTIVE_CANCELLATION_STATUSES = [
   CancellationCaseStatus.REQUESTED,
@@ -981,7 +981,7 @@ export function mapStoreSubscriptionChangeConflict(error: unknown) {
     }
   }
 
-  if (isLockAcquisitionFailure(error)) {
+  if (isLockBusyError(error)) {
     return {
       type: MedusaError.Types.CONFLICT,
       message:

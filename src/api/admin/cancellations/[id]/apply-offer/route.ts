@@ -9,7 +9,7 @@ import {
   mapCancellationAdminRouteError,
 } from "../../utils"
 import { applyRetentionOfferWorkflow } from "../../../../../workflows"
-import { isLockAcquisitionFailure } from "../../../../../modules/subscription/utils/errors"
+import { isLockBusyError } from "../../../../../common/utils/lock-busy-error"
 
 export const POST = async (
   req: AuthenticatedMedusaRequest<PostAdminApplyRetentionOfferSchemaType>,
@@ -27,7 +27,7 @@ export const POST = async (
       },
     })
   } catch (error) {
-    if (isLockAcquisitionFailure(error)) {
+    if (isLockBusyError(error)) {
       return res.status(409).json({
         type: MedusaError.Types.CONFLICT,
         message: `The subscription of cancellation case '${req.params.id}' is being updated by a renewal or a payment right now; try again in a moment`,

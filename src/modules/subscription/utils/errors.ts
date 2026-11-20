@@ -1,5 +1,4 @@
 import { MedusaError } from "@medusajs/framework/utils"
-import { isLockBusyError } from "../../../common/utils/lock-busy-error"
 
 /** `code` of the refusal to pause or resume while a renewal charge awaits the provider's answer. */
 export const RENEWAL_PAYMENT_IN_PROGRESS = "renewal_payment_in_progress"
@@ -63,6 +62,3 @@ export function isRenewalPaymentInProgress(
     typeof error.message === "string"
   )
 }
-
-/** The older name of `isLockBusyError`, kept for callers that still use it. */
-export const isLockAcquisitionFailure = isLockBusyError

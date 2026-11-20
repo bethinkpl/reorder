@@ -4,8 +4,9 @@ import type {
   IPaymentModuleService,
   MedusaContainer,
 } from "@medusajs/framework/types"
-import { Modules } from "@medusajs/framework/utils"
+import { Modules, PaymentActions } from "@medusajs/framework/utils"
 import { FrequencyInterval } from "../../src/common/types/frequency-interval"
+import { PaymentAttemptErrorCode } from "../../src/common/types/payment-attempt-error-code"
 import processDunningRetriesJob from "../../src/jobs/process-dunning-retries"
 import processRenewalCyclesJob from "../../src/jobs/process-renewal-cycles"
 import { reconcileAwaitingRenewalCycles } from "../../src/jobs/reconcile-awaiting-renewal-cycles"
@@ -639,7 +640,7 @@ medusaIntegrationTestRunner({
             status: RenewalAttemptStatus.PROCESSING,
             reported_payment_failure: expect.objectContaining({
               session_id: seeded.session.id,
-              action: "failed",
+              action: PaymentActions.FAILED,
               reason: "declined",
             }),
           }),
@@ -1241,7 +1242,7 @@ medusaIntegrationTestRunner({
         await createRenewalAttemptSeed(container, {
           renewal_cycle_id: seeded.cycle.id,
           status: RenewalAttemptStatus.FAILED,
-          error_code: "resolved_unpaid",
+          error_code: PaymentAttemptErrorCode.RESOLVED_UNPAID,
           payment_reference: renewalSession.session.id,
           order_id: seeded.order.id,
         })
@@ -1275,7 +1276,7 @@ medusaIntegrationTestRunner({
         await createRenewalAttemptSeed(container, {
           renewal_cycle_id: seeded.cycle.id,
           status: RenewalAttemptStatus.FAILED,
-          error_code: "resolved_unpaid",
+          error_code: PaymentAttemptErrorCode.RESOLVED_UNPAID,
           payment_reference: renewalSession.session.id,
           order_id: seeded.order.id,
         })

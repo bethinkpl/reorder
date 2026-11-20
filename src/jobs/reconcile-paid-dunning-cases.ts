@@ -1,5 +1,6 @@
 import { MedusaContainer } from "@medusajs/framework/types"
 import { Modules } from "@medusajs/framework/utils"
+import { PaymentAttemptErrorCode } from "../common/types/payment-attempt-error-code"
 import { isLockBusyError } from "../common/utils/lock-busy-error"
 import { DUNNING_MODULE } from "../modules/dunning"
 import { DunningEvents } from "../modules/dunning/events"
@@ -33,10 +34,7 @@ import {
   applyRecordedDunningPaymentFailureUnderLock,
   emitDunningAttemptOutcomeEvents,
 } from "../workflows/utils/fail-awaiting-dunning-attempt"
-import {
-  findCapturedPaymentId,
-  NO_PAYMENT_SIGNAL_ERROR_CODE,
-} from "../workflows/utils/late-payment-capture"
+import { findCapturedPaymentId } from "../workflows/utils/late-payment-capture"
 import { tryUnderLock } from "../workflows/utils/run-under-lock"
 import { dunningCaseLockKey } from "../modules/dunning/utils/lock-key"
 
@@ -261,7 +259,7 @@ async function failStaleAttemptUnderLock(
     id: attempt.id,
     status: DunningAttemptStatus.FAILED,
     finished_at: input.now,
-    error_code: NO_PAYMENT_SIGNAL_ERROR_CODE,
+    error_code: PaymentAttemptErrorCode.NO_PAYMENT_SIGNAL,
     error_message: message,
   })
 

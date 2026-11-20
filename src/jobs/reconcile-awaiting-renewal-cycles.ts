@@ -1,5 +1,6 @@
 import type { MedusaContainer } from "@medusajs/framework/types"
 import { Modules } from "@medusajs/framework/utils"
+import { PaymentAttemptErrorCode } from "../common/types/payment-attempt-error-code"
 import { ActivityLogActorType } from "../modules/activity-log/types"
 import { RENEWAL_MODULE } from "../modules/renewal"
 import type RenewalModuleService from "../modules/renewal/service"
@@ -30,10 +31,7 @@ import { loadOrderAmounts } from "../workflows/steps/run-dunning-retry"
 import { endAwaitingRenewalCyclesOnCancellation } from "../workflows/utils/end-awaiting-renewal-cycle-on-cancellation"
 import { tryUnderLock } from "../workflows/utils/run-under-lock"
 import { applyRecordedRenewalPaymentFailureUnderLock } from "../workflows/utils/fail-awaiting-renewal-cycle"
-import {
-  findCapturedPaymentId,
-  NO_PAYMENT_SIGNAL_ERROR_CODE,
-} from "../workflows/utils/late-payment-capture"
+import { findCapturedPaymentId } from "../workflows/utils/late-payment-capture"
 import { isLockBusyError } from "../common/utils/lock-busy-error"
 import {
   settleAwaitingRenewalCycle,
@@ -265,7 +263,7 @@ async function failStaleAttemptUnderLock(
     id: attempt.id,
     status: RenewalAttemptStatus.FAILED,
     finished_at: input.now,
-    error_code: NO_PAYMENT_SIGNAL_ERROR_CODE,
+    error_code: PaymentAttemptErrorCode.NO_PAYMENT_SIGNAL,
     error_message: message,
   })
 

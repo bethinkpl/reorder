@@ -1,3 +1,4 @@
+import { PaymentActions } from "@medusajs/framework/utils"
 import { moduleIntegrationTestRunner } from "@medusajs/test-utils"
 import { DateTime } from "luxon"
 import { RENEWAL_MODULE } from ".."
@@ -117,7 +118,7 @@ moduleIntegrationTestRunner<RenewalModuleService>({
         ] as any)) as unknown as { id: string }[]
         const failure = {
           session_id: "payses_module_003",
-          action: "failed",
+          action: PaymentActions.FAILED,
           reason: "declined",
           received_at: "2026-03-30T12:03:00.000Z",
         }

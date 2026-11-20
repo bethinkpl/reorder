@@ -5,6 +5,7 @@ import type {
 import type { MedusaContainer } from "@medusajs/framework/types"
 import { Modules } from "@medusajs/framework/utils"
 import { RenewalAwaitingPaymentAdminResolution } from "../../../../../admin/types/renewal"
+import { PaymentAttemptErrorCode } from "../../../../../common/types/payment-attempt-error-code"
 import { RENEWAL_MODULE } from "../../../../../modules/renewal"
 import type RenewalModuleService from "../../../../../modules/renewal/service"
 import {
@@ -30,7 +31,6 @@ import type { PostAdminResolveAwaitingRenewalPaymentSchemaType } from "../../val
 import { renewalSubscriptionLockKey } from "../../../../../modules/renewal/utils/lock-key"
 
 const RENEWAL_LOCK_TIMEOUT_SECONDS = 30
-const UNPAID_ERROR_CODE = "resolved_unpaid"
 
 type LatestRenewalAttempt = Awaited<
   ReturnType<RenewalModuleService["listRenewalAttempts"]>
@@ -82,7 +82,7 @@ async function failUnpaidUnderLock(
     renewal_cycle_id: input.renewal_cycle_id,
     session_id: attempt.payment_reference,
     attempt_id: attempt.id,
-    action: UNPAID_ERROR_CODE,
+    action: PaymentAttemptErrorCode.RESOLVED_UNPAID,
     reason: null,
     message,
   })

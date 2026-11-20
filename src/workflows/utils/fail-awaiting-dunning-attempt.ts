@@ -1,6 +1,7 @@
 import type { MedusaContainer } from "@medusajs/framework/types"
 import { ContainerRegistrationKeys } from "@medusajs/framework/utils"
 import {
+  type PaymentFailureAction,
   readReportedPaymentFailure,
   type ReportedPaymentFailure,
 } from "../../common/types/reported-payment-failure"
@@ -35,7 +36,7 @@ const LOCK_HOLD_SECONDS = 120
 
 export type FailAwaitingDunningAttemptInput = {
   session_id: string
-  action: string
+  action: PaymentFailureAction
   reason: string | null
 }
 
@@ -316,7 +317,7 @@ export async function applyRecordedDunningPaymentFailureUnderLock(
 
 export type FailAwaitingDunningAttemptUnderLockInput = RetryMarkers & {
   session_id: string | null
-  action: string
+  action: PaymentFailureAction
   reason: string | null
   message?: string
 }

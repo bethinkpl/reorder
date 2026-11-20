@@ -5,6 +5,7 @@ import type {
 import type { MedusaContainer } from "@medusajs/framework/types"
 import { Modules } from "@medusajs/framework/utils"
 import { DunningAwaitingPaymentAdminResolution } from "../../../../../admin/types/dunning"
+import { PaymentAttemptErrorCode } from "../../../../../common/types/payment-attempt-error-code"
 import { DUNNING_MODULE } from "../../../../../modules/dunning"
 import { DunningEvents } from "../../../../../modules/dunning/events"
 import type DunningModuleService from "../../../../../modules/dunning/service"
@@ -36,7 +37,6 @@ import type { PostAdminResolveAwaitingDunningPaymentSchemaType } from "../../val
 import { dunningCaseLockKey } from "../../../../../modules/dunning/utils/lock-key"
 
 const DUNNING_LOCK_TIMEOUT_SECONDS = 30
-const UNPAID_ERROR_CODE = "resolved_unpaid"
 
 type ResolveAwaitingPaymentInput = {
   dunning_case_id: string
@@ -123,7 +123,7 @@ async function failUnpaidUnderLock(
     dunning_case_id: input.dunning_case_id,
     dunning_attempt_id: latest.id,
     session_id: latest.payment_reference,
-    action: UNPAID_ERROR_CODE,
+    action: PaymentAttemptErrorCode.RESOLVED_UNPAID,
     reason: null,
     message: input.reason
       ? `Retry payment never arrived; resolved as failed by an admin: ${input.reason}`

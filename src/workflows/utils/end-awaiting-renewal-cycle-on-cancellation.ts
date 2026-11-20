@@ -1,4 +1,5 @@
 import type { MedusaContainer } from "@medusajs/framework/types"
+import { PaymentAttemptErrorCode } from "../../common/types/payment-attempt-error-code"
 import { ACTIVITY_LOG_MODULE } from "../../modules/activity-log"
 import type ActivityLogModuleService from "../../modules/activity-log/service"
 import {
@@ -18,8 +19,6 @@ import type {
   CancellationSubscriptionDisplayRecord,
 } from "../steps/shared-cancellation-log"
 import { toISOStringOrNull } from "./date-output"
-
-const CANCELLATION_ERROR_CODE = "subscription_cancelled"
 
 export type EndedAwaitingRenewalCycle = {
   cycle: {
@@ -125,7 +124,7 @@ async function endCycle(
       id: attempt.id,
       status: RenewalAttemptStatus.FAILED,
       finished_at: finishedAt,
-      error_code: CANCELLATION_ERROR_CODE,
+      error_code: PaymentAttemptErrorCode.SUBSCRIPTION_CANCELLED,
       error_message: message,
     })
   }
@@ -170,7 +169,7 @@ async function endCycle(
         source: input.source,
         renewal_cycle_id: cycle.id,
         order_id: cycle.generated_order_id,
-        reason_code: CANCELLATION_ERROR_CODE,
+        reason_code: PaymentAttemptErrorCode.SUBSCRIPTION_CANCELLED,
         scheduled_for: toISOStringOrNull(cycle.scheduled_for),
       },
       dedupe: {

@@ -1,7 +1,8 @@
 import { medusaIntegrationTestRunner } from "@medusajs/test-utils"
 import path from "path"
 import type { MedusaContainer } from "@medusajs/framework/types"
-import { Modules } from "@medusajs/framework/utils"
+import { Modules, PaymentActions } from "@medusajs/framework/utils"
+import { PaymentAttemptErrorCode } from "../../src/common/types/payment-attempt-error-code"
 import processDunningRetriesJob from "../../src/jobs/process-dunning-retries"
 import {
   DUNNING_AWAITING_PAYMENT_OVERDUE_EVENT,
@@ -42,10 +43,6 @@ import { cancelSubscriptionByCustomerWorkflow } from "../../src/workflows/cancel
 import { skipNextDeliveryWorkflow } from "../../src/workflows/skip-next-delivery"
 import { startDunningWorkflow } from "../../src/workflows/start-dunning"
 import { failAwaitingDunningAttempt } from "../../src/workflows/utils/fail-awaiting-dunning-attempt"
-import {
-  CAPTURED_AFTER_CLOSE_ERROR_CODE,
-  NO_PAYMENT_SIGNAL_ERROR_CODE,
-} from "../../src/workflows/utils/late-payment-capture"
 import {
   type SeededDunningCase,
   createRetrySessionRouter,
@@ -399,7 +396,7 @@ medusaIntegrationTestRunner({
         const seeded = await seedDunningCase(container, "SUB-DUN-AWAIT-FAILED")
         const failure = {
           session_id: seeded.attempts[0].session.id,
-          action: "failed",
+          action: PaymentActions.FAILED,
           reason: "insufficient_funds",
         }
         const nextIntervalMs = defaultRetrySchedule.intervals[1] * 60 * 1000
@@ -444,7 +441,7 @@ medusaIntegrationTestRunner({
           title: "reschedules rather than settles the case when the awaiting charge is canceled",
           reference: "SUB-DUN-AWAIT-CANCELED",
           seed: {},
-          report: { action: "canceled", reason: null },
+          report: { action: PaymentActions.CANCELED, reason: null },
           expected: {
             dunningCase: {
               status: DunningCaseStatus.RETRY_SCHEDULED,
@@ -462,7 +459,7 @@ medusaIntegrationTestRunner({
           title: "closes the case as unrecovered when the charge of the last allowed attempt fails",
           reference: "SUB-DUN-AWAIT-LAST",
           seed: { attempt_count: 3, max_attempts: 3 },
-          report: { action: "failed", reason: "insufficient_funds" },
+          report: { action: PaymentActions.FAILED, reason: "insufficient_funds" },
           expected: {
             dunningCase: {
               status: DunningCaseStatus.UNRECOVERED,
@@ -482,7 +479,7 @@ medusaIntegrationTestRunner({
             attempt_count: 2,
             attempts: [DunningAttemptStatus.FAILED, DunningAttemptStatus.PROCESSING],
           },
-          report: { action: "failed", reason: "insufficient_funds" },
+          report: { action: PaymentActions.FAILED, reason: "insufficient_funds" },
           expected: {
             dunningCase: {
               status: DunningCaseStatus.AWAITING_PAYMENT,
@@ -527,7 +524,7 @@ medusaIntegrationTestRunner({
 
         await failAwaitingDunningAttempt(container, {
           session_id: seeded.attempts[0].session.id,
-          action: "failed",
+          action: PaymentActions.FAILED,
           reason: "insufficient_funds",
         })
 
@@ -733,7 +730,7 @@ medusaIntegrationTestRunner({
             {
               ...cancelled.attempts[0],
               status: DunningAttemptStatus.SUCCEEDED,
-              error_code: CAPTURED_AFTER_CLOSE_ERROR_CODE,
+              error_code: PaymentAttemptErrorCode.CAPTURED_AFTER_CLOSE,
               error_message: expect.stringContaining(payment.id),
               finished_at: expect.any(Date),
               updated_at: expect.any(Date),
@@ -823,7 +820,7 @@ medusaIntegrationTestRunner({
           expect.objectContaining({
             id: attempt.id,
             status: DunningAttemptStatus.SUCCEEDED,
-            error_code: CAPTURED_AFTER_CLOSE_ERROR_CODE,
+            error_code: PaymentAttemptErrorCode.CAPTURED_AFTER_CLOSE,
           }),
         ])
         expect(state.dunningCase.status).toEqual(DunningCaseStatus.UNRECOVERED)
@@ -868,7 +865,7 @@ medusaIntegrationTestRunner({
           expect.objectContaining({
             id: attempt.id,
             status: DunningAttemptStatus.SUCCEEDED,
-            error_code: CAPTURED_AFTER_CLOSE_ERROR_CODE,
+            error_code: PaymentAttemptErrorCode.CAPTURED_AFTER_CLOSE,
           }),
         ])
         expect(events(SubscriptionEvents.LATE_PAYMENT_CAPTURED).map((message) => message.data)).toEqual([
@@ -907,7 +904,7 @@ medusaIntegrationTestRunner({
         expect((await readDunningState(container, seeded.dunningCase.id)).attempts).toEqual([
           expect.objectContaining({
             status: DunningAttemptStatus.FAILED,
-            error_code: NO_PAYMENT_SIGNAL_ERROR_CODE,
+            error_code: PaymentAttemptErrorCode.NO_PAYMENT_SIGNAL,
           }),
         ])
         expect(logs({ event: "dunning.stale_attempt_closed" })).toEqual([
@@ -931,7 +928,7 @@ medusaIntegrationTestRunner({
         expect((await readDunningState(container, seeded.dunningCase.id)).attempts).toEqual([
           expect.objectContaining({
             status: DunningAttemptStatus.SUCCEEDED,
-            error_code: CAPTURED_AFTER_CLOSE_ERROR_CODE,
+            error_code: PaymentAttemptErrorCode.CAPTURED_AFTER_CLOSE,
           }),
         ])
         expect(events(SubscriptionEvents.LATE_PAYMENT_CAPTURED).map((message) => message.data)).toEqual([

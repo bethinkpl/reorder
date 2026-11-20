@@ -1,5 +1,6 @@
 import type { MedusaContainer } from "@medusajs/framework/types"
 import {
+  type PaymentFailureAction,
   readReportedPaymentFailure,
   type ReportedPaymentFailure,
 } from "../../common/types/reported-payment-failure"
@@ -51,7 +52,7 @@ export type FailAwaitingRenewalCycleInput = {
   renewal_cycle_id: string
   session_id: string | null
   attempt_id: string | null
-  action: string
+  action: PaymentFailureAction
   reason: string | null
   message?: string
 }

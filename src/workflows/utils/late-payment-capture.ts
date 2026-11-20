@@ -4,6 +4,7 @@ import type {
   MedusaContainer,
 } from "@medusajs/framework/types"
 import { MathBN, Modules } from "@medusajs/framework/utils"
+import { PaymentAttemptErrorCode } from "../../common/types/payment-attempt-error-code"
 import { DUNNING_MODULE } from "../../modules/dunning"
 import type DunningModuleService from "../../modules/dunning/service"
 import {
@@ -35,10 +36,6 @@ import { dunningCaseLockKey } from "../../modules/dunning/utils/lock-key"
 
 const LOCK_WAIT_SECONDS = 30
 const LOCK_HOLD_SECONDS = 120
-
-export const CAPTURED_AFTER_CLOSE_ERROR_CODE = "captured_after_close"
-
-export const NO_PAYMENT_SIGNAL_ERROR_CODE = "no_payment_signal"
 
 /** Where an attempt records the capture it has been reconciled with, so a redelivery does nothing. */
 const LATE_CAPTURE_METADATA_KEY = "late_payment_captured"
@@ -318,7 +315,7 @@ async function recordOnAttempt(
   const closing = update.close
     ? {
         finished_at: new Date(update.marker.at),
-        error_code: CAPTURED_AFTER_CLOSE_ERROR_CODE,
+        error_code: PaymentAttemptErrorCode.CAPTURED_AFTER_CLOSE,
         error_message: `Payment '${update.marker.payment_id}' was captured after this attempt's ${charge.kind === "renewal" ? "renewal" : "dunning case"} had closed; it was not applied`,
       }
     : {}

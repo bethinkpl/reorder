@@ -7,6 +7,7 @@ import {
 } from "@medusajs/framework/utils"
 import { createStep, StepResponse } from "@medusajs/framework/workflows-sdk"
 import { BigNumberInput } from "@medusajs/types"
+import type { PaymentFailureAction } from "../../common/types/reported-payment-failure"
 import {
   createOrUpdateOrderPaymentCollectionWorkflow,
   createPaymentSessionsWorkflow,
@@ -531,7 +532,7 @@ function classifyPaymentRetryFailure(
 }
 
 export function classifyReportedPaymentFailure(input: {
-  action: string
+  action: PaymentFailureAction
   reason: string | null
   payment_reference: string | null
 }): PaymentRetryFailureOutcome {

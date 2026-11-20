@@ -1,6 +1,7 @@
 import { medusaIntegrationTestRunner } from "@medusajs/test-utils"
 import path from "path"
 import { MedusaError } from "@medusajs/framework/utils"
+import { PaymentAttemptErrorCode } from "../../src/common/types/payment-attempt-error-code"
 import { createStep, createWorkflow, type WorkflowData, WorkflowResponse } from "@medusajs/framework/workflows-sdk"
 import { DateTime } from "luxon"
 import processRenewalCyclesJob from "../../src/jobs/process-renewal-cycles"
@@ -55,10 +56,6 @@ import {
 } from "../helpers/renewal-fixtures"
 import { atTime, watchEvents, watchLogs } from "../helpers/spy-fixtures"
 import { createStoreCustomerHeaders } from "../helpers/subscription-fixtures"
-import {
-  CAPTURED_AFTER_CLOSE_ERROR_CODE,
-  NO_PAYMENT_SIGNAL_ERROR_CODE,
-} from "../../src/workflows/utils/late-payment-capture"
 
 jest.setTimeout(120 * 1000)
 
@@ -253,7 +250,7 @@ medusaIntegrationTestRunner({
               {
                 ...cancelled.attempts[0],
                 status: RenewalAttemptStatus.SUCCEEDED,
-                error_code: CAPTURED_AFTER_CLOSE_ERROR_CODE,
+                error_code: PaymentAttemptErrorCode.CAPTURED_AFTER_CLOSE,
                 error_message: expect.stringContaining(payment.id),
                 finished_at: expect.any(Date),
                 updated_at: expect.any(Date),
@@ -572,7 +569,7 @@ medusaIntegrationTestRunner({
         expect((await readRenewalState(container, seeded)).attempts).toEqual([
           expect.objectContaining({
             status: RenewalAttemptStatus.FAILED,
-            error_code: NO_PAYMENT_SIGNAL_ERROR_CODE,
+            error_code: PaymentAttemptErrorCode.NO_PAYMENT_SIGNAL,
           }),
         ])
         expect(entries({ event: "renewal.stale_attempt_closed" })).toEqual([
@@ -588,7 +585,7 @@ medusaIntegrationTestRunner({
         expect((await readRenewalState(container, seeded)).attempts).toEqual([
           expect.objectContaining({
             status: RenewalAttemptStatus.SUCCEEDED,
-            error_code: CAPTURED_AFTER_CLOSE_ERROR_CODE,
+            error_code: PaymentAttemptErrorCode.CAPTURED_AFTER_CLOSE,
           }),
         ])
         expect(emitted(SubscriptionEvents.LATE_PAYMENT_CAPTURED).map((message) => message.data)).toEqual([
@@ -613,7 +610,7 @@ medusaIntegrationTestRunner({
         expect((await readRenewalState(container, seeded)).attempts).toEqual([
           expect.objectContaining({
             status: RenewalAttemptStatus.SUCCEEDED,
-            error_code: CAPTURED_AFTER_CLOSE_ERROR_CODE,
+            error_code: PaymentAttemptErrorCode.CAPTURED_AFTER_CLOSE,
           }),
         ])
         expect(emitted(SubscriptionEvents.LATE_PAYMENT_CAPTURED).map((message) => message.data)).toEqual([

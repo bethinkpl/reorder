@@ -150,14 +150,14 @@ processRenewalCycleWorkflow.hooks.applyRenewalCredits(
 - A thrown error fails the renewal before any charge — the workflow reverts and the cycle plus
   its attempt are marked FAILED (retryable). The order stays on the cycle for the retry.
 - `run-dunning-retry` doesn't call it; it charges only what is still owed on the same order
-  (`summary.pending_difference`), and recovers the case without a charge when nothing is.
+  (`summary.pending_difference`).
 - The scheduler's daily re-run of a FAILED cycle calls it only while no dunning case is active for
   the subscription. Once a charge is declined and dunning opens, neither the scheduler nor a forced
   run touches that cycle again, so the hook is not called for its order while the case is open:
   credits the customer gains in the meantime are not applied by the plugin. To use them, add the
   credit lines to the renewal order from the host app; the next retry then charges only the rest,
-  and an order they cover in full is recovered by the next retry or by the
-  `reconcile-paid-dunning-cases` sweep (every 30 minutes) without a charge.
+  and an order they cover in full is recovered without a charge by the
+  `reconcile-paid-dunning-cases` sweep (every 30 minutes).
 
 ### `processRenewalCycleWorkflow` — `resolveRenewalAdjustments`
 

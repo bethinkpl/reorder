@@ -410,7 +410,48 @@ Returns the refreshed `dunning_case` detail payload.
 - `409 conflict`
   The case is terminal, retry is in flight, or the override would create an illegal transition.
 
-## 7. Error Mapping
+## 7. Resolve Awaiting Payment
+
+### Endpoint
+
+- Method: `POST`
+- Path: `/admin/dunning/:id/resolve-awaiting-payment`
+
+### Purpose
+
+Operator escape hatch for a case whose retry charge was submitted but whose result never arrived (status `awaiting_payment`). Runs under the case's `dunning:<id>` lock:
+
+- when the case's renewal order is already paid (`pending_difference <= 0`), the case is recovered exactly as a `payment.captured` for its in-flight attempt would recover it (the attempt closes as `succeeded` when the capture is on its session, and `subscription.dunning_recovered` is emitted)
+- otherwise, once the in-flight attempt was submitted longer ago than the minimum age (currently `RENEWAL_AWAITING_PAYMENT_ALERT_HOURS`, default `96`), the attempt is failed exactly as a failure webhook would fail it (error code `resolved_unpaid`): the case is rescheduled, or closed as `unrecovered` on its last attempt, with the same events
+- otherwise the request is refused, because the payment may still arrive
+
+### Request Body
+
+```json
+{
+  "reason": "bank confirmed no transfer"
+}
+```
+
+`reason` is optional; when given it is added to the failed attempt's error message.
+
+### Success Response
+
+Status:
+- `200 OK`
+
+Returns the refreshed `dunning_case` detail payload plus `resolution`: `recovered` or `failed`.
+
+### Common Errors
+
+- `400 invalid_data`
+  Invalid payload shape.
+- `404 not_found`
+  The case does not exist.
+- `409 conflict`
+  The case isn't awaiting its retry's payment, its unpaid charge is younger than the minimum age, or another holder has the case's lock.
+
+## 8. Error Mapping
 
 The admin dunning route layer normalizes domain errors into HTTP responses using the current rules:
 

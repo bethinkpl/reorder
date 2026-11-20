@@ -105,6 +105,14 @@ export type PostAdminReverseChurnDunningSchemaType = z.infer<
   typeof PostAdminReverseChurnDunningSchema
 >
 
+export const PostAdminResolveAwaitingDunningPaymentSchema = z.object({
+  reason: z.string().trim().min(1).max(500).optional(),
+})
+
+export type PostAdminResolveAwaitingDunningPaymentSchemaType = z.infer<
+  typeof PostAdminResolveAwaitingDunningPaymentSchema
+>
+
 export const PostAdminDunningRetryScheduleSchema = z.object({
   reason: z.string().trim().min(1).max(500).optional(),
   intervals: z.array(z.number().int().positive()).min(1).max(12),

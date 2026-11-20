@@ -23,6 +23,11 @@ export function resolveAwaitingPaymentAlertHours(
   return parsed
 }
 
+/** How long a submitted charge must have waited before it may be given up on as unpaid. */
+export function resolveAwaitingPaymentResolveMinHours(): number {
+  return resolveAwaitingPaymentAlertHours()
+}
+
 export function isAwaitingPaymentOverdue(
   parkedAt: Date | string,
   now: Date,

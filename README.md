@@ -5,6 +5,7 @@ Customized fork of [@reorder/reorderjs](https://github.com/reorder-js/reorder).
 - added day granularity for frequency intervals
 - support for payment providers that confirm a charge later: when `authorizePaymentSession` returns `null`, the renewal cycle or dunning case waits as `awaiting_payment` until `payment.captured` settles it or a `failed`/`canceled` `payment.webhook_received` fails it (a renewal then enters dunning, a dunning retry is rescheduled); requires `medusa db:migrate`
 - `POST /admin/renewals/:id/resolve-awaiting-payment` settles or fails a renewal cycle whose payment result never arrived; a charge waiting longer than `RENEWAL_AWAITING_PAYMENT_ALERT_HOURS` (default `96`) raises an alertable log
+- `POST /admin/dunning/:id/resolve-awaiting-payment` does the same for a dunning case awaiting its retry's payment: recovers it when the renewal order is paid, or fails the retry as a failure webhook would once it has waited past that limit; marking such a case recovered or unrecovered is refused while its charge is in flight
 ### Improvements / Fixes
 - prevents executing `POST /store/carts/{cartId}/complete` for carts containing subscription items
 - behaviour of `POST /store/carts/{cartId}/subscribe` matches it's non-subscription counterpart more closely (dropped `subscription` field, supports query params and uses same defaults)

@@ -552,6 +552,171 @@ medusaIntegrationTestRunner({
         )
       })
     })
+
+    describe("POST /admin/dunning/:id/resolve-awaiting-payment", () => {
+      const route = (caseId: string) => `/admin/dunning/${caseId}/resolve-awaiting-payment`
+
+      beforeEach(() => {
+        jest.restoreAllMocks()
+        jest.clearAllMocks()
+      })
+
+      async function ageInFlightAttempt(container: MedusaContainer, seeded: SeededDunningCase, hours: number) {
+        const attempt = seeded.attempts[seeded.attempts.length - 1].attempt
+
+        await container.resolve<DunningModuleService>(DUNNING_MODULE).updateDunningAttempts({
+          id: attempt.id,
+          started_at: new Date(Date.now() - hours * HOUR_MS),
+        })
+      }
+
+      it("rejects an unauthenticated request, an invalid body, an unknown case and a case that is not awaiting its retry's payment, and answers that an unpaid young charge may still arrive, writing nothing", async () => {
+        const container = getContainer()
+        const admin = { headers: await createAdminAuthHeaders(container) }
+        const young = await seedDunningCase(container, "SUB-DUN-RESOLVE-YOUNG")
+        const scheduled = await seedDunningCase(container, "SUB-DUN-RESOLVE-SCHEDULED", {
+          status: DunningCaseStatus.RETRY_SCHEDULED,
+          attempts: [DunningAttemptStatus.FAILED],
+        })
+        const before = [
+          await readDunningState(container, young.dunningCase.id),
+          await readDunningState(container, scheduled.dunningCase.id),
+        ]
+        const events = watchEvents(container)
+
+        await ageInFlightAttempt(container, young, DEFAULT_AWAITING_PAYMENT_ALERT_HOURS - 1)
+        before[0] = await readDunningState(container, young.dunningCase.id)
+
+        await expect(api.post(route(young.dunningCase.id), {})).rejects.toMatchObject({
+          response: { status: 401 },
+        })
+        await expect(api.post(route(young.dunningCase.id), { reason: "" }, admin)).rejects.toMatchObject({
+          response: { status: 400 },
+        })
+        await expect(api.post(route("dcase_missing"), {}, admin)).rejects.toMatchObject({
+          response: { status: 404, data: { type: "not_found" } },
+        })
+        await expect(api.post(route(scheduled.dunningCase.id), {}, admin)).rejects.toMatchObject({
+          response: {
+            status: 409,
+            data: { type: "conflict", message: expect.stringMatching(/isn't awaiting the payment of its retry/) },
+          },
+        })
+        await expect(api.post(route(young.dunningCase.id), {}, admin)).rejects.toMatchObject({
+          response: {
+            status: 409,
+            data: {
+              type: "conflict",
+              message: expect.stringMatching(
+                new RegExp(`payment may still arrive.*${DEFAULT_AWAITING_PAYMENT_ALERT_HOURS} hours`)
+              ),
+            },
+          },
+        })
+
+        expect([
+          await readDunningState(container, young.dunningCase.id),
+          await readDunningState(container, scheduled.dunningCase.id),
+        ]).toEqual(before)
+        expect(events(DunningEvents.RECOVERED)).toHaveLength(0)
+        expect(events(DunningEvents.ATTEMPT_FAILED)).toHaveLength(0)
+      })
+
+      it("recovers the case through its in-flight attempt when the renewal order is already paid, however young the charge", async () => {
+        const container = getContainer()
+        const admin = { headers: await createAdminAuthHeaders(container) }
+        const seeded = await seedDunningCase(container, "SUB-DUN-RESOLVE-PAID")
+        const [{ attempt, session }] = seeded.attempts
+        const payment = await captureOnOrder(container, seeded.order.id, session.id)
+        const events = watchEvents(container)
+
+        const response = await api.post(route(seeded.dunningCase.id), { reason: "provider confirmed" }, admin)
+        const state = await readDunningState(container, seeded.dunningCase.id)
+
+        expect(response.status).toEqual(200)
+        expect(response.data).toMatchObject({
+          resolution: "recovered",
+          dunning_case: { id: seeded.dunningCase.id, status: DunningCaseStatus.RECOVERED },
+        })
+        expect(state.dunningCase).toMatchObject({
+          status: DunningCaseStatus.RECOVERED,
+          recovery_reason: "payment_recovered",
+        })
+        expect(state.attempts).toEqual([
+          expect.objectContaining({
+            id: attempt.id,
+            status: DunningAttemptStatus.SUCCEEDED,
+            payment_reference: payment.id,
+          }),
+        ])
+        expect(state.subscription.status).toEqual(SubscriptionStatus.ACTIVE)
+        expect(state.cycle.status).toEqual(RenewalCycleStatus.SUCCEEDED)
+        expect(events(DunningEvents.RECOVERED).map((message) => message.data)).toEqual([
+          expect.objectContaining({ dunning_case_id: seeded.dunningCase.id, recovery_reason: "payment_recovered" }),
+        ])
+      })
+
+      it.each([
+        {
+          title: "fails the in-flight attempt and reschedules the next retry",
+          reference: "SUB-DUN-RESOLVE-RESCHEDULE",
+          seed: {},
+          expected: {
+            dunningCase: { status: DunningCaseStatus.RETRY_SCHEDULED, next_retry_at: expect.anything() },
+            subscription: SubscriptionStatus.PAST_DUE,
+            events: { attempt_failed: 1, payment_failed: 0 },
+          },
+        },
+        {
+          title: "fails the last allowed attempt and closes the case as unrecovered",
+          reference: "SUB-DUN-RESOLVE-LAST",
+          seed: { attempt_count: 3, max_attempts: 3 },
+          expected: {
+            dunningCase: { status: DunningCaseStatus.UNRECOVERED, recovery_reason: "retry_limit_exhausted" },
+            subscription: SubscriptionStatus.PAYMENT_FAILED,
+            events: { attempt_failed: 0, payment_failed: 1 },
+          },
+        },
+      ])(
+        "$title, as a failure webhook would, once an unpaid charge has waited past the minimum age",
+        async ({ reference, seed, expected }) => {
+          const container = getContainer()
+          const admin = { headers: await createAdminAuthHeaders(container) }
+          const seeded = await seedDunningCase(container, reference, seed)
+          const { attempt, session } = seeded.attempts[0]
+
+          await ageInFlightAttempt(container, seeded, DEFAULT_AWAITING_PAYMENT_ALERT_HOURS + 1)
+
+          const events = watchEvents(container)
+          const response = await api.post(
+            route(seeded.dunningCase.id),
+            { reason: "bank confirmed no transfer" },
+            admin
+          )
+          const state = await readDunningState(container, seeded.dunningCase.id)
+
+          expect(response.status).toEqual(200)
+          expect(response.data).toMatchObject({
+            resolution: "failed",
+            dunning_case: { id: seeded.dunningCase.id, status: expected.dunningCase.status },
+          })
+          expect(state.dunningCase).toMatchObject(expected.dunningCase)
+          expect(state.attempts).toEqual([
+            expect.objectContaining({
+              id: attempt.id,
+              status: DunningAttemptStatus.FAILED,
+              payment_reference: session.id,
+              error_message: expect.stringContaining("bank confirmed no transfer"),
+            }),
+          ])
+          expect(state.subscription.status).toEqual(expected.subscription)
+          expect({
+            attempt_failed: events(DunningEvents.ATTEMPT_FAILED).length,
+            payment_failed: events(DunningEvents.PAYMENT_FAILED).length,
+          }).toEqual(expected.events)
+        }
+      )
+    })
   },
 })
 

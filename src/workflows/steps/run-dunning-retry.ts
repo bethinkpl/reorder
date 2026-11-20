@@ -534,7 +534,7 @@ function classifyPaymentRetryFailure(
 export function classifyReportedPaymentFailure(input: {
   action: string
   reason: string | null
-  payment_reference: string
+  payment_reference: string | null
 }): PaymentRetryFailureOutcome {
   const errorCode = input.reason ?? input.action
   const isPermanent =

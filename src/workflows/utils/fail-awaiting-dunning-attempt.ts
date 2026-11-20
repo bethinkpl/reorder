@@ -4,8 +4,8 @@ import { DUNNING_MODULE } from "../../modules/dunning"
 import { DunningEvents } from "../../modules/dunning/events"
 import type DunningModuleService from "../../modules/dunning/service"
 import {
+  CHARGE_IN_FLIGHT_DUNNING_CASE_STATUSES,
   DunningAttemptStatus,
-  DunningCaseStatus,
 } from "../../modules/dunning/types"
 import { createDunningCorrelationId } from "../../modules/dunning/utils/observability"
 import { SUBSCRIPTION_MODULE } from "../../modules/subscription"
@@ -21,11 +21,6 @@ import { runUnderLock } from "./run-under-lock"
 
 const RUN_LOCK_WAIT_SECONDS = 5
 const LOCK_HOLD_SECONDS = 120
-
-const LOCK_WORTHY_STATUSES: readonly DunningCaseStatus[] = [
-  DunningCaseStatus.AWAITING_PAYMENT,
-  DunningCaseStatus.RETRYING,
-]
 
 export type FailAwaitingDunningAttemptInput = {
   session_id: string
@@ -77,7 +72,9 @@ async function isWorthWaitingFor(
 ) {
   const [dunningCase] = await dunningModule.listDunningCases({ id: caseId })
 
-  return Boolean(dunningCase && LOCK_WORTHY_STATUSES.includes(dunningCase.status))
+  return Boolean(
+    dunningCase && CHARGE_IN_FLIGHT_DUNNING_CASE_STATUSES.includes(dunningCase.status)
+  )
 }
 
 export async function failAwaitingDunningAttempt(
@@ -99,28 +96,43 @@ export async function failAwaitingDunningAttempt(
   const output = await runUnderLock(
     container,
     `dunning:${markers.dunning_case_id}`,
-    () => failAttemptUnderLock(container, input, markers),
+    () =>
+      failAwaitingDunningAttemptUnderLock(container, {
+        ...input,
+        ...markers,
+      }),
     { wait_seconds: RUN_LOCK_WAIT_SECONDS, hold_seconds: LOCK_HOLD_SECONDS }
   )
 
   if (output) {
-    await emitOutcomeEvents(container, output)
+    await emitDunningAttemptOutcomeEvents(container, output)
   }
 }
 
-async function failAttemptUnderLock(
+export type FailAwaitingDunningAttemptUnderLockInput = RetryMarkers & {
+  session_id: string | null
+  action: string
+  reason: string | null
+  message?: string
+}
+
+/**
+ * Fails the case's in-flight attempt as a reported decline: reschedules the case, or closes it as
+ * unrecovered on its last attempt. The caller holds `dunning:<case_id>` and emits the outcome's
+ * events with `emitDunningAttemptOutcomeEvents`.
+ */
+export async function failAwaitingDunningAttemptUnderLock(
   container: MedusaContainer,
-  input: FailAwaitingDunningAttemptInput,
-  markers: RetryMarkers
+  input: FailAwaitingDunningAttemptUnderLockInput
 ): Promise<RunDunningRetryStepOutput | null> {
   const startedAtMs = Date.now()
   const dunningModule = container.resolve<DunningModuleService>(DUNNING_MODULE)
   const subscriptionModule =
     container.resolve<SubscriptionModuleService>(SUBSCRIPTION_MODULE)
 
-  const dunningCase = await loadDunningCase(container, markers.dunning_case_id)
+  const dunningCase = await loadDunningCase(container, input.dunning_case_id)
 
-  if (!LOCK_WORTHY_STATUSES.includes(dunningCase.status)) {
+  if (!CHARGE_IN_FLIGHT_DUNNING_CASE_STATUSES.includes(dunningCase.status)) {
     return null
   }
 
@@ -133,11 +145,12 @@ async function failAttemptUnderLock(
     null
   )
 
-  if (!latest || latest.id !== markers.dunning_attempt_id) {
+  if (!latest || latest.id !== input.dunning_attempt_id) {
     return null
   }
 
-  const onThisSession = latest.payment_reference === input.session_id
+  const onThisSession =
+    input.session_id !== null && latest.payment_reference === input.session_id
   const inFlight =
     latest.status === DunningAttemptStatus.PROCESSING &&
     (onThisSession || latest.payment_reference === null)
@@ -151,6 +164,11 @@ async function failAttemptUnderLock(
     dunningCase.subscription_id
   )
   const correlationId = latest.metadata?.correlation_id
+  const outcome = classifyReportedPaymentFailure({
+    action: input.action,
+    reason: input.reason,
+    payment_reference: input.session_id,
+  })
 
   return await settleDeclinedRetryAttempt(container, {
     dunningCase,
@@ -158,11 +176,7 @@ async function failAttemptUnderLock(
     attempt: latest,
     attemptNo: latest.attempt_no,
     consumedAttempts: dunningCase.attempt_count,
-    outcome: classifyReportedPaymentFailure({
-      action: input.action,
-      reason: input.reason,
-      payment_reference: input.session_id,
-    }),
+    outcome: input.message ? { ...outcome, error_message: input.message } : outcome,
     caseMetadata: dunningCase.metadata ?? {},
     finishedAt: new Date(),
     correlationId:
@@ -174,7 +188,7 @@ async function failAttemptUnderLock(
   })
 }
 
-async function emitOutcomeEvents(
+export async function emitDunningAttemptOutcomeEvents(
   container: MedusaContainer,
   output: RunDunningRetryStepOutput
 ) {

@@ -146,7 +146,7 @@ type PaymentRetryOutcome =
   }
   | PaymentRetryFailureOutcome
 
-type DunningParkReason =
+export type DunningParkReason =
   | "requires_action"
   | "setup_failure"
   | "customer_payment_stalled"
@@ -1108,7 +1108,7 @@ async function awaitProviderAnswer(
       duration_ms: input.durationMs,
       failure_count: 1,
       alertable: true,
-      message: `DunningCase '${input.dunningCase.id}' submitted its retry charge on payment session '${input.paymentReference}' but could not be marked as awaiting it; it stays 'retrying' until the payment's capture recovers it: ${getDunningErrorMessage(error)}`,
+      message: `DunningCase '${input.dunningCase.id}' submitted its retry charge on payment session '${input.paymentReference}' but could not be marked as awaiting it; it stays 'retrying' until the payment's capture recovers it or, ten minutes on, the dunning sweep marks it as awaiting the payment: ${getDunningErrorMessage(error)}`,
       metadata: {
         retry_outcome: "awaiting_payment",
         payment_reference: input.paymentReference,

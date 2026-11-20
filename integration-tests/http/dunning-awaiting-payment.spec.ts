@@ -482,6 +482,126 @@ medusaIntegrationTestRunner({
       })
     })
 
+    describe("a case a retry left retrying", () => {
+      const MINUTE_MS = 60 * 1000
+
+      beforeEach(() => {
+        jest.restoreAllMocks()
+        jest.clearAllMocks()
+      })
+
+      async function sweepAfter(seeded: SeededDunningCase, offsetMs: number) {
+        const startedAt = new Date(seeded.attempts[0].attempt.started_at).getTime()
+
+        return await atTime(startedAt + offsetMs, () => reconcilePaidDunningCases(getContainer()))
+      }
+
+      it("leaves a young one to its run, then makes one with a submitted charge await it, so a failure of that charge reschedules the case", async () => {
+        const container = getContainer()
+        const seeded = await seedDunningCase(container, "SUB-DUN-STALE-RETRY-CHARGED", {
+          status: DunningCaseStatus.RETRYING,
+        })
+
+        expect(await sweepAfter(seeded, 5 * MINUTE_MS)).toMatchObject({
+          stale_retries_reparked: 0,
+          stale_retries_parked: 0,
+        })
+        expect((await readDunningState(container, seeded.dunningCase.id)).dunningCase.status).toEqual(
+          DunningCaseStatus.RETRYING
+        )
+
+        expect(await sweepAfter(seeded, 11 * MINUTE_MS)).toMatchObject({
+          stale_retries_reparked: 1,
+          stale_retries_parked: 0,
+          failed: 0,
+        })
+        expect(await readDunningState(container, seeded.dunningCase.id)).toMatchObject({
+          dunningCase: { status: DunningCaseStatus.AWAITING_PAYMENT, next_retry_at: null },
+          attempts: [{ status: DunningAttemptStatus.PROCESSING }],
+        })
+
+        await deliverFailure(container, seeded.attempts[0].session.id, { reason: "insufficient_funds" })
+
+        expect((await readDunningState(container, seeded.dunningCase.id)).dunningCase).toMatchObject({
+          status: DunningCaseStatus.RETRY_SCHEDULED,
+          last_payment_error_code: "insufficient_funds",
+        })
+      })
+
+      it("recovers one whose submitted charge was captured without its event in the same sweep that makes it await the charge", async () => {
+        const container = getContainer()
+        const seeded = await seedDunningCase(container, "SUB-DUN-STALE-RETRY-PAID", {
+          status: DunningCaseStatus.RETRYING,
+        })
+        const payment = await captureOnOrder(
+          container,
+          seeded.order.id,
+          seeded.attempts[0].session.id
+        )
+
+        expect(await sweepAfter(seeded, 11 * MINUTE_MS)).toMatchObject({
+          stale_retries_reparked: 1,
+          recovered: 1,
+          failed: 0,
+        })
+        expect(await readDunningState(container, seeded.dunningCase.id)).toMatchObject({
+          dunningCase: { status: DunningCaseStatus.RECOVERED, recovery_reason: "payment_recovered" },
+          attempts: [{ status: DunningAttemptStatus.SUCCEEDED, payment_reference: payment.id }],
+        })
+      })
+
+      it("hands one with no submitted charge to an operator once, with an alert and a parked event, and keeps the customer from retrying it", async () => {
+        const container = getContainer()
+        const customerId = "cus_dunning_stale_retry"
+        const seeded = await seedDunningCase(container, "SUB-DUN-STALE-RETRY-UNCHARGED", {
+          status: DunningCaseStatus.RETRYING,
+          customer_id: customerId,
+        })
+        const emitted = watchEvents(container)
+        const logs = watchLogs(container)
+
+        await container.resolve<DunningModuleService>(DUNNING_MODULE).updateDunningAttempts({
+          id: seeded.attempts[0].attempt.id,
+          payment_reference: null,
+        })
+
+        expect(await sweepAfter(seeded, 11 * MINUTE_MS)).toMatchObject({
+          stale_retries_reparked: 0,
+          stale_retries_parked: 1,
+          failed: 0,
+        })
+        expect(await sweepAfter(seeded, 12 * MINUTE_MS)).toMatchObject({
+          stale_retries_parked: 0,
+        })
+
+        const state = await readDunningState(container, seeded.dunningCase.id)
+
+        expect(state.dunningCase).toMatchObject({
+          status: DunningCaseStatus.AWAITING_MANUAL_RESOLUTION,
+          metadata: expect.objectContaining({ park_reason: "indeterminate_provider_response" }),
+        })
+        expect(emitted(DunningEvents.PARKED)).toEqual([
+          expect.objectContaining({
+            data: expect.objectContaining({
+              dunning_case_id: seeded.dunningCase.id,
+              park_reason: "indeterminate_provider_response",
+            }),
+          }),
+        ])
+        expect(
+          logs({ event: "dunning.stale_retry", alertable: true, dunning_case_id: seeded.dunningCase.id })
+        ).toHaveLength(1)
+
+        await expect(
+          api.post(`/store/customers/me/subscriptions/${seeded.subscription.id}/retry-payment`, {}, {
+            headers: await createStoreCustomerHeaders(container, customerId),
+          })
+        ).rejects.toMatchObject({
+          response: { status: 409, data: { blocked_reason: "manual_resolution_required" } },
+        })
+      })
+    })
+
     describe("a retry charge still in flight when its case closes", () => {
       beforeEach(() => {
         jest.restoreAllMocks()

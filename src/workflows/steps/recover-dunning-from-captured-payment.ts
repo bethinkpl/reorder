@@ -4,6 +4,7 @@ import { createStep, StepResponse } from "@medusajs/framework/workflows-sdk"
 import { DUNNING_MODULE } from "../../modules/dunning"
 import type DunningModuleService from "../../modules/dunning/service"
 import {
+  CHARGE_IN_FLIGHT_DUNNING_CASE_STATUSES,
   DunningAttemptStatus,
   DunningCaseStatus,
 } from "../../modules/dunning/types"
@@ -159,7 +160,7 @@ async function findRetryAttemptPayment(
     return await findRetryAttemptForPayment(container, dunningCase.id, paymentId)
   }
 
-  if (dunningCase.status === DunningCaseStatus.AWAITING_PAYMENT) {
+  if (CHARGE_IN_FLIGHT_DUNNING_CASE_STATUSES.includes(dunningCase.status)) {
     return await findCapturedAwaitingAttempt(container, dunningCase.id)
   }
 

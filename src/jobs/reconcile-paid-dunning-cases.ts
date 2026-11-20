@@ -2,6 +2,7 @@ import { MedusaContainer } from "@medusajs/framework/types"
 import { Modules } from "@medusajs/framework/utils"
 import { isLockBusyError } from "../common/utils/lock-busy-error"
 import { DUNNING_MODULE } from "../modules/dunning"
+import { DunningEvents } from "../modules/dunning/events"
 import type DunningModuleService from "../modules/dunning/service"
 import {
   CLOSED_DUNNING_CASE_STATUSES,
@@ -22,7 +23,11 @@ import {
 } from "../modules/renewal/utils/awaiting-payment-age"
 import { activateSubscriptionOnPaymentCaptured } from "../subscribers/activate-subscription-on-payment-captured"
 import { recoverDunningFromCapturedPaymentWorkflow } from "../workflows/recover-dunning-from-captured-payment"
-import { loadOrderAmounts } from "../workflows/steps/run-dunning-retry"
+import { emitDunningEvent } from "../workflows/steps/emit-dunning-event"
+import {
+  type DunningParkReason,
+  loadOrderAmounts,
+} from "../workflows/steps/run-dunning-retry"
 import {
   applyRecordedDunningPaymentFailureUnderLock,
   emitDunningAttemptOutcomeEvents,
@@ -36,6 +41,8 @@ const JOB_NAME = "reconcile-paid-dunning-cases"
 const JOB_LOCK_KEY = "jobs:reconcile-paid-dunning-cases"
 const BATCH_SIZE = 200
 const ALERT_LOCK_TIMEOUT_SECONDS = 5
+/** Well past the 120 s a retry run holds its case's lock, so a run still in progress is never touched. */
+const STALE_RETRY_MINUTES = 10
 
 export const DUNNING_AWAITING_PAYMENT_OVERDUE_EVENT =
   "dunning.awaiting_payment_overdue"
@@ -67,6 +74,8 @@ export type ReconcilePaidDunningCasesResult = {
   late_captures: number
   stale_attempts_closed: number
   recorded_failures_applied: number
+  stale_retries_reparked: number
+  stale_retries_parked: number
 }
 
 async function findDueOverdueAlert(
@@ -270,6 +279,191 @@ async function failStaleAttemptUnderLock(
   return true
 }
 
+type StaleRetryOutcome =
+  | { kind: "reparked" }
+  | {
+    kind: "parked"
+    subscription_id: string
+    attempt_no: number
+    park_reason: DunningParkReason
+    error_code: string | null
+  }
+
+function isStaleRetry(startedAt: Date | string, now: Date) {
+  return now.getTime() - new Date(startedAt).getTime() >= STALE_RETRY_MINUTES * 60 * 1000
+}
+
+async function findLatestAttempt(dunningModule: DunningModuleService, caseId: string) {
+  const [latest] = await dunningModule.listDunningAttempts(
+    { dunning_case_id: caseId },
+    { order: { attempt_no: "DESC" }, take: 1 }
+  )
+
+  return latest ?? null
+}
+
+async function settleStaleRetryUnderLock(
+  container: MedusaContainer,
+  caseId: string,
+  input: OverdueAlertInput
+): Promise<StaleRetryOutcome | null> {
+  const dunningModule = container.resolve<DunningModuleService>(DUNNING_MODULE)
+  const dunningCase = await dunningModule.retrieveDunningCase(caseId)
+
+  if (dunningCase.status !== DunningCaseStatus.RETRYING) {
+    return null
+  }
+
+  const latest = await findLatestAttempt(dunningModule, caseId)
+
+  if (!isStaleRetry(latest?.started_at ?? dunningCase.updated_at, input.now)) {
+    return null
+  }
+
+  const logger = container.resolve("logger")
+
+  if (latest?.status === DunningAttemptStatus.PROCESSING && latest.payment_reference) {
+    await dunningModule.updateDunningCases({
+      id: caseId,
+      status: DunningCaseStatus.AWAITING_PAYMENT,
+      next_retry_at: null,
+    })
+
+    logDunningEvent(logger, "warn", {
+      event: "dunning.stale_retry",
+      outcome: "awaiting_payment",
+      correlation_id: input.correlationId,
+      dunning_case_id: caseId,
+      subscription_id: dunningCase.subscription_id,
+      renewal_cycle_id: dunningCase.renewal_cycle_id,
+      attempt_no: latest.attempt_no,
+      job_name: JOB_NAME,
+      alertable: false,
+      message: `DunningCase '${caseId}' was left retrying with its charge submitted on payment session '${latest.payment_reference}'; it now awaits that payment`,
+      metadata: { attempt_id: latest.id, payment_session_id: latest.payment_reference },
+    })
+
+    return { kind: "reparked" }
+  }
+
+  // Nothing tells whether this retry reached the provider, so another charge could take the money
+  // twice: only an operator may decide.
+  const parkReason: DunningParkReason = "indeterminate_provider_response"
+  const attemptNo = latest?.attempt_no ?? dunningCase.attempt_count
+
+  await dunningModule.updateDunningCases({
+    id: caseId,
+    status: DunningCaseStatus.AWAITING_MANUAL_RESOLUTION,
+    next_retry_at: null,
+    metadata: { ...(dunningCase.metadata ?? {}), park_reason: parkReason },
+  })
+
+  logDunningEvent(logger, "error", {
+    event: "dunning.stale_retry",
+    outcome: "failed",
+    correlation_id: input.correlationId,
+    dunning_case_id: caseId,
+    subscription_id: dunningCase.subscription_id,
+    renewal_cycle_id: dunningCase.renewal_cycle_id,
+    attempt_no: attemptNo,
+    job_name: JOB_NAME,
+    alertable: true,
+    message: latest
+      ? `DunningCase '${caseId}' was left retrying with its attempt '${latest.id}' ${latest.status} and no submitted charge to wait on; it awaits manual resolution`
+      : `DunningCase '${caseId}' was left retrying without an attempt; it awaits manual resolution`,
+    metadata: {
+      retry_outcome: "awaiting_manual_resolution",
+      park_reason: parkReason,
+      attempt_id: latest?.id ?? null,
+    },
+  })
+
+  return {
+    kind: "parked",
+    subscription_id: dunningCase.subscription_id,
+    attempt_no: attemptNo,
+    park_reason: parkReason,
+    error_code: latest?.error_code ?? null,
+  }
+}
+
+/**
+ * A case a retry left `retrying`: its run could not park it as awaiting the charge it submitted,
+ * or stopped before writing its outcome. Nothing else revisits such a case. With a submitted charge
+ * it is parked as awaiting that payment, so its capture, its failure, the overdue alert and the
+ * resolve route apply; without one it is handed to an operator.
+ */
+async function settleStaleRetries(
+  container: MedusaContainer,
+  input: OverdueAlertInput,
+  result: ReconcilePaidDunningCasesResult
+): Promise<void> {
+  const dunningModule = container.resolve<DunningModuleService>(DUNNING_MODULE)
+  let cursor: string | null = null
+
+  while (true) {
+    const cases = (await dunningModule.listDunningCases(
+      {
+        status: DunningCaseStatus.RETRYING,
+        ...(cursor ? { id: { $gt: cursor } } : {}),
+      },
+      {
+        select: ["id", "renewal_order_id", "updated_at"],
+        take: BATCH_SIZE,
+        order: { id: "ASC" },
+      }
+    )) as (DunningCaseRecord & { updated_at: Date })[]
+
+    for (const dunningCase of cases) {
+      try {
+        const latest = await findLatestAttempt(dunningModule, dunningCase.id)
+
+        if (!isStaleRetry(latest?.started_at ?? dunningCase.updated_at, input.now)) {
+          continue
+        }
+
+        const outcome = await container.resolve(Modules.LOCKING).execute(
+          `dunning:${dunningCase.id}`,
+          () => settleStaleRetryUnderLock(container, dunningCase.id, input),
+          { timeout: ALERT_LOCK_TIMEOUT_SECONDS }
+        )
+
+        if (outcome?.kind === "reparked") {
+          result.stale_retries_reparked += 1
+        }
+
+        if (outcome?.kind === "parked") {
+          result.stale_retries_parked += 1
+
+          await emitDunningEvent(container, {
+            eventName: DunningEvents.PARKED,
+            data: {
+              subscription_id: outcome.subscription_id,
+              dunning_case_id: dunningCase.id,
+              attempt_no: outcome.attempt_no,
+              park_reason: outcome.park_reason,
+              error_code: outcome.error_code,
+            },
+          })
+        }
+      } catch (error) {
+        if (isLockBusyError(error)) {
+          continue
+        }
+
+        result.failed += 1
+        reportCaseFailure(container, dunningCase, error)
+      }
+    }
+
+    if (cases.length < BATCH_SIZE) {
+      return
+    }
+
+    cursor = cases[cases.length - 1].id
+  }
+}
+
 /**
  * Failure reports the payment-failure subscriber recorded on retry attempts because the case's
  * lock stayed taken when they arrived.
@@ -462,9 +656,12 @@ export async function reconcilePaidDunningCases(
     late_captures: 0,
     stale_attempts_closed: 0,
     recorded_failures_applied: 0,
+    stale_retries_reparked: 0,
+    stale_retries_parked: 0,
   }
 
   await applyRecordedPaymentFailures(container, alertInput, result)
+  await settleStaleRetries(container, alertInput, result)
 
   const cases = (await dunningModule.listDunningCases(
     { status: OPEN_DUNNING_STATUSES } as never,
@@ -521,7 +718,7 @@ export default async function reconcilePaidDunningCasesJob(
         const result = await reconcilePaidDunningCases(container)
 
         logger.info(
-          `[${JOB_NAME}] scanned ${result.scanned} open dunning case(s), recovered ${result.recovered}, still unpaid ${result.unpaid}, late captures redelivered ${result.late_captures}, stale attempts closed ${result.stale_attempts_closed}, recorded payment failures applied ${result.recorded_failures_applied}, failed ${result.failed} (batch ${BATCH_SIZE}) in ${Date.now() - startedAt}ms`
+          `[${JOB_NAME}] scanned ${result.scanned} open dunning case(s), recovered ${result.recovered}, still unpaid ${result.unpaid}, late captures redelivered ${result.late_captures}, stale attempts closed ${result.stale_attempts_closed}, recorded payment failures applied ${result.recorded_failures_applied}, stale retries now awaiting their payment ${result.stale_retries_reparked}, stale retries parked ${result.stale_retries_parked}, failed ${result.failed} (batch ${BATCH_SIZE}) in ${Date.now() - startedAt}ms`
         )
       },
       {

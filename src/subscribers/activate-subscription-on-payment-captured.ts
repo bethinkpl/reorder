@@ -89,7 +89,8 @@ async function findDunningCaseForOrder(
  *
  * Swallows its failures on purpose: a throwing subscriber is logged and dropped (the local bus
  * catches, the Redis bus defaults to a single attempt), so raising here would lose the recovery
- * rather than retry it. `reconcile-paid-dunning-cases` is what picks the case up afterwards.
+ * rather than retry it. `reconcile-paid-dunning-cases` is what picks the case up afterwards; a case
+ * still `retrying` only once its retry is ten minutes old and the sweep has marked it as awaiting.
  */
 async function runDunningRecovery(
   container: MedusaContainer,

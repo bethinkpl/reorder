@@ -16,6 +16,17 @@ Customized fork of [@reorder/reorderjs](https://github.com/reorder-js/reorder).
   `awaiting_payment` renewal cycle becomes `processing` (its `settlement_inputs` are dropped)
 - the admin cancel and the finalised cancellation now close the subscription's active dunning cases; a host app that closed them
   itself after calling these workflows no longer needs to
+- the awaiting-payment sweeps (`jobs:reconcile-awaiting-renewal-cycles`, `jobs:reconcile-paid-dunning-cases`), the
+  renewal scheduler (`jobs:renewal-cycles`) and the subscription and dunning-case locks (`renewal:subscription:<id>`,
+  `dunning:<case_id>`, taken by renewal runs, dunning retries, the settlement of a confirmed charge, the cancellation,
+  pause and resume workflows and the resolve routes) are held with `locking.acquire` and an explicit lifetime, and rely
+  on the locking provider expiring a lock whose holder died. The Redis (`@medusajs/locking-redis`) and in-memory
+  providers do. `@medusajs/locking-postgres` (checked on 2.22.0) does not: its `acquire` never hands another owner a
+  row of its `locking` table, expired or not, so a process that crashes or is killed while holding one of these locks
+  leaves that key blocked (a sweep that never runs again, a subscription that can no longer renew, be cancelled or
+  paused, a dunning case that is never retried) until the row is deleted, e.g.
+  `DELETE FROM locking WHERE expiration < NOW()` after a crash. Locks taken with `locking.execute` (transaction-scoped
+  advisory locks) are released with their connection and are not affected
 
 ## Changes
 ### New features
@@ -55,7 +66,7 @@ Customized fork of [@reorder/reorderjs](https://github.com/reorder-js/reorder).
 - resolving an awaiting charge as failed through an admin route keeps the admin's `reason` on the attempt (`metadata.admin_resolution`) and in the logs; the storefront only sees a fixed message
 - the storefront cancellation route answers a workflow refusal with generic texts and never with the workflow's own message
 - the paid-case sweep pages through every idle dunning case instead of the 200 least recently updated, so cases parked for manual resolution no longer hide the rest
-- the awaiting-payment sweeps, the resolve routes and the settlement of a confirmed charge hold their locks with an explicit lifetime (on Medusa 2.17.2 with Redis `locking.execute` uses its wait as the lock's lifetime); each sweep's job lock lasts at most 25 minutes
+- the awaiting-payment sweeps, the resolve routes and the settlement of a confirmed charge hold their locks with an explicit lifetime (on Medusa 2.17.2 with Redis `locking.execute` uses its wait as the lock's lifetime); each sweep's job lock lasts at most 25 minutes with a locking provider that expires locks (see the requirements above for `@medusajs/locking-postgres`)
 - pausing (admin, storefront, or a retention `pause_offer`) and resuming a subscription are refused with a `409` while a renewal charge or a dunning retry charge waits for the payment provider's answer (the storefront answer carries `code: "renewal_payment_in_progress"`), so a late settlement can no longer move the billing dates of a paused subscription or overlap a charge with the cycle a resume creates. `pauseSubscriptionWorkflow`, `resumeSubscriptionWorkflow` and `applyRetentionOfferWorkflow` take the `renewal:subscription:<id>` lock themselves, and the `dunning:<case_id>` lock of every active dunning case until their change is written, so a dunning retry can't charge in between (a host app must hold neither when calling them)
 - a renewal settled after its run (a charge the provider confirms later, a dunning recovery) clears `pending_update_data` only while it is still the plan change the cycle applied, so a plan change scheduled in the meantime stays pending; a cycle whose charge awaited the provider, or that dunning recovered, also keeps a delivery skip (`skip_next_cycle`) requested in the meantime
 - workflow compensations no longer restore `payment_context`, so a payment method saved in the meantime is kept

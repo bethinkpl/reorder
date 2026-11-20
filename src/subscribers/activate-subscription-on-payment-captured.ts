@@ -17,6 +17,7 @@ import { findSubscriptionAndOrderForPaymentCollection } from "../modules/subscri
 import { refreshSubscriptionPaymentContext } from "../modules/subscription/utils/resolve-captured-payment-method"
 import { ensureNextRenewalCycleWorkflow } from "../workflows/ensure-next-renewal-cycle"
 import { recoverDunningFromCapturedPaymentWorkflow } from "../workflows/recover-dunning-from-captured-payment"
+import { findStandingCustomerCancellation } from "../workflows/steps/reverse-involuntary-churn"
 import {
   readRenewalSessionMarkers,
   type RenewalSessionSignal,
@@ -80,8 +81,10 @@ async function findDunningCaseForOrder(
   )
 }
 
+type DunningRecoveryRun = { dunning_case_id: string | null, failed: boolean }
+
 /**
- * Runs the recovery for whatever case the captured order carries. Answers whether one was found.
+ * Runs the recovery for whatever case the captured order carries, and answers which one it ran for.
  *
  * Swallows its failures on purpose: a throwing subscriber is logged and dropped (the local bus
  * catches, the Redis bus defaults to a single attempt), so raising here would lose the recovery
@@ -97,7 +100,7 @@ async function runDunningRecovery(
     /** Only a churned subscription wants the settled case: the step's log names its remedy. */
     include_unrecovered?: boolean
   }
-) {
+): Promise<DunningRecoveryRun> {
   let dunningCaseId: string | null = null
 
   try {
@@ -108,7 +111,7 @@ async function runDunningRecovery(
     )
 
     if (!dunningCase) {
-      return false
+      return { dunning_case_id: null, failed: false }
     }
 
     dunningCaseId = dunningCase.id
@@ -129,9 +132,53 @@ async function runDunningRecovery(
         message: getDunningErrorMessage(error),
       })
     )
+
+    return { dunning_case_id: dunningCaseId, failed: true }
   }
 
-  return dunningCaseId !== null
+  return { dunning_case_id: dunningCaseId, failed: false }
+}
+
+/**
+ * Whether a capture on a churned subscription is kept for reversing that churn. A recovery that
+ * failed leaves the capture for the dunning sweep to deliver again.
+ */
+async function keepCaptureForChurnReversal(
+  container: MedusaContainer,
+  input: { order_id: string, subscription_id: string, payment_id: string }
+): Promise<boolean | null> {
+  const recovery = await runDunningRecovery(container, { ...input, include_unrecovered: true })
+
+  if (recovery.failed) {
+    return null
+  }
+
+  if (!recovery.dunning_case_id) {
+    return false
+  }
+
+  try {
+    return !(await findStandingCustomerCancellation(
+      container,
+      input.subscription_id,
+      recovery.dunning_case_id
+    ))
+  } catch (error) {
+    container.resolve("logger").error(
+      JSON.stringify({
+        domain: "subscriptions",
+        event: SubscriptionLogEvents.DUNNING_RECOVERY_FROM_CAPTURE_FAILED,
+        subscription_id: input.subscription_id,
+        order_id: input.order_id,
+        dunning_case_id: recovery.dunning_case_id,
+        payment_id: input.payment_id,
+        alertable: true,
+        message: getDunningErrorMessage(error),
+      })
+    )
+
+    return null
+  }
 }
 
 async function runAwaitingRenewalSettlement(
@@ -234,13 +281,16 @@ export async function activateSubscriptionOnPaymentCaptured(
     // remedy (`reverseInvoluntaryChurnWorkflow`), which the generic line below cannot.
     const churnPaidOff =
       subscription.status === SubscriptionStatus.PAYMENT_FAILED && orderId
-        ? await runDunningRecovery(container, {
+        ? await keepCaptureForChurnReversal(container, {
             order_id: orderId,
             subscription_id: subscription.id,
             payment_id: paymentId,
-            include_unrecovered: true,
           })
         : false
+
+    if (churnPaidOff === null) {
+      return
+    }
 
     if (!churnPaidOff) {
       container.resolve("logger").error(

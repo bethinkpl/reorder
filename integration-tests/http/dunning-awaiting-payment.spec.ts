@@ -10,7 +10,7 @@ import type ActivityLogModuleService from "../../src/modules/activity-log/servic
 import { ActivityLogEventType } from "../../src/modules/activity-log/types"
 import { CANCELLATION_MODULE } from "../../src/modules/cancellation"
 import type CancellationModuleService from "../../src/modules/cancellation/service"
-import { CancellationCaseStatus } from "../../src/modules/cancellation/types"
+import { CancellationCaseStatus, CancellationFinalOutcome } from "../../src/modules/cancellation/types"
 import { getAdminCancellationDetail } from "../../src/modules/cancellation/utils/admin-query"
 import { DUNNING_MODULE } from "../../src/modules/dunning"
 import { DunningEvents } from "../../src/modules/dunning/events"
@@ -914,6 +914,84 @@ medusaIntegrationTestRunner({
         expect(state.dunningCase.status).toEqual(DunningCaseStatus.UNRECOVERED)
         expect(state.subscription.status).toEqual(SubscriptionStatus.PAYMENT_FAILED)
         expect(logs({ event: DunningLogEvents.CUSTOMER_RECOVERY, outcome: "blocked" })).toHaveLength(1)
+        expect(events(SubscriptionEvents.LATE_PAYMENT_CAPTURED)).toHaveLength(0)
+      })
+
+      async function seedChurnedCase(reference: string) {
+        const container = getContainer()
+        const seeded = await seedDunningCase(container, reference, {
+          status: DunningCaseStatus.UNRECOVERED,
+        })
+
+        await container
+          .resolve<SubscriptionModuleService>(SUBSCRIPTION_MODULE)
+          .updateSubscriptions({ id: seeded.subscription.id, status: SubscriptionStatus.PAYMENT_FAILED })
+
+        return seeded
+      }
+
+      it("reports the capture of a churned subscription's case once for a refund when the customer's own cancellation stands, so the churn can't be reversed", async () => {
+        const container = getContainer()
+        const seeded = await seedChurnedCase("SUB-DUN-CHURN-CUSTOMER-LEFT")
+        const [{ attempt, session }] = seeded.attempts
+
+        await createCancellationCaseSeed(container, {
+          subscription_id: seeded.subscription.id,
+          status: CancellationCaseStatus.CANCELED,
+          final_outcome: CancellationFinalOutcome.CANCELED,
+          reason: "Too expensive",
+          metadata: { dunning_case_id: seeded.dunningCase.id },
+        })
+
+        const payment = await captureOnOrder(container, seeded.order.id, session.id)
+        const events = watchEvents(container)
+
+        await deliverCapture(container, payment.id)
+        await deliverCapture(container, payment.id)
+
+        expect((await readDunningState(container, seeded.dunningCase.id)).attempts).toEqual([
+          expect.objectContaining({
+            id: attempt.id,
+            status: DunningAttemptStatus.SUCCEEDED,
+            error_code: PaymentAttemptErrorCode.CAPTURED_AFTER_CLOSE,
+          }),
+        ])
+        expect(events(SubscriptionEvents.LATE_PAYMENT_CAPTURED).map((message) => message.data)).toEqual([
+          expect.objectContaining({
+            payment_id: payment.id,
+            dunning_attempt_id: attempt.id,
+            reason: LatePaymentCapturedReason.SUBSCRIPTION_TERMINAL,
+          }),
+        ])
+      })
+
+      it("leaves the capture of a churned subscription's case for the sweep when its recovery fails, which keeps it for the churn reversal", async () => {
+        const container = getContainer()
+        const dunningModule = container.resolve<DunningModuleService>(DUNNING_MODULE)
+        const seeded = await seedChurnedCase("SUB-DUN-CHURN-RECOVERY-FAILS")
+        const [{ attempt, session }] = seeded.attempts
+        const payment = await captureOnOrder(container, seeded.order.id, session.id)
+        const events = watchEvents(container)
+
+        jest
+          .spyOn(dunningModule, "retrieveDunningCase")
+          .mockRejectedValueOnce(new Error("the database connection was lost"))
+
+        await deliverCapture(container, payment.id)
+
+        const afterFailedRecovery = await readDunningState(container, seeded.dunningCase.id)
+
+        expect(await reconcilePaidDunningCases(container)).toMatchObject({ late_captures: 1, failed: 0 })
+        expect(afterFailedRecovery.attempts).toEqual([
+          expect.objectContaining({ id: attempt.id, status: DunningAttemptStatus.PROCESSING }),
+        ])
+        expect((await readDunningState(container, seeded.dunningCase.id)).attempts).toEqual([
+          expect.objectContaining({
+            id: attempt.id,
+            status: DunningAttemptStatus.SUCCEEDED,
+            error_code: PaymentAttemptErrorCode.CAPTURED_AFTER_CLOSE,
+          }),
+        ])
         expect(events(SubscriptionEvents.LATE_PAYMENT_CAPTURED)).toHaveLength(0)
       })
 

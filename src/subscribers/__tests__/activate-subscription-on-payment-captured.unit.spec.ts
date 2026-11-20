@@ -1,5 +1,6 @@
 import type { MedusaContainer } from "@medusajs/framework/types"
 import { ContainerRegistrationKeys, Modules } from "@medusajs/framework/utils"
+import { CANCELLATION_MODULE } from "../../modules/cancellation"
 import { DUNNING_MODULE } from "../../modules/dunning"
 import { DunningCaseStatus } from "../../modules/dunning/types"
 import { SUBSCRIPTION_MODULE } from "../../modules/subscription"
@@ -119,6 +120,10 @@ function buildContainer(options: {
 
       if (key === DUNNING_MODULE) {
         return { listDunningCases: async () => dunningCases }
+      }
+
+      if (key === CANCELLATION_MODULE) {
+        return { listCancellationCases: async () => [] }
       }
 
       if (key === "logger") {

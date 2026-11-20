@@ -153,6 +153,30 @@ async function findSettlementCancellationCase(
   )
 }
 
+/**
+ * The customer asked to leave and settlement only converted their case: the cancellation stands on
+ * its own, so the churn is not reversed.
+ */
+export function customerCancellationStands(
+  cancellationCase: Pick<CancellationCaseRecord, "reason"> | null
+): boolean {
+  return Boolean(cancellationCase && cancellationCase.reason !== INVOLUNTARY_CHURN_REASON)
+}
+
+export async function findStandingCustomerCancellation(
+  container: MedusaContainer,
+  subscriptionId: string,
+  dunningCaseId: string
+): Promise<{ id: string } | null> {
+  const cancellationCase = await findSettlementCancellationCase(
+    container.resolve<CancellationModuleService>(CANCELLATION_MODULE),
+    subscriptionId,
+    dunningCaseId
+  )
+
+  return customerCancellationStands(cancellationCase) ? cancellationCase : null
+}
+
 export async function reverseInvoluntaryChurn(
   container: MedusaContainer,
   input: ReverseInvoluntaryChurnStepInput,
@@ -189,9 +213,7 @@ export async function reverseInvoluntaryChurn(
     dunningCase.id
   )
 
-  // The customer asked to leave and settlement only converted their case: the
-  // cancellation stands on its own, so reactivating and re-billing is refused.
-  if (cancellationCase && cancellationCase.reason !== INVOLUNTARY_CHURN_REASON) {
+  if (cancellationCase && customerCancellationStands(cancellationCase)) {
     throw dunningErrors.customerCancellationStands(
       dunningCase.id,
       cancellationCase.id

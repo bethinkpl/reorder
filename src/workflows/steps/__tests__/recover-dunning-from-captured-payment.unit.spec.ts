@@ -160,6 +160,7 @@ describe("recoverDunningFromCapturedPayment", () => {
       subscription_id: "sub_1",
       order_id: "order_1",
       finished_at: now,
+      consumed_skip_next_cycle: false,
       source: "customer_payment",
     })
     expect(ensureNextRenewalCycleRun).toHaveBeenCalledWith({

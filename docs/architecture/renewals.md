@@ -112,7 +112,7 @@ The current implementation follows these rules:
 - approval is enforced when the cycle requires it
 - `Plans & Offers` are re-resolved at execution time before pending changes are applied
 - successful execution updates the subscription’s active cadence and clears `pending_update_data` only while it is still the request the cycle applied (matched by its `requested_at`, which the cycle records with the applied change); a plan change scheduled while the cycle waited for its payment or for dunning stays pending for the next cycle
-- successful execution resets `skip_next_cycle` only when the cycle's run had it set, which the run records in `settlement_inputs.consumed_skip_next_cycle`: a skip requested while the charge awaited the provider is kept for the next cycle. A cycle without that record (a dunning recovery of a charge declined outright) resets it as before
+- successful execution resets `skip_next_cycle` only when the cycle's run had it set, which the run records in `settlement_inputs.consumed_skip_next_cycle`: a skip requested while the charge awaited the provider is kept for the next cycle. A dunning recovery never resets it, since dunning only follows a charge and a run with the skip set charges nothing, so a skip found then was requested for a later cycle
 - the cycle records whether pending changes were actually applied
 
 This means:

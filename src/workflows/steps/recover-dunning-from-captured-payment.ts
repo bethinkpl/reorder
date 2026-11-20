@@ -229,6 +229,9 @@ export async function recoverDunningFromCapturedPayment(
         subscription_id: subscription.id,
         order_id: dunningCase.renewal_order_id,
         finished_at: now,
+        // Dunning only follows a charge, and a run with the skip set charges nothing: a skip the
+        // subscription has now was requested after the cycle ran, for a later one.
+        consumed_skip_next_cycle: false,
         source,
       })
 

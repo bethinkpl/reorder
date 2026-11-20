@@ -28,6 +28,7 @@ import {
 import type SubscriptionModuleService from "../../src/modules/subscription/service"
 import { SubscriptionStatus } from "../../src/modules/subscription/types"
 import { cancelSubscriptionByCustomerWorkflow } from "../../src/workflows/cancel-subscription-by-customer"
+import { skipNextDeliveryWorkflow } from "../../src/workflows/skip-next-delivery"
 import { startDunningWorkflow } from "../../src/workflows/start-dunning"
 import { failAwaitingDunningAttempt } from "../../src/workflows/utils/fail-awaiting-dunning-attempt"
 import {
@@ -333,7 +334,7 @@ medusaIntegrationTestRunner({
           },
         },
       ])(
-        "recovers the awaiting case as its retry's recovery and settles the renewal cycle from $signal",
+        "recovers the awaiting case as its retry's recovery and settles the renewal cycle from $signal, keeping a skip the customer requested while the case was open",
         async ({ reference, deliver }) => {
           const container = getContainer()
           const seeded = await seedDunningCase(container, reference)
@@ -341,6 +342,7 @@ medusaIntegrationTestRunner({
           const payment = await captureOnOrder(container, seeded.order.id, session.id)
           const events = watchEvents(container)
 
+          await skipNextDeliveryWorkflow(container).run({ input: { id: seeded.subscription.id } })
           await deliver(container, payment.id)
 
           const state = await readDunningState(container, seeded.dunningCase.id)
@@ -361,7 +363,10 @@ medusaIntegrationTestRunner({
               finished_at: expect.anything(),
             }),
           ])
-          expect(state.subscription.status).toEqual(SubscriptionStatus.ACTIVE)
+          expect(state.subscription).toMatchObject({
+            status: SubscriptionStatus.ACTIVE,
+            skip_next_cycle: true,
+          })
           expect(state.cycle.status).toEqual(RenewalCycleStatus.SUCCEEDED)
           expect(renewalAttempts).toContainEqual(
             expect.objectContaining({

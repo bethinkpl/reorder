@@ -200,6 +200,7 @@ describe("runDunningRetry - recovery branch", () => {
         renewal_cycle_id: "rc_1",
         subscription_id: "sub_1",
         order_id: "order_1",
+        consumed_skip_next_cycle: false,
         source: "dunning_retry",
       })
     )

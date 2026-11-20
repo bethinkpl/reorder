@@ -76,12 +76,22 @@ export type RenewalCycleAdminListItem = {
   updated_at: string
 }
 
+/**
+ * The charge of a cycle awaiting its payment (or left processing with its attempt open): when it was
+ * submitted, and the moment after which an unpaid one can be resolved as failed.
+ */
+export type RenewalAwaitingPaymentAdminSummary = {
+  submitted_at: string
+  can_fail_after: string
+}
+
 export type RenewalCycleAdminDetail = RenewalCycleAdminListItem & {
   created_at: string
   processed_at: string | null
   last_error: string | null
   pending_changes: RenewalAdminPendingChangeSummary | null
   attempts: RenewalAttemptAdminRecord[]
+  awaiting_payment: RenewalAwaitingPaymentAdminSummary | null
   metadata: Record<string, unknown> | null
 }
 
@@ -106,4 +116,12 @@ export type ApproveRenewalChangesAdminRequest = {
 
 export type RejectRenewalChangesAdminRequest = {
   reason: string
+}
+
+export type ResolveAwaitingRenewalPaymentAdminRequest = {
+  reason?: string
+}
+
+export type ResolveAwaitingRenewalPaymentAdminResponse = RenewalCycleAdminDetailResponse & {
+  resolution: "settled" | "failed"
 }

@@ -376,6 +376,52 @@ medusaIntegrationTestRunner({
         expect(emitted(DunningEvents.STARTED)).toHaveLength(0)
       })
 
+      it("shows an admin when an awaiting charge was submitted and after when it can be resolved as failed, and nothing for a cycle without a charge in flight", async () => {
+        const container = getContainer()
+        const headers = await createAdminAuthHeaders(container)
+        const submittedAt = new Date(Date.now() - 5 * HOUR_MS)
+        const awaiting = await seedAwaitingRenewal(container, {
+          reference: "SUB-AWL-DETAIL-AWAITING",
+          submitted_at: submittedAt,
+        })
+        const processing = await seedAwaitingRenewal(container, {
+          reference: "SUB-AWL-DETAIL-PROCESSING",
+          cycle_status: RenewalCycleStatus.PROCESSING,
+          submitted_at: submittedAt,
+        })
+        const scheduled = await seedAwaitingRenewal(container, {
+          reference: "SUB-AWL-DETAIL-SCHEDULED",
+          cycle_status: RenewalCycleStatus.SCHEDULED,
+        })
+        const detail = async (cycleId: string) =>
+          (await api.get(`/admin/renewals/${cycleId}`, { headers })).data.renewal
+        const awaitingPayment = (minHours: number) => ({
+          submitted_at: submittedAt.toISOString(),
+          can_fail_after: new Date(submittedAt.getTime() + minHours * HOUR_MS).toISOString(),
+        })
+
+        process.env[AWAITING_PAYMENT_ALERT_HOURS_ENV] = "2"
+
+        expect((await detail(awaiting.cycle.id)).awaiting_payment).toEqual(
+          awaitingPayment(DEFAULT_AWAITING_PAYMENT_RESOLVE_MIN_HOURS)
+        )
+        expect((await detail(processing.cycle.id)).awaiting_payment).toEqual(
+          awaitingPayment(DEFAULT_AWAITING_PAYMENT_RESOLVE_MIN_HOURS)
+        )
+        expect((await detail(scheduled.cycle.id)).awaiting_payment).toBeNull()
+
+        process.env[AWAITING_PAYMENT_RESOLVE_MIN_HOURS_ENV] = "4"
+
+        expect((await detail(awaiting.cycle.id)).awaiting_payment).toEqual(awaitingPayment(4))
+
+        const resolved = await api.post(route(awaiting.cycle.id), {}, { headers })
+
+        expect(resolved.data).toMatchObject({
+          resolution: "failed",
+          renewal: { id: awaiting.cycle.id, awaiting_payment: null },
+        })
+      })
+
       it("measures the age an unpaid charge needs before it can be resolved as failed by its own setting, not by the alert hours", async () => {
         const container = getContainer()
         const headers = await createAdminAuthHeaders(container)

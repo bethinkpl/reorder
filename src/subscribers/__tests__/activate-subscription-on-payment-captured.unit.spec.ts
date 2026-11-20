@@ -373,7 +373,11 @@ describe("activateSubscriptionOnPaymentCaptured", () => {
     expect(recoverDunningRun).not.toHaveBeenCalled()
   })
 
-  it("logs one alertable line and keeps going when the recovery workflow throws", async () => {
+  it.each([
+    { name: "an error", rejection: new Error("lock timeout") },
+    // What a workflow rejects with: its step's error, serialised.
+    { name: "a workflow's plain object", rejection: { name: "Error", message: "lock timeout" } },
+  ])("logs one alertable line naming the cause and keeps going when the recovery workflow throws $name", async ({ rejection }) => {
     // A throwing subscriber is logged and dropped by both event buses, so this must not raise.
     const errorLogs: string[] = []
     const container = buildContainer({
@@ -383,7 +387,7 @@ describe("activateSubscriptionOnPaymentCaptured", () => {
       errorLogs,
       dunningCases: [{ id: "dun_1", status: DunningCaseStatus.OPEN }],
     })
-    recoverDunningRun.mockRejectedValueOnce(new Error("lock timeout"))
+    recoverDunningRun.mockRejectedValueOnce(rejection)
 
     await activateSubscriptionOnPaymentCaptured(container, "pay_1")
 

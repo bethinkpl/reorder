@@ -4,6 +4,8 @@ import { ContainerRegistrationKeys, PaymentEvents } from "@medusajs/framework/ut
 import { DUNNING_MODULE } from "../modules/dunning"
 import type DunningModuleService from "../modules/dunning/service"
 import { DunningCaseStatus } from "../modules/dunning/types"
+import { getDunningErrorMessage } from "../modules/dunning/utils/observability"
+import { getRenewalErrorMessage } from "../modules/renewal/utils/observability"
 import { SUBSCRIPTION_MODULE } from "../modules/subscription"
 import type SubscriptionModuleService from "../modules/subscription/service"
 import {
@@ -127,7 +129,7 @@ async function runDunningRecovery(
         dunning_case_id: dunningCaseId,
         payment_id: input.payment_id,
         alertable: true,
-        message: error instanceof Error ? error.message : String(error),
+        message: getDunningErrorMessage(error),
       })
     )
   }
@@ -157,7 +159,7 @@ async function runAwaitingRenewalSettlement(
         renewal_cycle_id: input.renewal_cycle_id,
         payment_id: input.payment_id,
         alertable: true,
-        message: error instanceof Error ? error.message : String(error),
+        message: getRenewalErrorMessage(error),
       })
     )
   }

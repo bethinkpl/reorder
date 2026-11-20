@@ -10,6 +10,7 @@ import {
 } from "../modules/dunning/types"
 import {
   createDunningCorrelationId,
+  getDunningErrorMessage,
   logDunningEvent,
 } from "../modules/dunning/utils/observability"
 import {
@@ -61,10 +62,6 @@ export type ReconcilePaidDunningCasesResult = {
   failed: number
   late_captures: number
   stale_attempts_closed: number
-}
-
-function getErrorMessage(error: unknown) {
-  return error instanceof Error ? error.message : String(error)
 }
 
 async function findDueOverdueAlert(
@@ -174,7 +171,7 @@ function reportCaseFailure(
       dunning_case_id: dunningCase.id,
       renewal_order_id: dunningCase.renewal_order_id,
       alertable: true,
-      message: getErrorMessage(error),
+      message: getDunningErrorMessage(error),
     })
   )
 }
@@ -446,7 +443,7 @@ export default async function reconcilePaidDunningCasesJob(
       }
     )
   } catch (error) {
-    const message = getErrorMessage(error)
+    const message = getDunningErrorMessage(error)
 
     if (isLockBusyError(error)) {
       logger.warn(`[${JOB_NAME}] did not complete: ${message}`)

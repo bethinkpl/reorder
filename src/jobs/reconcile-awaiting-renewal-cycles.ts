@@ -18,6 +18,7 @@ import {
 } from "../modules/renewal/utils/awaiting-payment-age"
 import {
   createRenewalCorrelationId,
+  getRenewalErrorMessage,
   logRenewalEvent,
 } from "../modules/renewal/utils/observability"
 import { SUBSCRIPTION_MODULE } from "../modules/subscription"
@@ -60,10 +61,6 @@ export type ReconcileAwaitingRenewalCyclesResult = Record<
   | "stale_attempts_closed",
   number
 >
-
-function getErrorMessage(error: unknown) {
-  return error instanceof Error ? error.message : String(error)
-}
 
 async function findDueOverdueAlert(
   renewalModule: RenewalModuleService,
@@ -175,7 +172,7 @@ function reportCycleFailure(
       job_name: JOB_NAME,
       renewal_cycle_id: cycleId,
       alertable: true,
-      message: getErrorMessage(error),
+      message: getRenewalErrorMessage(error),
     })
   )
 }
@@ -524,7 +521,7 @@ export default async function reconcileAwaitingRenewalCyclesJob(
       }
     )
   } catch (error) {
-    const message = getErrorMessage(error)
+    const message = getRenewalErrorMessage(error)
 
     if (isLockBusyError(error)) {
       logger.warn(`[${JOB_NAME}] did not complete: ${message}`)

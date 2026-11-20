@@ -37,8 +37,9 @@ const LONG_AGO = new Date("2020-01-01T00:00:00.000Z")
 function buildContainer(options: {
   cases: CaseStub[]
   pendingByOrder?: Record<string, number>
+  attemptStartedAt?: Date
 }) {
-  const { cases, pendingByOrder = {} } = options
+  const { cases, pendingByOrder = {}, attemptStartedAt = LONG_AGO } = options
   const listDunningCases = jest.fn(
     async (filters: CaseFilters, listOptions: { take: number }) => {
       if (Array.isArray(filters.status)) {
@@ -67,7 +68,7 @@ function buildContainer(options: {
       ? [
           {
             id: `datt_${filters.dunning_case_id}`,
-            started_at: LONG_AGO,
+            started_at: attemptStartedAt,
             payment_reference: null,
           },
         ]
@@ -126,7 +127,7 @@ function buildContainer(options: {
     },
   } as unknown as MedusaContainer
 
-  return { container, listDunningCases, errorLogs, warnLogs }
+  return { container, listDunningCases, errorLogs, warnLogs, graph }
 }
 
 describe("reconcilePaidDunningCases", () => {
@@ -236,5 +237,27 @@ describe("reconcilePaidDunningCases", () => {
 
     expect(alerted).toHaveLength(201)
     expect(alerted).toContain("dun_200")
+  })
+
+  it("reads the order of an awaiting case only once its charge is old enough to alert on", async () => {
+    const { container, graph, warnLogs } = buildContainer({
+      cases: [
+        {
+          id: "dun_1",
+          renewal_order_id: "order_awaiting",
+          status: DunningCaseStatus.AWAITING_PAYMENT,
+        },
+      ],
+      pendingByOrder: { order_awaiting: 40 },
+      attemptStartedAt: new Date(),
+    })
+
+    await reconcilePaidDunningCases(container)
+
+    const orderReads = graph.mock.calls.map(([{ filters }]) => filters.id[0])
+
+    // The open-case pass reads it once; the overdue pass must not read it again.
+    expect(orderReads).toEqual(["order_awaiting"])
+    expect(warnLogs).toHaveLength(0)
   })
 })

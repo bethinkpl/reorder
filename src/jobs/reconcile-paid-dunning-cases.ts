@@ -109,10 +109,6 @@ async function raiseOverdueAlertOnce(
 ): Promise<boolean> {
   const dunningModule = container.resolve<DunningModuleService>(DUNNING_MODULE)
 
-  if (!(await findDueOverdueAlert(dunningModule, caseId, input))) {
-    return false
-  }
-
   try {
     return await container.resolve(Modules.LOCKING).execute(
       `dunning:${caseId}`,
@@ -199,6 +195,10 @@ async function alertOverdueAwaitingCases(
       }
 
       try {
+        if (!(await findDueOverdueAlert(dunningModule, dunningCase.id, input))) {
+          continue
+        }
+
         const { pending } = await loadOrderAmounts(
           container,
           dunningCase.renewal_order_id

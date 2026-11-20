@@ -33,7 +33,7 @@ import {
   signalNamesAttempt,
 } from "./renewal-session-marker"
 import { runUnderLock } from "./run-under-lock"
-import type { RenewalSettlementAudit } from "./settle-renewal-cycle-succeeded"
+import { readStoredSettlementInputs } from "./settle-renewal-cycle-succeeded"
 
 const RUN_LOCK_WAIT_SECONDS = 5
 const LOCK_HOLD_SECONDS = 120
@@ -83,32 +83,6 @@ const SUBMITTED_ATTEMPT_STATUSES: readonly RenewalAttemptStatus[] = [
   RenewalAttemptStatus.PROCESSING,
   RenewalAttemptStatus.FAILED,
 ]
-
-function readSettlementAudit(
-  settlementInputs: Record<string, unknown> | null
-): RenewalSettlementAudit | null {
-  const audit = settlementInputs?.audit
-
-  if (!audit || typeof audit !== "object") {
-    return null
-  }
-
-  const candidate = audit as Partial<Record<keyof RenewalSettlementAudit, unknown>>
-
-  if (
-    typeof candidate.correlation_id !== "string" ||
-    (candidate.trigger_type !== "scheduler" && candidate.trigger_type !== "manual") ||
-    typeof candidate.attempt_no !== "number" ||
-    typeof candidate.operation_started_at !== "number" ||
-    typeof candidate.scheduled_for !== "string" ||
-    !candidate.previous_state ||
-    typeof candidate.previous_state !== "object"
-  ) {
-    return null
-  }
-
-  return audit as RenewalSettlementAudit
-}
 
 async function loadCycle(
   renewalModule: RenewalModuleService,
@@ -273,7 +247,7 @@ export async function failAwaitingRenewalCycleUnderLock(
       : `Payment provider reported the renewal payment as '${input.action}'`)
   const failureKind = classifyRenewalFailure(message)
   const orderId = cycle.generated_order_id ?? attempt.order_id
-  const audit = readSettlementAudit(cycle.settlement_inputs)
+  const { audit } = readStoredSettlementInputs(cycle.settlement_inputs)
   const correlationId =
     audit?.correlation_id ?? createRenewalCorrelationId("renewal-payment-failure")
   const triggerReason =

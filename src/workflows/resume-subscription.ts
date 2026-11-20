@@ -37,7 +37,7 @@ export const resumeSubscriptionWorkflow = createWorkflow(
       name: "acquire-resume-subscription-renewal-lock",
     })
 
-    assertNoRenewalPaymentInProgressStep({
+    const dunningLocks = assertNoRenewalPaymentInProgressStep({
       subscription_id: input.id,
       action: "be resumed",
     })
@@ -113,6 +113,14 @@ export const resumeSubscriptionWorkflow = createWorkflow(
     )
     rebuildAnalyticsDailySnapshotsWorkflow.runAsStep({
       input: incrementalAnalyticsInput,
+    })
+
+    releaseLockStep({
+      key: dunningLocks.keys,
+      ownerId: dunningLocks.owner_id,
+      executeOnSubWorkflow: true,
+    }).config({
+      name: "release-resume-subscription-dunning-locks",
     })
 
     releaseLockStep({

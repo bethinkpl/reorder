@@ -7,7 +7,8 @@ import {
   CancellationCaseStatus,
   RetentionOfferType,
 } from "../../src/modules/cancellation/types"
-import { DunningCaseStatus } from "../../src/modules/dunning/types"
+import { DunningAttemptStatus, DunningCaseStatus } from "../../src/modules/dunning/types"
+import { dunningCaseLockKey } from "../../src/modules/dunning/utils/lock-key"
 import { RenewalCycleStatus } from "../../src/modules/renewal/types"
 import { renewalSubscriptionLockKey } from "../../src/modules/renewal/utils/lock-key"
 import { SUBSCRIPTION_MODULE } from "../../src/modules/subscription"
@@ -236,6 +237,80 @@ medusaIntegrationTestRunner({
         expect(resumed.otherCycles).toEqual([
           expect.objectContaining({ status: RenewalCycleStatus.SCHEDULED, scheduled_for: new Date(resumeAt) }),
         ])
+      })
+    })
+
+    describe("pausing or resuming while a dunning retry run holds its case", () => {
+      async function whileDunningLockHeld<T>(caseId: string, run: () => Promise<T>) {
+        const locking = getContainer().resolve(Modules.LOCKING)
+        const ownerId = `retry-run-on-${caseId}`
+
+        await locking.acquire(dunningCaseLockKey(caseId), { ownerId, expire: 60 })
+
+        try {
+          return await run()
+        } finally {
+          await locking.release(dunningCaseLockKey(caseId), { ownerId })
+        }
+      }
+
+      async function expectDunningLockFree(caseId: string) {
+        const locking = getContainer().resolve(Modules.LOCKING)
+        const key = dunningCaseLockKey(caseId)
+
+        await expect(locking.acquire(key, { ownerId: "lock-probe", expire: 5 })).resolves.toBeUndefined()
+        await locking.release(key, { ownerId: "lock-probe" })
+      }
+
+      it("refuses a pause, a pause offer and a resume with a conflict, writing nothing, until the run releases the case", async () => {
+        const seeded = await seedDunningCase(getContainer(), "SUB-AWP-DUNNING-LOCK", {
+          status: DunningCaseStatus.RETRY_SCHEDULED,
+          attempts: [DunningAttemptStatus.FAILED],
+        })
+        const id = seeded.subscription.id
+        const caseId = seeded.dunningCase.id
+        const admin = await asAdmin()
+        const customer = await asCustomer(id)
+        const cancellationCase = await createCancellationCaseSeed(getContainer(), {
+          subscription_id: id,
+          status: CancellationCaseStatus.EVALUATING_RETENTION,
+        })
+        const pauseOffer = {
+          offer_type: RetentionOfferType.PAUSE_OFFER,
+          offer_payload: { pause_offer: { pause_cycles: 1, resume_at: null, note: null } },
+        }
+        const before = await subscriptions().retrieveSubscription(id)
+        const busy = expect.objectContaining({ status: 409 })
+
+        const refusals = await whileDunningLockHeld(caseId, async () => [
+          await refusalOf(api.post(adminUrl(id, "pause"), {}, admin)),
+          await refusalOf(api.post(storeUrl(id, "pause"), {}, customer)),
+          await refusalOf(api.post(`/admin/cancellations/${cancellationCase.id}/apply-offer`, pauseOffer, admin)),
+        ])
+
+        expect(refusals).toEqual([busy, busy, busy])
+        expect(refusals[1]).toMatchObject({
+          data: { message: "This subscription is already being updated. Please try again in a moment." },
+        })
+        expect(await subscriptions().retrieveSubscription(id)).toEqual(before)
+        expect(
+          await cancellations().listRetentionOfferEvents({ cancellation_case_id: cancellationCase.id })
+        ).toHaveLength(0)
+        await expectRenewalLockFree(id)
+
+        expect((await api.post(adminUrl(id, "pause"), {}, admin)).status).toEqual(200)
+        await expectDunningLockFree(caseId)
+
+        const resumeRefusal = await whileDunningLockHeld(caseId, () =>
+          refusalOf(api.post(adminUrl(id, "resume"), {}, admin))
+        )
+
+        expect(resumeRefusal).toMatchObject({ status: 409 })
+        expect((await subscriptions().retrieveSubscription(id)).status).toEqual(SubscriptionStatus.PAUSED)
+
+        expect((await api.post(adminUrl(id, "resume"), {}, admin)).status).toEqual(200)
+        await expectDunningLockFree(caseId)
+        await expectRenewalLockFree(id)
       })
     })
 

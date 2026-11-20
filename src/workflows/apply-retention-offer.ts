@@ -39,14 +39,14 @@ export const applyRetentionOfferWorkflow = createWorkflow(
       name: "acquire-apply-retention-offer-renewal-lock",
     })
 
-    when(
+    const dunningLocks = when(
       "assert-pause-offer-without-renewal-payment-in-progress",
       { input },
       function ({ input }) {
         return input.offer_type === RetentionOfferType.PAUSE_OFFER
       }
     ).then(function () {
-      assertNoRenewalPaymentInProgressStep({
+      return assertNoRenewalPaymentInProgressStep({
         subscription_id: scope.subscription_id,
         action: "be paused",
       })
@@ -91,6 +91,18 @@ export const applyRetentionOfferWorkflow = createWorkflow(
       }
     })
     createSubscriptionLogEventStep(logInput)
+
+    const dunningLockRelease = transform({ dunningLocks }, function ({ dunningLocks }) {
+      return { key: dunningLocks?.keys ?? [], owner_id: dunningLocks?.owner_id }
+    })
+
+    releaseLockStep({
+      key: dunningLockRelease.key,
+      ownerId: dunningLockRelease.owner_id,
+      executeOnSubWorkflow: true,
+    }).config({
+      name: "release-apply-retention-offer-dunning-locks",
+    })
 
     releaseLockStep({
       key: renewalLockKey,

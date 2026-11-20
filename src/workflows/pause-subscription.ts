@@ -35,7 +35,7 @@ export const pauseSubscriptionWorkflow = createWorkflow(
       name: "acquire-pause-subscription-renewal-lock",
     })
 
-    assertNoRenewalPaymentInProgressStep({
+    const dunningLocks = assertNoRenewalPaymentInProgressStep({
       subscription_id: input.id,
       action: "be paused",
     })
@@ -89,6 +89,14 @@ export const pauseSubscriptionWorkflow = createWorkflow(
       }
     })
     const renewal_cycle = ensureNextRenewalCycleStep(ensureInput)
+
+    releaseLockStep({
+      key: dunningLocks.keys,
+      ownerId: dunningLocks.owner_id,
+      executeOnSubWorkflow: true,
+    }).config({
+      name: "release-pause-subscription-dunning-locks",
+    })
 
     releaseLockStep({
       key: renewalLockKey,

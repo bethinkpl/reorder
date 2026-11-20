@@ -245,6 +245,7 @@ Shape:
         "metadata": null
       }
     ],
+    "awaiting_payment": null,
     "metadata": {
       "origin": "renewal_payment_failure"
     },
@@ -253,6 +254,21 @@ Shape:
   }
 }
 ```
+
+Notes:
+- `awaiting_payment` describes the retry charge still waiting for the payment provider's answer, and is `null` unless
+  the case is `awaiting_payment` with its latest attempt still `processing`:
+
+  ```json
+  {
+    "submitted_at": "2026-04-15T10:00:00.000Z",
+    "can_fail_after": "2026-04-19T10:00:00.000Z"
+  }
+  ```
+
+  `submitted_at` is when the latest attempt started; `can_fail_after` is `submitted_at` plus
+  `RENEWAL_AWAITING_PAYMENT_RESOLVE_MIN_HOURS`, the moment after which an unpaid charge can be resolved as failed
+  through `POST /admin/dunning/:id/resolve-awaiting-payment` (section 7)
 
 ### Common Errors
 

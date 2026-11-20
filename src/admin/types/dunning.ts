@@ -82,6 +82,15 @@ export type DunningRetryBlockedReason =
   | "retry_not_due"
   | "manual_resolution_required"
 
+/**
+ * The retry charge of a case awaiting its payment: when it was submitted, and the moment after which
+ * an unpaid one can be resolved as failed.
+ */
+export type DunningAwaitingPaymentAdminSummary = {
+  submitted_at: string
+  can_fail_after: string
+}
+
 export type DunningCaseAdminDetail = {
   id: string
   status: DunningCaseAdminStatus
@@ -101,6 +110,7 @@ export type DunningCaseAdminDetail = {
   closed_at: string | null
   recovery_reason: string | null
   attempts: DunningAttemptAdminRecord[]
+  awaiting_payment: DunningAwaitingPaymentAdminSummary | null
   metadata: Record<string, unknown> | null
   created_at: string
   updated_at: string
@@ -133,6 +143,10 @@ export type DunningCaseAdminDetailResponse = {
 
 export type RetryNowDunningAdminRequest = {
   reason?: string | null
+}
+
+export type ResolveAwaitingDunningPaymentAdminResponse = DunningCaseAdminDetailResponse & {
+  resolution: "recovered" | "failed"
 }
 
 export type MarkRecoveredDunningAdminRequest = {

@@ -12,6 +12,7 @@ The `Dunning` Admin UI gives operators a dedicated workspace to:
 - review retry history and payment failures
 - manually retry payment recovery
 - manually mark cases recovered or unrecovered
+- resolve a retry charge whose payment result never arrived
 - override retry schedules for active cases
 
 The UI is implemented as Medusa Admin custom routes and follows the same nested `Subscriptions` pattern already used by `Plans & Offers` and `Renewals`.
@@ -149,12 +150,16 @@ Layout:
 - the left column contains `Case overview`, `Payment summary`, `Retry schedule`, `Attempt timeline`, and `Technical metadata`
 - the right column contains `Subscription summary`, `Renewal summary`, and `Order / payment summary` as linked Medusa-style cards where linked records exist
 
+While the case awaits its retry's payment, `Payment summary` also shows when that charge was submitted and after when
+it can be resolved as failed (`awaiting_payment` of the detail payload).
+
 ## 3. Detail Actions
 
 ### Action Menu
 
 The detail page action menu includes:
 - `Retry now`
+- `Resolve payment…`
 - `Mark recovered`
 - `Mark unrecovered`
 - `Edit retry schedule`
@@ -165,6 +170,8 @@ Current action rules in the UI:
 
 - `Retry now`
   Available for active retryable cases. For a non-terminal case that can't be retried (including `retrying` and `awaiting_payment`) the menu shows a disabled `Retry unavailable: …` item with the reason.
+- `Resolve payment…`
+  Available for `awaiting_payment` cases; opens the resolve payment drawer.
 - `Mark recovered`
   Available for active non-terminal cases and hidden while the retry charge is in flight (`retrying` or `awaiting_payment`).
 - `Mark unrecovered`
@@ -206,6 +213,27 @@ Purpose:
 Behavior:
 - the action opens a confirm prompt before mutation
 - the action is disabled while the mutation is pending
+
+### Resolve Payment Drawer
+
+Purpose:
+- end a case whose retry charge was submitted but whose result never arrived, through
+  `POST /admin/dunning/:id/resolve-awaiting-payment`
+
+Fields:
+- optional `reason`
+
+Behavior:
+- the drawer explains the outcome: the case is recovered if its renewal order has been paid; otherwise the retry is
+  failed as a failed payment would fail it (the next retry is scheduled, or the case is closed as unrecovered after
+  its last attempt), but only once the payment has waited longer than the minimum age
+  (`RENEWAL_AWAITING_PAYMENT_RESOLVE_MIN_HOURS`), with the moment taken from `awaiting_payment.can_fail_after`
+- submit shows a final confirmation prompt
+- success shows the resolution (recovered, rescheduled or closed) through toast feedback and refetches the dunning
+  queries
+- a refusal (for example "its retry's payment may still arrive") is displayed inline in the drawer and through toast
+  feedback
+- the drawer is the reusable `ResolveAwaitingPaymentDrawer` shared with the renewal detail page
 
 ### Retry Schedule Drawer
 

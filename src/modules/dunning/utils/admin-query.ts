@@ -3,6 +3,7 @@ import { ContainerRegistrationKeys } from "@medusajs/framework/utils"
 import {
   DunningAdminSubscriptionSummary,
   DunningAttemptAdminStatus,
+  DunningAwaitingPaymentAdminSummary,
   DunningCaseAdminListItem,
   DunningCaseAdminListResponse,
   DunningCaseAdminDetail,
@@ -14,6 +15,10 @@ import {
   DunningCaseStatus,
   type DunningRetrySchedule,
 } from "../types"
+import {
+  awaitingPaymentLimitEndsAt,
+  resolveAwaitingPaymentResolveMinHours,
+} from "../../renewal/utils/awaiting-payment-age"
 import { dunningErrors } from "./errors"
 import { resolveRetryEligibility } from "./retry-eligibility"
 import type {
@@ -689,6 +694,32 @@ export async function listAdminDunningCases(
   }
 }
 
+/**
+ * Judges the latest attempt, as `POST /admin/dunning/:id/resolve-awaiting-payment` does, so
+ * `can_fail_after` never disagrees with that route's answer.
+ */
+function mapAwaitingPayment(
+  caseStatus: DunningCaseStatus,
+  attempts: DunningAttemptRecord[]
+): DunningAwaitingPaymentAdminSummary | null {
+  const latest = attempts[attempts.length - 1]
+
+  if (
+    caseStatus !== DunningCaseStatus.AWAITING_PAYMENT ||
+    latest?.status !== DunningAttemptStatus.PROCESSING
+  ) {
+    return null
+  }
+
+  return {
+    submitted_at: new Date(latest.started_at).toISOString(),
+    can_fail_after: awaitingPaymentLimitEndsAt(
+      latest.started_at,
+      resolveAwaitingPaymentResolveMinHours()
+    ).toISOString(),
+  }
+}
+
 export async function getAdminDunningDetail(
   container: MedusaContainer,
   id: string
@@ -836,6 +867,7 @@ export async function getAdminDunningDetail(
       payment_reference: attempt.payment_reference,
       metadata: attempt.metadata,
     })),
+    awaiting_payment: mapAwaitingPayment(dunningCase.status, attempts),
     metadata: dunningCase.metadata,
     created_at: dunningCase.created_at,
     updated_at: dunningCase.updated_at,

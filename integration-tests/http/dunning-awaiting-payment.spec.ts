@@ -17,6 +17,8 @@ import { RENEWAL_MODULE } from "../../src/modules/renewal"
 import type RenewalModuleService from "../../src/modules/renewal/service"
 import { RenewalAttemptStatus, RenewalCycleStatus } from "../../src/modules/renewal/types"
 import {
+  AWAITING_PAYMENT_ALERT_HOURS_ENV,
+  AWAITING_PAYMENT_RESOLVE_MIN_HOURS_ENV,
   DEFAULT_AWAITING_PAYMENT_ALERT_HOURS,
   DEFAULT_AWAITING_PAYMENT_RESOLVE_MIN_HOURS,
 } from "../../src/modules/renewal/utils/awaiting-payment-age"
@@ -1064,6 +1066,54 @@ medusaIntegrationTestRunner({
         ]).toEqual(before)
         expect(events(DunningEvents.RECOVERED)).toHaveLength(0)
         expect(events(DunningEvents.ATTEMPT_FAILED)).toHaveLength(0)
+      })
+
+      it("shows on the case detail when its awaiting charge was submitted and after when it can be failed, by the resolve minimum age, not the alert hours", async () => {
+        const container = getContainer()
+        const admin = { headers: await createAdminAuthHeaders(container) }
+        const awaiting = await seedDunningCase(container, "SUB-DUN-DETAIL-AWAITING")
+        const retrying = await seedDunningCase(container, "SUB-DUN-DETAIL-RETRYING", {
+          status: DunningCaseStatus.RETRYING,
+        })
+        const scheduled = await seedDunningCase(container, "SUB-DUN-DETAIL-SCHEDULED", {
+          status: DunningCaseStatus.RETRY_SCHEDULED,
+          attempts: [DunningAttemptStatus.FAILED],
+        })
+
+        await ageInFlightAttempt(container, awaiting, 3)
+
+        const [attempt] = (await readDunningState(container, awaiting.dunningCase.id)).attempts
+        const submittedAt = new Date(attempt.started_at)
+        const detail = async (caseId: string) =>
+          (await api.get(`/admin/dunning/${caseId}`, admin)).data.dunning_case
+        const awaitingPayment = (minHours: number) => ({
+          submitted_at: submittedAt.toISOString(),
+          can_fail_after: new Date(submittedAt.getTime() + minHours * HOUR_MS).toISOString(),
+        })
+
+        try {
+          process.env[AWAITING_PAYMENT_ALERT_HOURS_ENV] = "1"
+
+          expect((await detail(awaiting.dunningCase.id)).awaiting_payment).toEqual(
+            awaitingPayment(DEFAULT_AWAITING_PAYMENT_RESOLVE_MIN_HOURS)
+          )
+          expect((await detail(retrying.dunningCase.id)).awaiting_payment).toBeNull()
+          expect((await detail(scheduled.dunningCase.id)).awaiting_payment).toBeNull()
+
+          process.env[AWAITING_PAYMENT_RESOLVE_MIN_HOURS_ENV] = "2"
+
+          expect((await detail(awaiting.dunningCase.id)).awaiting_payment).toEqual(awaitingPayment(2))
+
+          const resolved = await api.post(route(awaiting.dunningCase.id), {}, admin)
+
+          expect(resolved.data).toMatchObject({
+            resolution: "failed",
+            dunning_case: { status: DunningCaseStatus.RETRY_SCHEDULED, awaiting_payment: null },
+          })
+        } finally {
+          delete process.env[AWAITING_PAYMENT_ALERT_HOURS_ENV]
+          delete process.env[AWAITING_PAYMENT_RESOLVE_MIN_HOURS_ENV]
+        }
       })
 
       it("recovers the case through its in-flight attempt when the renewal order is already paid, however young the charge", async () => {

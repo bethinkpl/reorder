@@ -7,7 +7,10 @@ import { Modules } from "@medusajs/framework/utils"
 import { RenewalAwaitingPaymentAdminResolution } from "../../../../../admin/types/renewal"
 import { RENEWAL_MODULE } from "../../../../../modules/renewal"
 import type RenewalModuleService from "../../../../../modules/renewal/service"
-import { CHARGE_IN_FLIGHT_RENEWAL_CYCLE_STATUSES } from "../../../../../modules/renewal/types"
+import {
+  CHARGE_IN_FLIGHT_RENEWAL_CYCLE_STATUSES,
+  RenewalTriggerType,
+} from "../../../../../modules/renewal/types"
 import {
   isAwaitingPaymentOverdue,
   resolveAwaitingPaymentResolveMinHours,
@@ -154,7 +157,7 @@ async function resolveAwaitingPayment(
     correlation_id: createRenewalCorrelationId("renewal-admin-resolve"),
     renewal_cycle_id: cycle.id,
     subscription_id: cycle.subscription_id,
-    trigger_type: "manual",
+    trigger_type: RenewalTriggerType.MANUAL,
     triggered_by: input.triggered_by,
     message: `RenewalCycle '${cycle.id}' awaiting payment was resolved as ${resolution} by an admin`,
     metadata: { reason: input.reason },

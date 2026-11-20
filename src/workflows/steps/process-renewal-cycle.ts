@@ -10,7 +10,10 @@ import {
 } from "@medusajs/medusa/core-flows"
 import { DUNNING_MODULE } from "../../modules/dunning"
 import type DunningModuleService from "../../modules/dunning/service"
-import { ACTIVE_DUNNING_CASE_STATUSES } from "../../modules/dunning/types"
+import {
+  ACTIVE_DUNNING_CASE_STATUSES,
+  DunningPaymentFailureSource,
+} from "../../modules/dunning/types"
 import { RENEWAL_MODULE } from "../../modules/renewal"
 import RenewalModuleService from "../../modules/renewal/service"
 import {
@@ -18,6 +21,8 @@ import {
   RenewalApprovalStatus,
   RenewalAttemptStatus,
   RenewalCycleStatus,
+  RenewalSettlementSource,
+  RenewalTriggerType,
 } from "../../modules/renewal/types"
 import { renewalErrors } from "../../modules/renewal/utils/errors"
 import {
@@ -130,7 +135,7 @@ type SubscriptionRecord = {
 
 export type ProcessRenewalCycleStepInput = {
   renewal_cycle_id: string
-  trigger_type: "scheduler" | "manual"
+  trigger_type: `${RenewalTriggerType}`
   triggered_by?: string | null
   reason?: string | null
   correlation_id?: string | null
@@ -154,13 +159,8 @@ type RenewalCycleRecord = {
   metadata: Record<string, unknown> | null
 }
 
-type PaymentQualifiedFailureSource =
-  | "payment_session"
-  | "payment_provider"
-  | "payment_capture"
-
 type PaymentQualifiedRenewalError = Error & {
-  dunning_payment_failure_source?: PaymentQualifiedFailureSource
+  dunning_payment_failure_source?: DunningPaymentFailureSource
   dunning_payment_error_code?: string | null
   dunning_renewal_order_id?: string | null
 }
@@ -168,7 +168,7 @@ type PaymentQualifiedRenewalError = Error & {
 export type RenewalExecutionContext = {
   renewal_cycle_id: string
   subscription_id: string
-  trigger_type: "scheduler" | "manual"
+  trigger_type: `${RenewalTriggerType}`
   triggered_by: string | null
   reason: string | null
   correlation_id: string
@@ -273,8 +273,8 @@ function buildRenewalSettlementInputs(
   }
 }
 
-function getRenewalActivityLogActorType(triggerType: "scheduler" | "manual") {
-  return triggerType === "manual"
+function getRenewalActivityLogActorType(triggerType: `${RenewalTriggerType}`) {
+  return triggerType === RenewalTriggerType.MANUAL
     ? ActivityLogActorType.USER
     : ActivityLogActorType.SCHEDULER
 }
@@ -1074,7 +1074,7 @@ function readProviderErrorCode(error: unknown) {
 
 function createPaymentQualifiedRenewalError(
   error: unknown,
-  source: PaymentQualifiedFailureSource,
+  source: DunningPaymentFailureSource,
   renewalOrderId: string
 ): PaymentQualifiedRenewalError {
   const message = getRenewalErrorMessage(error)
@@ -1092,7 +1092,7 @@ function createPaymentQualifiedRenewalError(
 function getPaymentQualifiedFailureContext(
   error: unknown
 ): {
-  source: PaymentQualifiedFailureSource
+  source: DunningPaymentFailureSource
   error_code: string | null
   renewal_order_id: string | null
 } | null {
@@ -1182,7 +1182,7 @@ async function recordRenewalFailure(
     },
     reason: context.reason ?? null,
     metadata: {
-      source: context.trigger_type === "manual" ? "admin" : "scheduler",
+      source: context.trigger_type === RenewalTriggerType.MANUAL ? "admin" : "scheduler",
       renewal_cycle_id: context.renewal_cycle_id,
       order_id: paymentFailure?.renewal_order_id ?? null,
       trigger_type: context.trigger_type,
@@ -1819,7 +1819,7 @@ export const authorizeRenewalPaymentStep = createStep(
       } catch (error) {
         throw createPaymentQualifiedRenewalError(
           error,
-          "payment_session",
+          DunningPaymentFailureSource.PAYMENT_SESSION,
           orderId
         )
       }
@@ -1836,7 +1836,7 @@ export const authorizeRenewalPaymentStep = createStep(
       } catch (error) {
         throw createPaymentQualifiedRenewalError(
           error,
-          "payment_provider",
+          DunningPaymentFailureSource.PAYMENT_PROVIDER,
           orderId
         )
       }
@@ -1880,7 +1880,7 @@ export const authorizeRenewalPaymentStep = createStep(
         if (captureError) {
           throw createPaymentQualifiedRenewalError(
             captureError,
-            "payment_capture",
+            DunningPaymentFailureSource.PAYMENT_CAPTURE,
             orderId
           )
         }
@@ -1929,7 +1929,7 @@ export const finalizeRenewalCycleStep = createStep(
           attempt_id: context.attempt_id,
           source_snapshot: order_result.resolved_source_snapshot,
           consumed_skip_next_cycle: context.subscription.skip_next_cycle,
-          source: "renewal",
+          source: RenewalSettlementSource.RENEWAL,
           audit: buildRenewalSettlementAudit(context),
         }
       )

@@ -25,6 +25,18 @@ export const CHARGE_IN_FLIGHT_RENEWAL_CYCLE_STATUSES: readonly RenewalCycleStatu
   RenewalCycleStatus.PROCESSING,
 ] satisfies ChargeInFlightRenewalCycleStatus[]
 
+export enum RenewalTriggerType {
+  SCHEDULER = "scheduler",
+  MANUAL = "manual",
+}
+
+/** Who paid for a cycle settled as succeeded; recorded on the settlement's audit entry. */
+export enum RenewalSettlementSource {
+  RENEWAL = "renewal",
+  DUNNING_RETRY = "dunning_retry",
+  CUSTOMER_PAYMENT = "customer_payment",
+}
+
 export enum RenewalAttemptStatus {
   PROCESSING = "processing",
   SUCCEEDED = "succeeded",

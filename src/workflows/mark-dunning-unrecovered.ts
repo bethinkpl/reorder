@@ -6,6 +6,7 @@ import {
 } from "@medusajs/framework/workflows-sdk"
 import { acquireLockStep, releaseLockStep } from "@medusajs/medusa/core-flows"
 import { DunningEvents } from "../modules/dunning/events"
+import { DunningRecoveryReason } from "../modules/dunning/types"
 import { emitDunningEventStep } from "./steps/emit-dunning-event"
 import {
   markDunningUnrecoveredStep,
@@ -42,7 +43,7 @@ export const markDunningUnrecoveredWorkflow = createWorkflow(
         data: {
           subscription_id: result.subscription_id,
           dunning_case_id: result.id,
-          recovery_reason: "marked_unrecovered_by_admin",
+          recovery_reason: DunningRecoveryReason.MARKED_UNRECOVERED_BY_ADMIN,
         },
       }).config({
         name: "emit-dunning-payment-failed-event",

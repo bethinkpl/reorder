@@ -8,6 +8,7 @@ import {
   ActivityLogEventType,
 } from "../../modules/activity-log/types"
 import { normalizeActivityLogEvent } from "../../modules/activity-log/utils/normalize-log-event"
+import { DunningPaymentFailureSource } from "../../modules/dunning/types"
 import { RENEWAL_MODULE } from "../../modules/renewal"
 import type RenewalModuleService from "../../modules/renewal/service"
 import {
@@ -16,6 +17,7 @@ import {
   type RenewalAppliedPendingUpdateData,
   RenewalAttemptStatus,
   RenewalCycleStatus,
+  RenewalTriggerType,
 } from "../../modules/renewal/types"
 import {
   classifyRenewalFailure,
@@ -392,7 +394,7 @@ export async function failAwaitingRenewalCycleUnderLock(
     customer_id: subscription.customer_id,
     event_type: ActivityLogEventType.RENEWAL_FAILED,
     actor_type: audit
-      ? audit.trigger_type === "manual"
+      ? audit.trigger_type === RenewalTriggerType.MANUAL
         ? ActivityLogActorType.USER
         : ActivityLogActorType.SCHEDULER
       : ActivityLogActorType.SYSTEM,
@@ -424,7 +426,7 @@ export async function failAwaitingRenewalCycleUnderLock(
     reason: triggerReason,
     metadata: {
       source: audit
-        ? audit.trigger_type === "manual"
+        ? audit.trigger_type === RenewalTriggerType.MANUAL
           ? "admin"
           : "scheduler"
         : "payment_provider",
@@ -452,7 +454,7 @@ export async function failAwaitingRenewalCycleUnderLock(
           subscription_id: subscription.id,
           renewal_cycle_id: cycle.id,
           renewal_order_id: orderId,
-          payment_failure_source: "payment_provider",
+          payment_failure_source: DunningPaymentFailureSource.PAYMENT_PROVIDER,
           payment_error_code: errorCode,
           payment_error_message: message,
           failed_at: finishedAt,

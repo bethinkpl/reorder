@@ -19,6 +19,7 @@ import type DunningModuleService from "../../src/modules/dunning/service"
 import {
   DunningAttemptStatus,
   DunningCaseStatus,
+  DunningRecoveryReason,
 } from "../../src/modules/dunning/types"
 import { dunningCaseLockKey } from "../../src/modules/dunning/utils/lock-key"
 import { RENEWAL_MODULE } from "../../src/modules/renewal"
@@ -1254,7 +1255,7 @@ medusaIntegrationTestRunner({
 
         expect((await readDunningState(container, seeded.dunningCase.id)).dunningCase).toMatchObject({
           status: DunningCaseStatus.RECOVERED,
-          recovery_reason: "customer_payment",
+          recovery_reason: DunningRecoveryReason.CUSTOMER_PAYMENT,
         })
 
         await cancelSubscriptionWorkflow(container).run({ input: { id: seeded.subscription.id } })

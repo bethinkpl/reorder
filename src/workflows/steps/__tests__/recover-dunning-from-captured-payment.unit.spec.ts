@@ -17,7 +17,8 @@ jest.mock("../../utils/settle-renewal-cycle-succeeded", () => ({
 }))
 
 import type { MedusaContainer } from "@medusajs/framework/types"
-import { DunningCaseStatus } from "../../../modules/dunning/types"
+import { DunningCaseStatus, DunningRecoveryReason } from "../../../modules/dunning/types"
+import { RenewalSettlementSource } from "../../../modules/renewal/types"
 import { SubscriptionStatus } from "../../../modules/subscription/types"
 import { settleRenewalCycleSucceeded } from "../../utils/settle-renewal-cycle-succeeded"
 import { recoverDunningFromCapturedPayment } from "../recover-dunning-from-captured-payment"
@@ -127,14 +128,14 @@ describe("recoverDunningFromCapturedPayment", () => {
       subscription_id: "sub_1",
       dunning_case_id: "dun_1",
       renewal_order_id: "order_1",
-      recovery_reason: "customer_payment",
+      recovery_reason: DunningRecoveryReason.CUSTOMER_PAYMENT,
       reason: null,
     })
     expect(updateDunningCases).toHaveBeenCalledWith(
       expect.objectContaining({
         id: "dun_1",
         status: DunningCaseStatus.RECOVERED,
-        recovery_reason: "customer_payment",
+        recovery_reason: DunningRecoveryReason.CUSTOMER_PAYMENT,
         recovered_at: now,
         closed_at: now,
         next_retry_at: null,
@@ -161,7 +162,7 @@ describe("recoverDunningFromCapturedPayment", () => {
       order_id: "order_1",
       finished_at: now,
       consumed_skip_next_cycle: false,
-      source: "customer_payment",
+      source: RenewalSettlementSource.CUSTOMER_PAYMENT,
     })
     expect(ensureNextRenewalCycleRun).toHaveBeenCalledWith({
       input: { subscription_id: "sub_1" },
@@ -286,7 +287,7 @@ describe("recoverDunningFromCapturedPayment", () => {
 
     expect(settleRenewalCycleSucceeded).toHaveBeenCalledWith(
       container,
-      expect.objectContaining({ source: "customer_payment" })
+      expect.objectContaining({ source: RenewalSettlementSource.CUSTOMER_PAYMENT })
     )
   })
 

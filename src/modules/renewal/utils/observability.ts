@@ -1,4 +1,5 @@
 import { randomUUID } from "crypto"
+import type { RenewalTriggerType } from "../types"
 
 type LoggerLike = {
   info: (message: string) => void
@@ -26,7 +27,7 @@ type RenewalLogPayload = {
   correlation_id: string
   renewal_cycle_id?: string
   subscription_id?: string
-  trigger_type?: "scheduler" | "manual"
+  trigger_type?: `${RenewalTriggerType}`
   triggered_by?: string | null
   attempt_no?: number
   duration_ms?: number

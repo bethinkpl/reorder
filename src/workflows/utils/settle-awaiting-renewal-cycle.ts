@@ -5,6 +5,8 @@ import type RenewalModuleService from "../../modules/renewal/service"
 import {
   RenewalAttemptStatus,
   RenewalCycleStatus,
+  RenewalSettlementSource,
+  RenewalTriggerType,
 } from "../../modules/renewal/types"
 import {
   createRenewalCorrelationId,
@@ -90,9 +92,9 @@ function settlementInputsOfSubmittedAttempt(
         readMetadataString(cycle.metadata, "last_correlation_id") ??
         createRenewalCorrelationId("renewal-awaiting-payment"),
       trigger_type:
-        readMetadataString(cycle.metadata, "last_trigger_type") === "manual"
-          ? "manual"
-          : "scheduler",
+        readMetadataString(cycle.metadata, "last_trigger_type") === RenewalTriggerType.MANUAL
+          ? RenewalTriggerType.MANUAL
+          : RenewalTriggerType.SCHEDULER,
       triggered_by: readMetadataString(cycle.metadata, "last_triggered_by"),
       attempt_no: attempt.attempt_no,
       operation_started_at: new Date(attempt.started_at).getTime(),
@@ -169,7 +171,7 @@ export async function settleAwaitingRenewalCycleUnderLock(
     audit: stored.audit ?? undefined,
     source_snapshot: stored.source_snapshot,
     consumed_skip_next_cycle: stored.consumed_skip_next_cycle ?? undefined,
-    source: "renewal",
+    source: RenewalSettlementSource.RENEWAL,
   })
 
   if (settlement.reason === "already_succeeded") {

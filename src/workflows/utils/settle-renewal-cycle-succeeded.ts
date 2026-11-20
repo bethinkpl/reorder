@@ -12,6 +12,8 @@ import {
   type RenewalAppliedPendingUpdateData,
   RenewalAttemptStatus,
   RenewalCycleStatus,
+  RenewalSettlementSource,
+  RenewalTriggerType,
 } from "../../modules/renewal/types"
 import {
   createRenewalCorrelationId,
@@ -56,19 +58,13 @@ type RenewalCycleState = {
   last_error: string | null
 }
 
-/** Who paid for the cycle. Recorded on the audit entry the settlement writes. */
-export type RenewalSettlementSource =
-  | "renewal"
-  | "dunning_retry"
-  | "customer_payment"
-
 /**
  * What the renewal workflow knows and a recovery does not: the run that opened the cycle. Passing
  * it keeps the audit entry identical to the one the workflow used to write itself.
  */
 export type RenewalSettlementAudit = {
   correlation_id: string
-  trigger_type: "scheduler" | "manual"
+  trigger_type: `${RenewalTriggerType}`
   triggered_by: string | null
   attempt_no: number
   operation_started_at: number
@@ -88,11 +84,13 @@ function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null && !Array.isArray(value)
 }
 
+const RENEWAL_TRIGGER_TYPES = new Set<unknown>(Object.values(RenewalTriggerType))
+
 function isSettlementAudit(value: unknown): value is RenewalSettlementAudit {
   return (
     isRecord(value) &&
     typeof value.correlation_id === "string" &&
-    (value.trigger_type === "scheduler" || value.trigger_type === "manual") &&
+    RENEWAL_TRIGGER_TYPES.has(value.trigger_type) &&
     typeof value.attempt_no === "number" &&
     typeof value.operation_started_at === "number" &&
     typeof value.scheduled_for === "string" &&
@@ -201,7 +199,7 @@ export async function settleRenewalCycleSucceeded(
   const renewalModule = container.resolve<RenewalModuleService>(RENEWAL_MODULE)
   const subscriptionModule =
     container.resolve<SubscriptionModuleService>(SUBSCRIPTION_MODULE)
-  const source = input.source ?? "dunning_retry"
+  const source = input.source ?? RenewalSettlementSource.DUNNING_RETRY
 
   const cycle = (await renewalModule.retrieveRenewalCycle(
     input.renewal_cycle_id
@@ -428,7 +426,7 @@ export async function settleRenewalCycleSucceeded(
     customer_id: subscription.customer_id,
     event_type: ActivityLogEventType.RENEWAL_SUCCEEDED,
     actor_type: audit
-      ? audit.trigger_type === "manual"
+      ? audit.trigger_type === RenewalTriggerType.MANUAL
         ? ActivityLogActorType.USER
         : ActivityLogActorType.SCHEDULER
       : ActivityLogActorType.SYSTEM,
@@ -453,7 +451,7 @@ export async function settleRenewalCycleSucceeded(
     },
     metadata: {
       source: audit
-        ? audit.trigger_type === "manual"
+        ? audit.trigger_type === RenewalTriggerType.MANUAL
           ? "admin"
           : "scheduler"
         : source,

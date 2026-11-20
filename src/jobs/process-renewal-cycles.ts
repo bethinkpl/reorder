@@ -5,6 +5,7 @@ import { setTimeout as delay } from "node:timers/promises"
 import { DateTime } from "luxon"
 import { RENEWAL_MODULE } from "../modules/renewal"
 import type RenewalModuleService from "../modules/renewal/service"
+import { RenewalTriggerType } from "../modules/renewal/types"
 import {
   isApprovalEligible,
   type DueRenewalCycleRecord,
@@ -97,7 +98,7 @@ async function processCycle(
     const { result } = await processRenewalCycleWorkflow(container).run({
       input: {
         renewal_cycle_id: cycle.id,
-        trigger_type: "scheduler",
+        trigger_type: RenewalTriggerType.SCHEDULER,
         correlation_id: cycleCorrelationId,
       },
     })
@@ -110,7 +111,7 @@ async function processCycle(
       correlation_id: cycleCorrelationId,
       renewal_cycle_id: cycle.id,
       subscription_id: cycle.subscription_id,
-      trigger_type: "scheduler",
+      trigger_type: RenewalTriggerType.SCHEDULER,
       duration_ms: Date.now() - startedAt,
       success_count: outcome === RenewalRunOutcome.SUCCEEDED ? 1 : 0,
       failure_count: outcome === RenewalRunOutcome.FAILED ? 1 : 0,
@@ -130,7 +131,7 @@ async function processCycle(
       correlation_id: cycleCorrelationId,
       renewal_cycle_id: cycle.id,
       subscription_id: cycle.subscription_id,
-      trigger_type: "scheduler",
+      trigger_type: RenewalTriggerType.SCHEDULER,
       duration_ms: Date.now() - startedAt,
       success_count: 0,
       failure_count: 1,

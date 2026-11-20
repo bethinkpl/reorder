@@ -4,6 +4,7 @@ import type DunningModuleService from "../../modules/dunning/service"
 import {
   CHARGE_IN_FLIGHT_DUNNING_CASE_STATUSES,
   DunningCaseStatus,
+  DunningRecoveryReason,
 } from "../../modules/dunning/types"
 import { dunningErrors } from "../../modules/dunning/utils/errors"
 import { SUBSCRIPTION_MODULE } from "../../modules/subscription"
@@ -102,7 +103,7 @@ export const markDunningRecoveredStep = createStep(
       next_retry_at: null,
       recovered_at: changedAt,
       closed_at: changedAt,
-      recovery_reason: "marked_recovered_by_admin",
+      recovery_reason: DunningRecoveryReason.MARKED_RECOVERED_BY_ADMIN,
       metadata: appendAuditMetadata(
         dunningCase.metadata,
         "mark_recovered",

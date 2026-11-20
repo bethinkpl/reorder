@@ -29,6 +29,27 @@ export const CHARGE_IN_FLIGHT_DUNNING_CASE_STATUSES: readonly DunningCaseStatus[
   DunningCaseStatus.AWAITING_PAYMENT,
 ]
 
+/** Why a case closed, recovered or not: its `recovery_reason`. */
+export enum DunningRecoveryReason {
+  PAYMENT_RECOVERED = "payment_recovered",
+  CUSTOMER_PAYMENT = "customer_payment",
+  MARKED_RECOVERED_BY_ADMIN = "marked_recovered_by_admin",
+  REVERSED_BY_ADMIN = "reversed_by_admin",
+  RETRY_SCHEDULE_EXHAUSTED = "retry_schedule_exhausted",
+  RETRY_LIMIT_EXHAUSTED = "retry_limit_exhausted",
+  PERMANENT_PAYMENT_FAILURE = "permanent_payment_failure",
+  SUBSCRIPTION_NOT_RETRYABLE = "subscription_not_retryable",
+  SUBSCRIPTION_CANCELLED_BY_CUSTOMER = "subscription_cancelled_by_customer",
+  MARKED_UNRECOVERED_BY_ADMIN = "marked_unrecovered_by_admin",
+}
+
+/** Where the renewal payment failure that opens a case was raised. */
+export enum DunningPaymentFailureSource {
+  PAYMENT_PROVIDER = "payment_provider",
+  PAYMENT_SESSION = "payment_session",
+  PAYMENT_CAPTURE = "payment_capture",
+}
+
 export enum DunningAttemptStatus {
   PROCESSING = "processing",
   SUCCEEDED = "succeeded",

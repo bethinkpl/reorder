@@ -17,7 +17,8 @@ import {
   createOrUpdateOrderPaymentCollectionWorkflow,
   createPaymentSessionsWorkflow,
 } from "@medusajs/medusa/core-flows"
-import { DunningCaseStatus } from "../../../modules/dunning/types"
+import { DunningCaseStatus, DunningRecoveryReason } from "../../../modules/dunning/types"
+import { RenewalSettlementSource } from "../../../modules/renewal/types"
 import { SubscriptionStatus } from "../../../modules/subscription/types"
 import { settleRenewalCycleSucceeded } from "../../utils/settle-renewal-cycle-succeeded"
 import { runDunningRetry } from "../run-dunning-retry"
@@ -175,7 +176,7 @@ describe("runDunningRetry - recovery branch", () => {
 
     expect(response.output).toMatchObject({
       outcome: "recovered",
-      recovery_reason: "payment_recovered",
+      recovery_reason: DunningRecoveryReason.PAYMENT_RECOVERED,
       renewal_order_id: "order_1",
       recovered_now: true,
     })
@@ -183,7 +184,7 @@ describe("runDunningRetry - recovery branch", () => {
       expect.objectContaining({
         id: "dun_1",
         status: DunningCaseStatus.RECOVERED,
-        recovery_reason: "payment_recovered",
+        recovery_reason: DunningRecoveryReason.PAYMENT_RECOVERED,
         metadata: expect.objectContaining({
           park_reason: null,
           recovery_payment_reference: "pay_1",
@@ -201,7 +202,7 @@ describe("runDunningRetry - recovery branch", () => {
         subscription_id: "sub_1",
         order_id: "order_1",
         consumed_skip_next_cycle: false,
-        source: "dunning_retry",
+        source: RenewalSettlementSource.DUNNING_RETRY,
       })
     )
     expect(ensureNextRenewalCycleRun).toHaveBeenCalledWith({
@@ -216,7 +217,7 @@ describe("runDunningRetry - recovery branch", () => {
 
     expect(settleRenewalCycleSucceeded).toHaveBeenCalledWith(
       container,
-      expect.objectContaining({ source: "customer_payment" })
+      expect.objectContaining({ source: RenewalSettlementSource.CUSTOMER_PAYMENT })
     )
   })
 
@@ -276,13 +277,13 @@ describe("runDunningRetry - recovery branch", () => {
 
     expect(response.output).toMatchObject({
       outcome: "recovered",
-      recovery_reason: "customer_payment",
+      recovery_reason: DunningRecoveryReason.CUSTOMER_PAYMENT,
       recovered_now: true,
     })
     expect(updateDunningCases).toHaveBeenCalledWith(
       expect.objectContaining({
         status: DunningCaseStatus.RECOVERED,
-        recovery_reason: "customer_payment",
+        recovery_reason: DunningRecoveryReason.CUSTOMER_PAYMENT,
       })
     )
   })

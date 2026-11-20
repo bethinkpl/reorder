@@ -6,6 +6,7 @@ import SubscriptionModuleService from "../../modules/subscription/service"
 import {
   RenewalApprovalStatus,
   RenewalCycleStatus,
+  RenewalTriggerType,
 } from "../../modules/renewal/types"
 import { renewalErrors } from "../../modules/renewal/utils/errors"
 import {
@@ -75,7 +76,7 @@ export const forceRenewalCycleStep = createStep(
       correlation_id: correlationId,
       renewal_cycle_id: cycle.id,
       subscription_id: cycle.subscription_id,
-      trigger_type: "manual",
+      trigger_type: RenewalTriggerType.MANUAL,
       triggered_by: input.triggered_by ?? null,
     })
 
@@ -132,7 +133,7 @@ export const forceRenewalCycleStep = createStep(
         metadata: {
           source: "admin",
           renewal_cycle_id: cycle.id,
-          trigger_type: "manual",
+          trigger_type: RenewalTriggerType.MANUAL,
         },
         correlation_id: correlationId,
         dedupe: {
@@ -145,7 +146,7 @@ export const forceRenewalCycleStep = createStep(
       const { result } = await processRenewalCycleWorkflow(container).run({
         input: {
           renewal_cycle_id: cycle.id,
-          trigger_type: "manual",
+          trigger_type: RenewalTriggerType.MANUAL,
           triggered_by: input.triggered_by ?? null,
           reason: input.reason ?? null,
           correlation_id: correlationId,
@@ -163,7 +164,7 @@ export const forceRenewalCycleStep = createStep(
         correlation_id: correlationId,
         renewal_cycle_id: cycle.id,
         subscription_id: cycle.subscription_id,
-        trigger_type: "manual",
+        trigger_type: RenewalTriggerType.MANUAL,
         triggered_by: input.triggered_by ?? null,
         failure_kind: failureKind,
         alertable: isAlertableRenewalFailure(failureKind),
@@ -179,7 +180,7 @@ export const forceRenewalCycleStep = createStep(
       correlation_id: correlationId,
       renewal_cycle_id: cycle.id,
       subscription_id: cycle.subscription_id,
-      trigger_type: "manual",
+      trigger_type: RenewalTriggerType.MANUAL,
       triggered_by: input.triggered_by ?? null,
       success_count: outcome === RenewalRunOutcome.SUCCEEDED ? 1 : 0,
       failure_count: outcome === RenewalRunOutcome.FAILED ? 1 : 0,

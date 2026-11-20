@@ -11,12 +11,20 @@ import { getAdminCancellationDetail } from "../../src/modules/cancellation/utils
 import { DUNNING_MODULE } from "../../src/modules/dunning"
 import { DunningEvents } from "../../src/modules/dunning/events"
 import type DunningModuleService from "../../src/modules/dunning/service"
-import { DunningAttemptStatus, DunningCaseStatus } from "../../src/modules/dunning/types"
+import {
+  DunningAttemptStatus,
+  DunningCaseStatus,
+  DunningRecoveryReason,
+} from "../../src/modules/dunning/types"
 import { dunningCaseLockKey } from "../../src/modules/dunning/utils/lock-key"
 import { RetryBlockedReason } from "../../src/modules/dunning/utils/retry-eligibility"
 import { RENEWAL_MODULE } from "../../src/modules/renewal"
 import type RenewalModuleService from "../../src/modules/renewal/service"
-import { RenewalAttemptStatus, RenewalCycleStatus } from "../../src/modules/renewal/types"
+import {
+  RenewalAttemptStatus,
+  RenewalCycleStatus,
+  RenewalSettlementSource,
+} from "../../src/modules/renewal/types"
 import {
   AWAITING_PAYMENT_ALERT_HOURS_ENV,
   AWAITING_PAYMENT_RESOLVE_MIN_HOURS_ENV,
@@ -247,7 +255,7 @@ medusaIntegrationTestRunner({
         expect(await dunningModule.retrieveDunningCase(caseId)).toMatchObject({
           status: DunningCaseStatus.UNRECOVERED,
           next_retry_at: null,
-          recovery_reason: "subscription_cancelled_by_customer",
+          recovery_reason: DunningRecoveryReason.SUBSCRIPTION_CANCELLED_BY_CUSTOMER,
           closed_at: expect.anything(),
         })
       })
@@ -355,7 +363,7 @@ medusaIntegrationTestRunner({
 
           expect(state.dunningCase).toMatchObject({
             status: DunningCaseStatus.RECOVERED,
-            recovery_reason: "payment_recovered",
+            recovery_reason: DunningRecoveryReason.PAYMENT_RECOVERED,
             next_retry_at: null,
           })
           expect(state.attempts).toEqual([
@@ -374,13 +382,13 @@ medusaIntegrationTestRunner({
           expect(renewalAttempts).toContainEqual(
             expect.objectContaining({
               status: RenewalAttemptStatus.SUCCEEDED,
-              metadata: expect.objectContaining({ source: "dunning_retry" }),
+              metadata: expect.objectContaining({ source: RenewalSettlementSource.DUNNING_RETRY }),
             })
           )
           expect(events(DunningEvents.RECOVERED).map((message) => message.data)).toEqual([
             expect.objectContaining({
               dunning_case_id: seeded.dunningCase.id,
-              recovery_reason: "payment_recovered",
+              recovery_reason: DunningRecoveryReason.PAYMENT_RECOVERED,
             }),
           ])
         }
@@ -460,7 +468,7 @@ medusaIntegrationTestRunner({
               status: DunningCaseStatus.UNRECOVERED,
               attempt_count: 3,
               next_retry_at: null,
-              recovery_reason: "retry_limit_exhausted",
+              recovery_reason: DunningRecoveryReason.RETRY_LIMIT_EXHAUSTED,
             },
             latestAttempt: { status: DunningAttemptStatus.FAILED },
             subscription: SubscriptionStatus.PAYMENT_FAILED,
@@ -636,7 +644,7 @@ medusaIntegrationTestRunner({
           failed: 0,
         })
         expect(await readDunningState(container, seeded.dunningCase.id)).toMatchObject({
-          dunningCase: { status: DunningCaseStatus.RECOVERED, recovery_reason: "payment_recovered" },
+          dunningCase: { status: DunningCaseStatus.RECOVERED, recovery_reason: DunningRecoveryReason.PAYMENT_RECOVERED },
           attempts: [{ status: DunningAttemptStatus.SUCCEEDED, payment_reference: payment.id }],
         })
       })
@@ -847,14 +855,14 @@ medusaIntegrationTestRunner({
 
         expect(recovered.dunningCase).toMatchObject({
           status: DunningCaseStatus.RECOVERED,
-          recovery_reason: "customer_payment",
+          recovery_reason: DunningRecoveryReason.CUSTOMER_PAYMENT,
         })
         expect(recovered.attempts).toEqual([
           expect.objectContaining({ id: attempt.id, status: DunningAttemptStatus.PROCESSING }),
         ])
         expect(state.dunningCase).toMatchObject({
           status: DunningCaseStatus.RECOVERED,
-          recovery_reason: "customer_payment",
+          recovery_reason: DunningRecoveryReason.CUSTOMER_PAYMENT,
         })
         expect(state.attempts).toEqual([
           expect.objectContaining({
@@ -1135,7 +1143,7 @@ medusaIntegrationTestRunner({
         })
         expect(state.dunningCase).toMatchObject({
           status: DunningCaseStatus.RECOVERED,
-          recovery_reason: "payment_recovered",
+          recovery_reason: DunningRecoveryReason.PAYMENT_RECOVERED,
         })
         expect(state.attempts).toEqual([
           expect.objectContaining({
@@ -1147,7 +1155,7 @@ medusaIntegrationTestRunner({
         expect(state.subscription.status).toEqual(SubscriptionStatus.ACTIVE)
         expect(state.cycle.status).toEqual(RenewalCycleStatus.SUCCEEDED)
         expect(events(DunningEvents.RECOVERED).map((message) => message.data)).toEqual([
-          expect.objectContaining({ dunning_case_id: seeded.dunningCase.id, recovery_reason: "payment_recovered" }),
+          expect.objectContaining({ dunning_case_id: seeded.dunningCase.id, recovery_reason: DunningRecoveryReason.PAYMENT_RECOVERED }),
         ])
       })
 
@@ -1167,7 +1175,7 @@ medusaIntegrationTestRunner({
           reference: "SUB-DUN-RESOLVE-LAST",
           seed: { attempt_count: 3, max_attempts: 3 },
           expected: {
-            dunningCase: { status: DunningCaseStatus.UNRECOVERED, recovery_reason: "retry_limit_exhausted" },
+            dunningCase: { status: DunningCaseStatus.UNRECOVERED, recovery_reason: DunningRecoveryReason.RETRY_LIMIT_EXHAUSTED },
             subscription: SubscriptionStatus.PAYMENT_FAILED,
             events: { attempt_failed: 0, payment_failed: 1 },
           },

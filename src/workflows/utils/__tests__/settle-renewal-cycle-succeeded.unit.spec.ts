@@ -25,6 +25,8 @@ import {
 import {
   RenewalAttemptStatus,
   RenewalCycleStatus,
+  RenewalSettlementSource,
+  RenewalTriggerType,
 } from "../../../modules/renewal/types"
 import { persistSubscriptionLogEvent } from "../../steps/create-subscription-log-event"
 import { settleRenewalCycleSucceeded } from "../settle-renewal-cycle-succeeded"
@@ -162,7 +164,7 @@ const baseInput = {
 /** Exactly what `finalizeRenewalCycleStep` hands the helper. */
 const finalizeAudit = {
   correlation_id: "renewal-scheduler-1",
-  trigger_type: "scheduler" as const,
+  trigger_type: RenewalTriggerType.SCHEDULER,
   triggered_by: null,
   attempt_no: 3,
   operation_started_at: Date.now(),
@@ -464,7 +466,7 @@ describe("settleRenewalCycleSucceeded", () => {
 
     await settleRenewalCycleSucceeded(container, {
       ...baseInput,
-      source: "customer_payment",
+      source: RenewalSettlementSource.CUSTOMER_PAYMENT,
     })
 
     expect(updateRenewalAttempts).not.toHaveBeenCalled()
@@ -478,7 +480,7 @@ describe("settleRenewalCycleSucceeded", () => {
       error_message: null,
       payment_reference: null,
       order_id: "order_1",
-      metadata: { source: "customer_payment" },
+      metadata: { source: RenewalSettlementSource.CUSTOMER_PAYMENT },
     })
   })
 
@@ -488,7 +490,7 @@ describe("settleRenewalCycleSucceeded", () => {
     await settleRenewalCycleSucceeded(container, {
       ...baseInput,
       attempt_id: "rat_1",
-      source: "renewal",
+      source: RenewalSettlementSource.RENEWAL,
       audit: finalizeAudit,
     })
 
@@ -516,7 +518,7 @@ describe("settleRenewalCycleSucceeded", () => {
         source: "scheduler",
         renewal_cycle_id: "rc_1",
         order_id: "order_1",
-        trigger_type: "scheduler",
+        trigger_type: RenewalTriggerType.SCHEDULER,
         scheduled_for: scheduledFor.toISOString(),
       }),
     })
@@ -529,7 +531,7 @@ describe("settleRenewalCycleSucceeded", () => {
 
     await settleRenewalCycleSucceeded(container, {
       ...baseInput,
-      source: "customer_payment",
+      source: RenewalSettlementSource.CUSTOMER_PAYMENT,
     })
 
     expect(persistSubscriptionLogEvent).toHaveBeenCalledTimes(1)
@@ -537,7 +539,7 @@ describe("settleRenewalCycleSucceeded", () => {
       actor_type: ActivityLogActorType.SYSTEM,
       actor_id: null,
       metadata: expect.objectContaining({
-        source: "customer_payment",
+        source: RenewalSettlementSource.CUSTOMER_PAYMENT,
         trigger_type: null,
       }),
       // The state the recovery moved the cycle out of.

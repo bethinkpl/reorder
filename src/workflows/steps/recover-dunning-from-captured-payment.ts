@@ -7,6 +7,7 @@ import {
   CHARGE_IN_FLIGHT_DUNNING_CASE_STATUSES,
   DunningAttemptStatus,
   DunningCaseStatus,
+  DunningRecoveryReason,
 } from "../../modules/dunning/types"
 import { dunningErrors } from "../../modules/dunning/utils/errors"
 import {
@@ -14,20 +15,15 @@ import {
   getDunningErrorMessage,
   logDunningEvent,
 } from "../../modules/dunning/utils/observability"
+import { RenewalSettlementSource } from "../../modules/renewal/types"
 import { SUBSCRIPTION_MODULE } from "../../modules/subscription"
 import type SubscriptionModuleService from "../../modules/subscription/service"
 import { SubscriptionStatus } from "../../modules/subscription/types"
 import { subscriptionErrors } from "../../modules/subscription/utils/errors"
 import { ensureNextRenewalCycleWorkflow } from "../ensure-next-renewal-cycle"
 import { settleDunningCaseRecovered } from "../utils/settle-dunning-recovery"
-import {
-  type RenewalSettlementSource,
-  settleRenewalCycleSucceeded,
-} from "../utils/settle-renewal-cycle-succeeded"
+import { settleRenewalCycleSucceeded } from "../utils/settle-renewal-cycle-succeeded"
 import { loadOrderAmounts } from "./run-dunning-retry"
-
-const RECOVERY_REASON = "customer_payment"
-const RETRY_RECOVERY_REASON = "payment_recovered"
 
 type DunningCaseRecord = {
   id: string
@@ -194,7 +190,7 @@ export async function recoverDunningFromCapturedPayment(
   const answer = (
     recovered: boolean,
     reason: string | null,
-    recoveryReason: string = RECOVERY_REASON
+    recoveryReason: DunningRecoveryReason = DunningRecoveryReason.CUSTOMER_PAYMENT
   ): StepResponse<RecoverDunningFromCapturedPaymentStepOutput> =>
     new StepResponse<RecoverDunningFromCapturedPaymentStepOutput>({
       recovered,
@@ -222,7 +218,9 @@ export async function recoverDunningFromCapturedPayment(
   // Deliberately non-fatal: by the time this runs the case is closed and the money is in, and a
   // throw would abandon a recovery nothing revisits - the case would no longer look open to
   // either the scheduler or the reconciler.
-  const healCycle = async (source: RenewalSettlementSource = RECOVERY_REASON) => {
+  const healCycle = async (
+    source: RenewalSettlementSource = RenewalSettlementSource.CUSTOMER_PAYMENT
+  ) => {
     try {
       const settlement = await settleRenewalCycleSucceeded(container, {
         renewal_cycle_id: dunningCase.renewal_cycle_id,
@@ -295,7 +293,9 @@ export async function recoverDunningFromCapturedPayment(
     dunningCase,
     input.payment_id
   )
-  const recoveryReason = retryPayment ? RETRY_RECOVERY_REASON : RECOVERY_REASON
+  const recoveryReason = retryPayment
+    ? DunningRecoveryReason.PAYMENT_RECOVERED
+    : DunningRecoveryReason.CUSTOMER_PAYMENT
 
   if (retryPayment) {
     await container.resolve<DunningModuleService>(DUNNING_MODULE).updateDunningAttempts({
@@ -316,7 +316,11 @@ export async function recoverDunningFromCapturedPayment(
     payment_reference: retryPayment?.payment_id ?? input.payment_id,
   })
 
-  await healCycle(retryPayment ? "dunning_retry" : RECOVERY_REASON)
+  await healCycle(
+    retryPayment
+      ? RenewalSettlementSource.DUNNING_RETRY
+      : RenewalSettlementSource.CUSTOMER_PAYMENT
+  )
 
   logDunningEvent(logger, "info", {
     event: "dunning.customer_recovery",

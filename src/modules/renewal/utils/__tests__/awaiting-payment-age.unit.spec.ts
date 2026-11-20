@@ -1,9 +1,14 @@
 import {
+  AWAITING_PAYMENT_ALERT_HOURS_ENV,
+  AWAITING_PAYMENT_RESOLVE_MIN_HOURS_ENV,
+  awaitingPaymentLimitEndsAt,
   DEFAULT_AWAITING_PAYMENT_ALERT_HOURS,
+  DEFAULT_AWAITING_PAYMENT_RESOLVE_MIN_HOURS,
   isAwaitingPaymentOverdue,
   isOverdueAlertDue,
   OVERDUE_ALERTED_FOR_KEY,
   resolveAwaitingPaymentAlertHours,
+  resolveAwaitingPaymentResolveMinHours,
   withOverdueAlertMarker,
 } from "../awaiting-payment-age"
 
@@ -59,5 +64,44 @@ describe("resolveAwaitingPaymentAlertHours", () => {
     [undefined, 96],
   ])("resolves %j to %d", (raw, expected) => {
     expect(resolveAwaitingPaymentAlertHours(raw)).toBe(expected)
+  })
+})
+
+describe("resolveAwaitingPaymentResolveMinHours", () => {
+  afterEach(() => {
+    delete process.env[AWAITING_PAYMENT_ALERT_HOURS_ENV]
+    delete process.env[AWAITING_PAYMENT_RESOLVE_MIN_HOURS_ENV]
+  })
+
+  it.each([
+    ["1", 1],
+    ["120", 120],
+    ["0", DEFAULT_AWAITING_PAYMENT_RESOLVE_MIN_HOURS],
+    ["-5", DEFAULT_AWAITING_PAYMENT_RESOLVE_MIN_HOURS],
+    ["abc", DEFAULT_AWAITING_PAYMENT_RESOLVE_MIN_HOURS],
+    [undefined, 96],
+  ])("resolves %j to %d", (raw, expected) => {
+    expect(resolveAwaitingPaymentResolveMinHours(raw)).toBe(expected)
+  })
+
+  it("reads its own variable from the environment and ignores the alert hours", () => {
+    process.env[AWAITING_PAYMENT_ALERT_HOURS_ENV] = "2"
+
+    expect(resolveAwaitingPaymentResolveMinHours()).toBe(DEFAULT_AWAITING_PAYMENT_RESOLVE_MIN_HOURS)
+
+    process.env[AWAITING_PAYMENT_RESOLVE_MIN_HOURS_ENV] = "80"
+
+    expect(resolveAwaitingPaymentResolveMinHours()).toBe(80)
+    expect(resolveAwaitingPaymentAlertHours()).toBe(2)
+  })
+})
+
+describe("awaitingPaymentLimitEndsAt", () => {
+  it("is the last moment a charge is not yet past the limit", () => {
+    const endsAt = awaitingPaymentLimitEndsAt(PARKED_AT.toISOString(), 96)
+
+    expect(endsAt).toEqual(after(96 * HOUR_MS))
+    expect(isAwaitingPaymentOverdue(PARKED_AT, endsAt, 96)).toBe(false)
+    expect(isAwaitingPaymentOverdue(PARKED_AT, new Date(endsAt.getTime() + 1), 96)).toBe(true)
   })
 })

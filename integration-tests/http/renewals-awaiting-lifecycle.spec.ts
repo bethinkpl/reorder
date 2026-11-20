@@ -13,7 +13,8 @@ import { RenewalAttemptStatus, RenewalCycleStatus } from "../../src/modules/rene
 import {
   AWAITING_PAYMENT_ALERT_HOURS_ENV,
   AWAITING_PAYMENT_OVERDUE_EVENT,
-  DEFAULT_AWAITING_PAYMENT_ALERT_HOURS,
+  AWAITING_PAYMENT_RESOLVE_MIN_HOURS_ENV,
+  DEFAULT_AWAITING_PAYMENT_RESOLVE_MIN_HOURS,
 } from "../../src/modules/renewal/utils/awaiting-payment-age"
 import { renewalErrors } from "../../src/modules/renewal/utils/errors"
 import { SubscriptionStatus } from "../../src/modules/subscription/types"
@@ -124,6 +125,7 @@ medusaIntegrationTestRunner({
       jest.restoreAllMocks()
       jest.clearAllMocks()
       delete process.env[AWAITING_PAYMENT_ALERT_HOURS_ENV]
+      delete process.env[AWAITING_PAYMENT_RESOLVE_MIN_HOURS_ENV]
     })
 
     async function seedFailedCycle(reference: string, caseStatus?: DunningCaseStatus) {
@@ -342,7 +344,7 @@ medusaIntegrationTestRunner({
           .sort((first, second) => first.status - second.status)
       }
 
-      it("rejects an unauthenticated request, an invalid body and a cycle that is not awaiting its payment, and answers a conflict that the payment may still arrive for an unpaid cycle under the alert limit, writing nothing", async () => {
+      it("rejects an unauthenticated request, an invalid body and a cycle that is not awaiting its payment, and answers a conflict that the payment may still arrive for an unpaid cycle under the minimum age, writing nothing", async () => {
         const container = getContainer()
         const headers = await createAdminAuthHeaders(container)
         const seeded = await seedAwaitingRenewal(container, { reference: "SUB-AWL-RESOLVE-YOUNG" })
@@ -372,6 +374,43 @@ medusaIntegrationTestRunner({
 
         expect(await readRenewalState(container, seeded)).toEqual(before)
         expect(emitted(DunningEvents.STARTED)).toHaveLength(0)
+      })
+
+      it("measures the age an unpaid charge needs before it can be resolved as failed by its own setting, not by the alert hours", async () => {
+        const container = getContainer()
+        const headers = await createAdminAuthHeaders(container)
+        const seeded = await seedAwaitingRenewal(container, {
+          reference: "SUB-AWL-RESOLVE-MIN-AGE",
+          submitted_at: new Date(Date.now() - 3 * HOUR_MS),
+        })
+        const before = await readRenewalState(container, seeded)
+
+        process.env[AWAITING_PAYMENT_ALERT_HOURS_ENV] = "2"
+
+        await expect(api.post(route(seeded.cycle.id), {}, { headers })).rejects.toMatchObject({
+          response: {
+            status: 409,
+            data: {
+              type: "conflict",
+              message: expect.stringContaining(
+                `payment may still arrive; it can be resolved as failed once it has waited for more than ${DEFAULT_AWAITING_PAYMENT_RESOLVE_MIN_HOURS} hours`
+              ),
+            },
+          },
+        })
+        expect(await readRenewalState(container, seeded)).toEqual(before)
+
+        process.env[AWAITING_PAYMENT_RESOLVE_MIN_HOURS_ENV] = "2"
+
+        const resolved = await api.post(route(seeded.cycle.id), {}, { headers })
+
+        expect(resolved.data).toMatchObject({
+          resolution: "failed",
+          renewal: { status: RenewalCycleStatus.FAILED },
+        })
+        expect((await readRenewalState(container, seeded)).cases).toEqual([
+          expect.objectContaining({ renewal_cycle_id: seeded.cycle.id }),
+        ])
       })
 
       it("settles once, as a capture would, when two resolves of a paid order run at the same time", async () => {
@@ -415,7 +454,7 @@ medusaIntegrationTestRunner({
           const seeded = await seedAwaitingRenewal(container, {
             reference: `SUB-AWL-RESOLVE-UNPAID-${cycle_status}`,
             cycle_status,
-            submitted_at: new Date(Date.now() - (DEFAULT_AWAITING_PAYMENT_ALERT_HOURS + 1) * HOUR_MS),
+            submitted_at: new Date(Date.now() - (DEFAULT_AWAITING_PAYMENT_RESOLVE_MIN_HOURS + 1) * HOUR_MS),
           })
 
           if (cycle_status === RenewalCycleStatus.PROCESSING) {

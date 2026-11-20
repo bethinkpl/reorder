@@ -9,7 +9,7 @@ import type RenewalModuleService from "../../../../../modules/renewal/service"
 import { RenewalCycleStatus } from "../../../../../modules/renewal/types"
 import {
   isAwaitingPaymentOverdue,
-  resolveAwaitingPaymentAlertHours,
+  resolveAwaitingPaymentResolveMinHours,
 } from "../../../../../modules/renewal/utils/awaiting-payment-age"
 import { renewalErrors } from "../../../../../modules/renewal/utils/errors"
 import {
@@ -56,9 +56,9 @@ function noAttemptToFail(renewalCycleId: string) {
   )
 }
 
-function paymentMayStillArrive(renewalCycleId: string, alertHours: number) {
+function paymentMayStillArrive(renewalCycleId: string, minHours: number) {
   return renewalErrors.conflict(
-    `Renewal '${renewalCycleId}' is unpaid, but its payment may still arrive; it can be resolved as failed once it has waited for more than ${alertHours} hours`
+    `Renewal '${renewalCycleId}' is unpaid, but its payment may still arrive; it can be resolved as failed once it has waited for more than ${minHours} hours`
   )
 }
 
@@ -71,10 +71,10 @@ async function failUnpaidUnderLock(
     throw noAttemptToFail(input.renewal_cycle_id)
   }
 
-  const alertHours = resolveAwaitingPaymentAlertHours()
+  const minHours = resolveAwaitingPaymentResolveMinHours()
 
-  if (!isAwaitingPaymentOverdue(attempt.started_at, new Date(), alertHours)) {
-    throw paymentMayStillArrive(input.renewal_cycle_id, alertHours)
+  if (!isAwaitingPaymentOverdue(attempt.started_at, new Date(), minHours)) {
+    throw paymentMayStillArrive(input.renewal_cycle_id, minHours)
   }
 
   const message = input.reason

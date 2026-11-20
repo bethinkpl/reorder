@@ -2,7 +2,7 @@ import type { MedusaContainer } from "@medusajs/framework/types"
 import { createStep, StepResponse } from "@medusajs/framework/workflows-sdk"
 import { DUNNING_MODULE } from "../../modules/dunning"
 import type DunningModuleService from "../../modules/dunning/service"
-import { DunningCaseStatus } from "../../modules/dunning/types"
+import { CHARGE_IN_FLIGHT_DUNNING_CASE_STATUSES } from "../../modules/dunning/types"
 import { RENEWAL_MODULE } from "../../modules/renewal"
 import type RenewalModuleService from "../../modules/renewal/service"
 import {
@@ -10,11 +10,6 @@ import {
   RenewalCycleStatus,
 } from "../../modules/renewal/types"
 import { subscriptionErrors } from "../../modules/subscription/utils/errors"
-
-const CHARGING_DUNNING_CASE_STATUSES = [
-  DunningCaseStatus.RETRYING,
-  DunningCaseStatus.AWAITING_PAYMENT,
-]
 
 export type AssertNoRenewalPaymentInProgressStepInput = {
   subscription_id: string
@@ -57,7 +52,7 @@ async function describeRenewalPaymentInProgress(
     .listDunningCases(
       {
         subscription_id: subscriptionId,
-        status: CHARGING_DUNNING_CASE_STATUSES,
+        status: [...CHARGE_IN_FLIGHT_DUNNING_CASE_STATUSES],
       },
       { select: ["id"], take: 1 }
     )

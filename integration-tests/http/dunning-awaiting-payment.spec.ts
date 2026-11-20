@@ -5,6 +5,12 @@ import { Modules, PaymentActions } from "@medusajs/framework/utils"
 import { PaymentAttemptErrorCode } from "../../src/common/types/payment-attempt-error-code"
 import processDunningRetriesJob from "../../src/jobs/process-dunning-retries"
 import { reconcilePaidDunningCases } from "../../src/jobs/reconcile-paid-dunning-cases"
+import { ACTIVITY_LOG_MODULE } from "../../src/modules/activity-log"
+import type ActivityLogModuleService from "../../src/modules/activity-log/service"
+import { ActivityLogEventType } from "../../src/modules/activity-log/types"
+import { CANCELLATION_MODULE } from "../../src/modules/cancellation"
+import type CancellationModuleService from "../../src/modules/cancellation/service"
+import { CancellationCaseStatus } from "../../src/modules/cancellation/types"
 import { getAdminCancellationDetail } from "../../src/modules/cancellation/utils/admin-query"
 import { DUNNING_MODULE } from "../../src/modules/dunning"
 import { DunningEvents } from "../../src/modules/dunning/events"
@@ -36,7 +42,12 @@ import {
 } from "../../src/modules/subscription/events"
 import type SubscriptionModuleService from "../../src/modules/subscription/service"
 import { SubscriptionStatus } from "../../src/modules/subscription/types"
-import { cancelSubscriptionByCustomerWorkflow } from "../../src/workflows/cancel-subscription-by-customer"
+import {
+  cancelSubscriptionByCustomerWorkflow,
+  cancelSubscriptionWorkflow,
+  finalizeCancellationWorkflow,
+  recoverDunningFromCapturedPaymentWorkflow,
+} from "../../src/workflows"
 import { skipNextDeliveryWorkflow } from "../../src/workflows/skip-next-delivery"
 import { startDunningWorkflow } from "../../src/workflows/start-dunning"
 import { failAwaitingDunningAttempt } from "../../src/workflows/utils/fail-awaiting-dunning-attempt"
@@ -49,6 +60,7 @@ import {
 import { createCancellationCaseSeed } from "../helpers/cancellation-fixtures"
 import {
   createAdminAuthHeaders,
+  createDunningCaseSeed,
   createRenewalCycleSeed,
   defaultRetrySchedule,
 } from "../helpers/dunning-fixtures"
@@ -935,6 +947,353 @@ medusaIntegrationTestRunner({
             reason: LatePaymentCapturedReason.SUBSCRIPTION_TERMINAL,
           }),
         ])
+      })
+    })
+
+    describe("an admin cancellation while a retry charge is in flight", () => {
+      beforeEach(() => {
+        jest.restoreAllMocks()
+        jest.clearAllMocks()
+      })
+
+      const cancelBy = {
+        admin: async (container: MedusaContainer, seeded: SeededDunningCase) => {
+          await cancelSubscriptionWorkflow(container).run({
+            input: { id: seeded.subscription.id, reason: "Fraud review" },
+          })
+        },
+        finalize: async (container: MedusaContainer, seeded: SeededDunningCase) => {
+          const cancellationCase = await createCancellationCaseSeed(container, {
+            subscription_id: seeded.subscription.id,
+            reason: "Too expensive",
+          })
+
+          await finalizeCancellationWorkflow(container).run({
+            input: { cancellation_case_id: cancellationCase.id },
+          })
+        },
+      }
+
+      async function deliverInOrder(
+        container: MedusaContainer,
+        paymentId: string,
+        first: "subscriber" | "sweep"
+      ) {
+        const subscriber = () => deliverCapture(container, paymentId)
+        const sweep = () => reconcilePaidDunningCases(container)
+
+        for (const deliver of first === "subscriber" ? [subscriber, sweep] : [sweep, subscriber]) {
+          await deliver()
+        }
+
+        await subscriber()
+        await sweep()
+      }
+
+      it.each([
+        { flow: "admin" as const, first: "subscriber" as const },
+        { flow: "admin" as const, first: "sweep" as const },
+        { flow: "finalize" as const, first: "subscriber" as const },
+        { flow: "finalize" as const, first: "sweep" as const },
+      ])(
+        "the $flow cancellation closes the case and keeps its charge in flight; a capture reaching the $first first is reported once for a refund, recovering nothing",
+        async ({ flow, first }) => {
+          const container = getContainer()
+          const seeded = await seedDunningCase(container, `SUB-DUN-ADMIN-${flow}-${first}`)
+          const caseId = seeded.dunningCase.id
+          const [{ attempt, session }] = seeded.attempts
+
+          await cancelBy[flow](container, seeded)
+
+          const cancelled = await readDunningState(container, caseId)
+          const payment = await captureOnOrder(container, seeded.order.id, session.id)
+          const events = watchEvents(container)
+
+          await deliverInOrder(container, payment.id, first)
+
+          expect(cancelled.dunningCase).toMatchObject({
+            status: DunningCaseStatus.UNRECOVERED,
+            next_retry_at: null,
+            closed_at: expect.any(Date),
+          })
+          expect(cancelled.attempts).toEqual([
+            expect.objectContaining({ id: attempt.id, status: DunningAttemptStatus.PROCESSING }),
+          ])
+          expect(cancelled.subscription).toMatchObject({
+            status: SubscriptionStatus.CANCELLED,
+            next_renewal_at: null,
+          })
+          expect(await readDunningState(container, caseId)).toEqual({
+            ...cancelled,
+            attempts: [
+              {
+                ...cancelled.attempts[0],
+                status: DunningAttemptStatus.SUCCEEDED,
+                error_code: PaymentAttemptErrorCode.CAPTURED_AFTER_CLOSE,
+                error_message: expect.stringContaining(payment.id),
+                finished_at: expect.any(Date),
+                updated_at: expect.any(Date),
+                metadata: expect.objectContaining({
+                  late_payment_captured: expect.objectContaining({
+                    payment_id: payment.id,
+                    reason: LatePaymentCapturedReason.SUBSCRIPTION_TERMINAL,
+                  }),
+                }),
+              },
+            ],
+          })
+          expect(events(SubscriptionEvents.LATE_PAYMENT_CAPTURED).map((message) => message.data)).toEqual([
+            expect.objectContaining({
+              payment_id: payment.id,
+              dunning_case_id: caseId,
+              dunning_attempt_id: attempt.id,
+              reason: LatePaymentCapturedReason.SUBSCRIPTION_TERMINAL,
+              refund_amount: RENEWAL_AMOUNT,
+            }),
+          ])
+          expect(events(DunningEvents.RECOVERED)).toHaveLength(0)
+        }
+      )
+
+      it.each(["admin" as const, "finalize" as const])(
+        "the %s cancellation leaves a charge that fails afterwards closed as failed, with no reschedule and no event",
+        async (flow) => {
+          const container = getContainer()
+          const seeded = await seedDunningCase(container, `SUB-DUN-ADMIN-${flow}-LATE-FAIL`)
+          const [{ session }] = seeded.attempts
+
+          await cancelBy[flow](container, seeded)
+
+          const cancelled = await readDunningState(container, seeded.dunningCase.id)
+          const events = watchEvents(container)
+
+          await deliverFailure(container, session.id, { reason: "insufficient_funds" })
+          await deliverFailure(container, session.id, { reason: "insufficient_funds" })
+          await reconcilePaidDunningCases(container)
+
+          expect(cancelled.dunningCase.status).toEqual(DunningCaseStatus.UNRECOVERED)
+          expect(await readDunningState(container, seeded.dunningCase.id)).toEqual({
+            ...cancelled,
+            attempts: [
+              {
+                ...cancelled.attempts[0],
+                status: DunningAttemptStatus.FAILED,
+                error_code: "insufficient_funds",
+                error_message: expect.stringMatching(/after its dunning case had closed/),
+                finished_at: expect.any(Date),
+                updated_at: expect.any(Date),
+              },
+            ],
+          })
+          expect({
+            attempt_failed: events(DunningEvents.ATTEMPT_FAILED).length,
+            payment_failed: events(DunningEvents.PAYMENT_FAILED).length,
+            late_payment_captured: events(SubscriptionEvents.LATE_PAYMENT_CAPTURED).length,
+          }).toEqual({ attempt_failed: 0, payment_failed: 0, late_payment_captured: 0 })
+        }
+      )
+
+      describe("a case an earlier cancellation left open", () => {
+        async function seedOpenCaseOnCancelledSubscription(reference: string) {
+          const container = getContainer()
+          const seeded = await seedDunningCase(container, reference)
+
+          await container.resolve<SubscriptionModuleService>(SUBSCRIPTION_MODULE).updateSubscriptions({
+            id: seeded.subscription.id,
+            status: SubscriptionStatus.CANCELLED,
+            cancelled_at: new Date(),
+            next_renewal_at: null,
+          })
+
+          return seeded
+        }
+
+        it.each(["subscriber" as const, "sweep" as const])(
+          "is closed by the sweep, and a capture reaching the %s first is reported once for a refund, recovering nothing and writing no dates",
+          async (first) => {
+            const container = getContainer()
+            const seeded = await seedOpenCaseOnCancelledSubscription(`SUB-DUN-LEFT-OPEN-${first}`)
+            const caseId = seeded.dunningCase.id
+            const [{ attempt, session }] = seeded.attempts
+            const before = await readDunningState(container, caseId)
+            const payment = await captureOnOrder(container, seeded.order.id, session.id)
+            const events = watchEvents(container)
+
+            await deliverInOrder(container, payment.id, first)
+
+            const after = await readDunningState(container, caseId)
+
+            expect(after.dunningCase).toMatchObject({
+              status: DunningCaseStatus.UNRECOVERED,
+              next_retry_at: null,
+              closed_at: expect.any(Date),
+            })
+            expect(after.subscription).toEqual(before.subscription)
+            expect(after.cycle).toEqual(before.cycle)
+            expect(after.attempts).toEqual([
+              expect.objectContaining({
+                id: attempt.id,
+                status: DunningAttemptStatus.SUCCEEDED,
+                error_code: PaymentAttemptErrorCode.CAPTURED_AFTER_CLOSE,
+              }),
+            ])
+            expect(events(SubscriptionEvents.LATE_PAYMENT_CAPTURED).map((message) => message.data)).toEqual([
+              expect.objectContaining({
+                payment_id: payment.id,
+                dunning_case_id: caseId,
+                reason: LatePaymentCapturedReason.SUBSCRIPTION_TERMINAL,
+              }),
+            ])
+            expect(events(DunningEvents.RECOVERED)).toHaveLength(0)
+          }
+        )
+
+        it("is closed by the sweep while its order stays unpaid, keeping the charge in flight", async () => {
+          const container = getContainer()
+          const seeded = await seedOpenCaseOnCancelledSubscription("SUB-DUN-LEFT-OPEN-UNPAID")
+          const before = await readDunningState(container, seeded.dunningCase.id)
+
+          expect(await reconcilePaidDunningCases(container)).toMatchObject({ ended_cancelled: 1, recovered: 0 })
+          expect(await reconcilePaidDunningCases(container)).toMatchObject({ ended_cancelled: 0 })
+
+          const after = await readDunningState(container, seeded.dunningCase.id)
+
+          expect(after.dunningCase).toMatchObject({ status: DunningCaseStatus.UNRECOVERED, closed_at: expect.any(Date) })
+          expect(after.attempts).toEqual(before.attempts)
+          expect(after.subscription).toEqual(before.subscription)
+        })
+
+        it("is never recovered by a captured payment, which leaves the case for the sweep to close", async () => {
+          const container = getContainer()
+          const seeded = await seedOpenCaseOnCancelledSubscription("SUB-DUN-LEFT-OPEN-RECOVER")
+          const before = await readDunningState(container, seeded.dunningCase.id)
+          const payment = await captureOnOrder(container, seeded.order.id, seeded.attempts[0].session.id)
+
+          const { result } = await recoverDunningFromCapturedPaymentWorkflow(container).run({
+            input: { dunning_case_id: seeded.dunningCase.id, payment_id: payment.id },
+          })
+
+          expect(result).toMatchObject({ recovered: false, reason: "subscription_cancelled" })
+          expect(await readDunningState(container, seeded.dunningCase.id)).toEqual(before)
+        })
+      })
+
+      describe("when a write inside the cancellation fails", () => {
+        function failOnce<T extends object>(
+          service: T,
+          method: keyof T & string,
+          matches: (data: Record<string, unknown>) => boolean,
+          message: string
+        ) {
+          const original = (service[method] as (...args: unknown[]) => Promise<unknown>).bind(service)
+          let failed = false
+
+          jest.spyOn(service, method as never).mockImplementation(((data: Record<string, unknown>, ...rest: unknown[]) => {
+            if (!failed && matches(data ?? {})) {
+              failed = true
+
+              return Promise.reject(new Error(message))
+            }
+
+            return original(data, ...rest)
+          }) as never)
+
+          return { message }
+        }
+
+        async function withCaseMetadata(container: MedusaContainer, caseId: string) {
+          await container.resolve<DunningModuleService>(DUNNING_MODULE).updateDunningCases({
+            id: caseId,
+            metadata: { seeded_note: "kept" },
+          })
+        }
+
+        it.each([
+          {
+            flow: "admin" as const,
+            fails: "its activity log",
+            inject: (container: MedusaContainer) =>
+              failOnce(
+                container.resolve<ActivityLogModuleService>(ACTIVITY_LOG_MODULE),
+                "createSubscriptionLogs",
+                (data) => data.event_type === ActivityLogEventType.SUBSCRIPTION_CANCELED,
+                "the cancellation log could not be written"
+              ),
+          },
+          {
+            flow: "finalize" as const,
+            fails: "the cancellation case",
+            inject: (container: MedusaContainer) =>
+              failOnce(
+                container.resolve<CancellationModuleService>(CANCELLATION_MODULE),
+                "updateCancellationCases",
+                (data) => data.status === CancellationCaseStatus.CANCELED,
+                "the cancellation case could not be written"
+              ),
+          },
+        ])(
+          "leaves the case and its in-flight attempt as they were when the $flow cancellation fails writing $fails, and a second attempt closes the case",
+          async ({ flow, inject }) => {
+            const container = getContainer()
+            const seeded = await seedDunningCase(container, `SUB-DUN-ADMIN-${flow}-ROLLBACK`)
+
+            await withCaseMetadata(container, seeded.dunningCase.id)
+
+            const before = await readDunningState(container, seeded.dunningCase.id)
+            const failure = inject(container)
+
+            await expect(cancelBy[flow](container, seeded)).rejects.toMatchObject(failure)
+
+            const after = await readDunningState(container, seeded.dunningCase.id)
+
+            expect(after.dunningCase).toEqual({ ...before.dunningCase, updated_at: expect.any(Date) })
+            expect(after.subscription).toEqual({ ...before.subscription, updated_at: expect.any(Date) })
+            expect(after.attempts).toEqual(before.attempts)
+
+            await cancelBy[flow](container, seeded)
+
+            expect((await readDunningState(container, seeded.dunningCase.id)).dunningCase.status).toEqual(
+              DunningCaseStatus.UNRECOVERED
+            )
+          }
+        )
+
+        it("restores every case it closed when closing a later one fails", async () => {
+          const container = getContainer()
+          const dunningModule = container.resolve<DunningModuleService>(DUNNING_MODULE)
+          const seeded = await seedDunningCase(container, "SUB-DUN-ADMIN-ROLLBACK-TWO-CASES")
+          const second = await createDunningCaseSeed(container, {
+            subscription_id: seeded.subscription.id,
+            renewal_cycle_id: seeded.cycle.id,
+            renewal_order_id: seeded.order.id,
+            status: DunningCaseStatus.RETRY_SCHEDULED,
+          })
+
+          await withCaseMetadata(container, seeded.dunningCase.id)
+          await withCaseMetadata(container, second.id)
+
+          const before = await dunningModule.listDunningCases(
+            { subscription_id: seeded.subscription.id },
+            { order: { id: "ASC" } }
+          )
+          let closes = 0
+          const failure = failOnce(
+            dunningModule,
+            "updateDunningCases",
+            (data) => data.status === DunningCaseStatus.UNRECOVERED && ++closes === 2,
+            "the second case could not be closed"
+          )
+
+          await expect(cancelBy.admin(container, seeded)).rejects.toMatchObject(failure)
+
+          expect(closes).toEqual(2)
+          expect(
+            await dunningModule.listDunningCases(
+              { subscription_id: seeded.subscription.id },
+              { order: { id: "ASC" } }
+            )
+          ).toEqual(before.map((dunningCase) => ({ ...dunningCase, updated_at: expect.any(Date) })))
+        })
       })
     })
 

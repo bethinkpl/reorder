@@ -1206,7 +1206,7 @@ async function finalizeRecoveredRenewal(
 
     // Billing has already moved past the cycle this case was opened for, so the next cycle is
     // somebody else's and already correct: scheduling one here would delete it.
-    if (settlement.reason === "cycle_superseded") {
+    if (settlement.reason === "cycle_superseded" || settlement.reason === "subscription_cancelled") {
       return
     }
 

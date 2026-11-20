@@ -179,6 +179,10 @@ export async function settleAwaitingRenewalCycleUnderLock(
     return "not_awaiting"
   }
 
+  if (settlement.reason === "subscription_cancelled") {
+    return "subscription_terminal"
+  }
+
   if (settlement.reason === "cycle_superseded") {
     await renewalModule.updateRenewalCycles({
       id: cycle.id,

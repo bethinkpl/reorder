@@ -10,6 +10,7 @@ import {
   CLOSED_DUNNING_CASE_STATUSES,
   DunningAttemptStatus,
   DunningCaseStatus,
+  DunningRecoveryReason,
 } from "../modules/dunning/types"
 import {
   createDunningCorrelationId,
@@ -24,6 +25,10 @@ import {
   resolveAwaitingPaymentResolveMinHours,
   withOverdueAlertMarker,
 } from "../modules/renewal/utils/awaiting-payment-age"
+import { renewalSubscriptionLockKey } from "../modules/renewal/utils/lock-key"
+import { SUBSCRIPTION_MODULE } from "../modules/subscription"
+import type SubscriptionModuleService from "../modules/subscription/service"
+import { SubscriptionStatus } from "../modules/subscription/types"
 import { activateSubscriptionOnPaymentCaptured } from "../subscribers/activate-subscription-on-payment-captured"
 import { recoverDunningFromCapturedPaymentWorkflow } from "../workflows/recover-dunning-from-captured-payment"
 import { emitDunningEvent } from "../workflows/steps/emit-dunning-event"
@@ -35,6 +40,7 @@ import {
   applyRecordedDunningPaymentFailureUnderLock,
   emitDunningAttemptOutcomeEvents,
 } from "../workflows/utils/fail-awaiting-dunning-attempt"
+import { closeDunningCasesOnCancellation } from "../workflows/utils/close-dunning-cases-on-cancellation"
 import { findCapturedPaymentId } from "../workflows/utils/late-payment-capture"
 import { tryUnderLock } from "../workflows/utils/run-under-lock"
 import { dunningCaseLockKey } from "../modules/dunning/utils/lock-key"
@@ -54,6 +60,7 @@ const IDLE_DUNNING_CASE_STATUSES = ACTIVE_DUNNING_CASE_STATUSES.filter(
 
 type DunningCaseRecord = {
   id: string
+  subscription_id: string
   status: DunningCaseStatus
   renewal_order_id: string | null
 }
@@ -69,6 +76,7 @@ export type ReconcilePaidDunningCasesResult = {
   recovered: number
   unpaid: number
   failed: number
+  ended_cancelled: number
   late_captures: number
   stale_attempts_closed: number
   recorded_failures_applied: number
@@ -288,6 +296,46 @@ async function underCaseLock<T>(
   })
 
   return run.acquired ? run.result : null
+}
+
+/**
+ * A case left open on a cancelled subscription is closed as the cancellation closes it, so its
+ * charge, if any arrived, is reported for a refund by the closed-case pass instead of recovering
+ * the case. Null when the subscription is not cancelled.
+ */
+async function closeCaseOfCancelledSubscription(
+  container: MedusaContainer,
+  dunningCase: Pick<DunningCaseRecord, "id" | "subscription_id">
+): Promise<boolean | null> {
+  const subscriptionModule =
+    container.resolve<SubscriptionModuleService>(SUBSCRIPTION_MODULE)
+  const isCancelled = async () =>
+    (await subscriptionModule.retrieveSubscription(dunningCase.subscription_id)).status ===
+    SubscriptionStatus.CANCELLED
+
+  if (!(await isCancelled())) {
+    return null
+  }
+
+  const run = await tryUnderLock(
+    container,
+    renewalSubscriptionLockKey(dunningCase.subscription_id),
+    async () => {
+      if (!(await isCancelled())) {
+        return false
+      }
+
+      const closed = await closeDunningCasesOnCancellation(container, {
+        subscription_id: dunningCase.subscription_id,
+        recovery_reason: DunningRecoveryReason.SUBSCRIPTION_NOT_RETRYABLE,
+      })
+
+      return closed.some(({ id }) => id === dunningCase.id)
+    },
+    { wait_seconds: ALERT_LOCK_TIMEOUT_SECONDS, hold_seconds: CASE_LOCK_HOLD_SECONDS }
+  )
+
+  return run.acquired && run.result
 }
 
 type StaleRetryOutcome =
@@ -640,6 +688,7 @@ export async function reconcilePaidDunningCases(
     recovered: 0,
     unpaid: 0,
     failed: 0,
+    ended_cancelled: 0,
     late_captures: 0,
     stale_attempts_closed: 0,
     recorded_failures_applied: 0,
@@ -658,11 +707,19 @@ export async function reconcilePaidDunningCases(
   result.scanned = cases.length
 
   for (const dunningCase of cases) {
-    if (!dunningCase.renewal_order_id) {
-      continue
-    }
-
     try {
+      const endedCancelled = await closeCaseOfCancelledSubscription(container, dunningCase)
+
+      if (endedCancelled !== null) {
+        result.ended_cancelled += endedCancelled ? 1 : 0
+
+        continue
+      }
+
+      if (!dunningCase.renewal_order_id) {
+        continue
+      }
+
       const { pending } = await loadOrderAmounts(
         container,
         dunningCase.renewal_order_id
@@ -705,7 +762,7 @@ export default async function reconcilePaidDunningCasesJob(
         const result = await reconcilePaidDunningCases(container)
 
         logger.info(
-          `[${JOB_NAME}] scanned ${result.scanned} open dunning case(s), recovered ${result.recovered}, still unpaid ${result.unpaid}, late captures redelivered ${result.late_captures}, stale attempts closed ${result.stale_attempts_closed}, recorded payment failures applied ${result.recorded_failures_applied}, stale retries now awaiting their payment ${result.stale_retries_reparked}, stale retries parked ${result.stale_retries_parked}, failed ${result.failed} (batch ${BATCH_SIZE}) in ${Date.now() - startedAt}ms`
+          `[${JOB_NAME}] scanned ${result.scanned} open dunning case(s), recovered ${result.recovered}, still unpaid ${result.unpaid}, closed for a cancelled subscription ${result.ended_cancelled}, late captures redelivered ${result.late_captures}, stale attempts closed ${result.stale_attempts_closed}, recorded payment failures applied ${result.recorded_failures_applied}, stale retries now awaiting their payment ${result.stale_retries_reparked}, stale retries parked ${result.stale_retries_parked}, failed ${result.failed} (batch ${BATCH_SIZE}) in ${Date.now() - startedAt}ms`
         )
       },
       {

@@ -4,6 +4,7 @@ import {
   WorkflowResponse,
 } from "@medusajs/framework/workflows-sdk"
 import { acquireLockStep, releaseLockStep } from "@medusajs/medusa/core-flows"
+import { closeSubscriptionDunningStep } from "./steps/close-subscription-dunning"
 import { createSubscriptionLogEventStep } from "./steps/create-subscription-log-event"
 import { endAwaitingRenewalCyclesStep } from "./steps/end-awaiting-renewal-cycles"
 import { ensureNextRenewalCycleStep } from "./steps/ensure-next-renewal-cycle"
@@ -33,6 +34,15 @@ export const finalizeCancellationWorkflow = createWorkflow(
     }).config({
       name: "acquire-finalize-cancellation-renewal-lock",
     })
+
+    const closeDunningInput = transform({ scope, input }, function ({ scope, input }) {
+      return {
+        subscription_id: scope.subscription_id,
+        triggered_by: input.finalized_by ?? null,
+        reason: input.reason ?? null,
+      }
+    })
+    closeSubscriptionDunningStep(closeDunningInput)
 
     const result = finalizeCancellationStep(input)
     const endAwaitingInput = transform({ result, input }, function ({ result, input }) {

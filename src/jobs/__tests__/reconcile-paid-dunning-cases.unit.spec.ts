@@ -15,12 +15,14 @@ jest.mock("../../workflows/recover-dunning-from-captured-payment", () => ({
 import type { MedusaContainer } from "@medusajs/framework/types"
 import { DunningCaseStatus } from "../../modules/dunning/types"
 import { DunningLogEvents } from "../../modules/dunning/utils/observability"
+import { SubscriptionStatus } from "../../modules/subscription/types"
 import { reconcilePaidDunningCases } from "../reconcile-paid-dunning-cases"
 
 const recoverRun = jest.fn(async () => ({ result: {} }))
 
 type CaseStub = {
   id: string
+  subscription_id?: string
   renewal_order_id: string | null
   status?: DunningCaseStatus
 }
@@ -41,7 +43,9 @@ function buildContainer(options: {
   const listDunningCases = jest.fn(
     async (filters: CaseFilters, listOptions: { take: number }) => {
       if (Array.isArray(filters.status)) {
-        return cases.slice(0, listOptions.take)
+        return cases
+          .slice(0, listOptions.take)
+          .map((entry) => ({ subscription_id: `sub_${entry.id}`, ...entry }))
       }
 
       return cases
@@ -103,6 +107,12 @@ function buildContainer(options: {
         return { graph }
       }
 
+      if (key === "subscription") {
+        return {
+          retrieveSubscription: async (id: string) => ({ id, status: SubscriptionStatus.ACTIVE }),
+        }
+      }
+
       if (key === "locking") {
         return {
           execute: async (_key: string, job: () => Promise<unknown>) => await job(),
@@ -143,7 +153,7 @@ describe("reconcilePaidDunningCases", () => {
     expect(recoverRun).toHaveBeenCalledWith({
       input: { dunning_case_id: "dun_1", payment_id: null },
     })
-    expect(result).toEqual({ scanned: 1, recovered: 1, unpaid: 0, failed: 0, late_captures: 0, stale_attempts_closed: 0, recorded_failures_applied: 0, stale_retries_reparked: 0, stale_retries_parked: 0 })
+    expect(result).toEqual({ scanned: 1, recovered: 1, unpaid: 0, failed: 0, ended_cancelled: 0, late_captures: 0, stale_attempts_closed: 0, recorded_failures_applied: 0, stale_retries_reparked: 0, stale_retries_parked: 0 })
   })
 
   it("leaves a case whose order still owes money alone", async () => {
@@ -155,7 +165,7 @@ describe("reconcilePaidDunningCases", () => {
     const result = await reconcilePaidDunningCases(container)
 
     expect(recoverRun).not.toHaveBeenCalled()
-    expect(result).toEqual({ scanned: 1, recovered: 0, unpaid: 1, failed: 0, late_captures: 0, stale_attempts_closed: 0, recorded_failures_applied: 0, stale_retries_reparked: 0, stale_retries_parked: 0 })
+    expect(result).toEqual({ scanned: 1, recovered: 0, unpaid: 1, failed: 0, ended_cancelled: 0, late_captures: 0, stale_attempts_closed: 0, recorded_failures_applied: 0, stale_retries_reparked: 0, stale_retries_parked: 0 })
   })
 
   it("scans the oldest open cases only", async () => {
@@ -192,7 +202,7 @@ describe("reconcilePaidDunningCases", () => {
 
     const result = await reconcilePaidDunningCases(container)
 
-    expect(result).toEqual({ scanned: 2, recovered: 1, unpaid: 0, failed: 1, late_captures: 0, stale_attempts_closed: 0, recorded_failures_applied: 0, stale_retries_reparked: 0, stale_retries_parked: 0 })
+    expect(result).toEqual({ scanned: 2, recovered: 1, unpaid: 0, failed: 1, ended_cancelled: 0, late_captures: 0, stale_attempts_closed: 0, recorded_failures_applied: 0, stale_retries_reparked: 0, stale_retries_parked: 0 })
     expect(JSON.parse(errorLogs[0])).toMatchObject({
       dunning_case_id: "dun_1",
       alertable: true,
@@ -208,7 +218,7 @@ describe("reconcilePaidDunningCases", () => {
     const result = await reconcilePaidDunningCases(container)
 
     expect(recoverRun).not.toHaveBeenCalled()
-    expect(result).toEqual({ scanned: 1, recovered: 0, unpaid: 0, failed: 0, late_captures: 0, stale_attempts_closed: 0, recorded_failures_applied: 0, stale_retries_reparked: 0, stale_retries_parked: 0 })
+    expect(result).toEqual({ scanned: 1, recovered: 0, unpaid: 0, failed: 0, ended_cancelled: 0, late_captures: 0, stale_attempts_closed: 0, recorded_failures_applied: 0, stale_retries_reparked: 0, stale_retries_parked: 0 })
   })
 
   it("raises the overdue alert for every unpaid awaiting case, past the first page as well", async () => {

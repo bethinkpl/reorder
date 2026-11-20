@@ -4,6 +4,8 @@ import {
   WorkflowResponse,
 } from "@medusajs/framework/workflows-sdk"
 import { acquireLockStep, releaseLockStep } from "@medusajs/medusa/core-flows"
+import { DunningRecoveryReason } from "../modules/dunning/types"
+import { closeSubscriptionDunningStep } from "./steps/close-subscription-dunning"
 import { createSubscriptionLogEventStep } from "./steps/create-subscription-log-event"
 import { endAwaitingRenewalCyclesStep } from "./steps/end-awaiting-renewal-cycles"
 import { ensureNextRenewalCycleStep } from "./steps/ensure-next-renewal-cycle"
@@ -34,6 +36,16 @@ export const cancelSubscriptionWorkflow = createWorkflow(
     }).config({
       name: "acquire-cancel-subscription-renewal-lock",
     })
+
+    const closeDunningInput = transform({ input }, function ({ input }) {
+      return {
+        subscription_id: input.id,
+        triggered_by: input.triggered_by ?? null,
+        reason: input.reason ?? null,
+        recovery_reason: DunningRecoveryReason.SUBSCRIPTION_NOT_RETRYABLE,
+      }
+    })
+    closeSubscriptionDunningStep(closeDunningInput)
 
     const subscriptionChange = cancelSubscriptionStep(input)
     const endAwaitingInput = transform(

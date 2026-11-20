@@ -202,6 +202,12 @@ export async function recoverDunningFromCapturedPayment(
       reason,
     })
 
+  // A capture on a cancelled subscription is reconciled as a late payment, which asks the host for
+  // a refund once; recovering here would reopen billing on it instead.
+  if (subscription.status === SubscriptionStatus.CANCELLED) {
+    return answer(false, "subscription_cancelled")
+  }
+
   if (!dunningCase.renewal_order_id) {
     return answer(false, "missing_renewal_order")
   }
@@ -236,7 +242,7 @@ export async function recoverDunningFromCapturedPayment(
 
       // Billing already moved past this cycle, so the upcoming cycle is somebody else's and
       // re-deriving it here would delete the one that is actually due.
-      if (settlement.reason === "cycle_superseded") {
+      if (settlement.reason === "cycle_superseded" || settlement.reason === "subscription_cancelled") {
         return
       }
 

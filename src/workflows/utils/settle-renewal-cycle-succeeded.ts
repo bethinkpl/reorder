@@ -22,10 +22,11 @@ import {
 } from "../../modules/renewal/utils/observability"
 import { SUBSCRIPTION_MODULE } from "../../modules/subscription"
 import type SubscriptionModuleService from "../../modules/subscription/service"
-import type {
-  SubscriptionPendingUpdateData,
-  SubscriptionSourceSnapshot,
-  SubscriptionType,
+import {
+  type SubscriptionPendingUpdateData,
+  type SubscriptionSourceSnapshot,
+  SubscriptionStatus,
+  type SubscriptionType,
 } from "../../modules/subscription/types"
 import { addSubscriptionCadence } from "../../modules/subscription/utils/effective-next-renewal"
 import type { FrequencyInterval } from "../../common/types/frequency-interval"
@@ -162,7 +163,7 @@ export type SettleRenewalCycleSucceededInput = {
 export type SettleRenewalCycleSucceededResult = {
   settled: boolean
   /** Why nothing was written; `null` on the settling run. */
-  reason: "already_succeeded" | "cycle_superseded" | null
+  reason: "already_succeeded" | "cycle_superseded" | "subscription_cancelled" | null
   renewal_cycle: RenewalCycleRecord
   applied_pending_changes: RenewalAppliedPendingUpdateData | null
 }
@@ -234,6 +235,15 @@ export async function settleRenewalCycleSucceeded(
   const subscription = (await subscriptionModule.retrieveSubscription(
     input.subscription_id
   )) as SubscriptionType
+
+  if (subscription.status === SubscriptionStatus.CANCELLED) {
+    return {
+      settled: false,
+      reason: "subscription_cancelled",
+      renewal_cycle: cycle,
+      applied_pending_changes: appliedPendingChanges,
+    }
+  }
 
   const scheduledAnchor = new Date(cycle.scheduled_for)
   const currentNextRenewalAt = subscription.next_renewal_at

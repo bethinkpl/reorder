@@ -914,7 +914,7 @@ function readResolvedBillingAddress(
     : null
 }
 
-/** Exported for unit tests: covers the reused-order double-charge guard. */
+/** Exported for unit tests: covers reusing the order an aborted attempt created. */
 export async function createRenewalOrder(
   container: MedusaContainer,
   cycle: { id: string, generated_order_id?: string | null },
@@ -998,7 +998,17 @@ export async function createRenewalOrder(
     },
   })
 
-  const { total, pending } = await loadOrderAmounts(container, order.id)
+  return { order }
+}
+
+/** Exported for unit tests: covers the reused-order double-charge guard. */
+export async function createRenewalPaymentCollection(
+  container: MedusaContainer,
+  cycle: { id: string },
+  subscription: SubscriptionType,
+  orderId: string
+) {
+  const { pending } = await loadOrderAmounts(container, orderId)
 
   let paymentCollections: PaymentCollectionDTO[] | null = null
   let payment: RenewalOrderStepResult["payment"] = null
@@ -1022,7 +1032,7 @@ export async function createRenewalOrder(
     const paymentCollectionsResult =
       await createOrUpdateOrderPaymentCollectionWorkflow(container).run({
         input: {
-          order_id: order.id,
+          order_id: orderId,
           amount: pending,
         },
       })
@@ -1034,7 +1044,7 @@ export async function createRenewalOrder(
     if (!paymentCollection) {
       throw renewalErrors.renewalOrderCreationFailed(
         cycle.id,
-        `No payment collection was created for renewal order '${order.id}'`
+        `No payment collection was created for renewal order '${orderId}'`
       )
     }
 
@@ -1048,8 +1058,6 @@ export async function createRenewalOrder(
   }
 
   return {
-    order,
-    total,
     payment_collections: paymentCollections,
     payment,
   }
@@ -1550,7 +1558,7 @@ export const createRenewalOrderStep = createStep(
         }
       }
 
-      const { order, payment_collections, payment } = await createRenewalOrder(
+      const { order } = await createRenewalOrder(
         container,
         {
           id: context.renewal_cycle_id,
@@ -1585,9 +1593,45 @@ export const createRenewalOrderStep = createStep(
 
       return new StepResponse<RenewalOrderStepResult>({
         order,
-        payment_collections,
+        payment_collections: null,
         generated_order_id: order.id,
         resolved_source_snapshot: resolvedSourceSnapshot,
+        payment: null,
+      })
+    } catch (error) {
+      await recordRenewalFailure(container, context, error)
+      throw error
+    }
+  }
+)
+
+export const createRenewalPaymentCollectionStep = createStep(
+  "create-renewal-payment-collection",
+  async function (
+    input: {
+      context: RenewalExecutionContext
+      order_result: RenewalOrderStepResult
+    },
+    { container }
+  ) {
+    const { context, order_result } = input
+
+    if (!order_result.order) {
+      return new StepResponse<RenewalOrderStepResult>(order_result)
+    }
+
+    try {
+      const { payment_collections, payment } =
+        await createRenewalPaymentCollection(
+          container,
+          { id: context.renewal_cycle_id },
+          context.subscription,
+          order_result.order.id
+        )
+
+      return new StepResponse<RenewalOrderStepResult>({
+        ...order_result,
+        payment_collections,
         payment,
       })
     } catch (error) {
@@ -1790,9 +1834,9 @@ export const authorizeRenewalPaymentStep = createStep(
 
         // Capturing through the module writes no order transaction, which would
         // leave `summary.pending_difference` reporting the full total as still
-        // owed - the exact value `createRenewalOrder` reads to decide whether a
-        // reused order still needs charging. Without this the card gets charged
-        // again on any retry that runs before the provider webhook lands.
+        // owed - the exact value `createRenewalPaymentCollection` reads to decide
+        // whether a reused order still needs charging. Without this the card gets
+        // charged again on any retry that runs before the provider webhook lands.
         //
         // Runs even when the capture call above failed: an auto-capturing
         // provider (status CAPTURED straight out of `authorizePayment`) has

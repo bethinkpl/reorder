@@ -14,6 +14,7 @@ import {
   authorizeRenewalPaymentStep,
   buildRenewalOrderItemsStep,
   createRenewalOrderStep,
+  createRenewalPaymentCollectionStep,
   finalizeRenewalCycleStep,
   prepareRenewalCycleStep,
   ProcessRenewalCycleStepInput,
@@ -103,7 +104,7 @@ export const processRenewalCycleWorkflow = createWorkflow(
     )
     const billingAddress = resolveRenewalBillingAddress.getResult()
 
-    const orderResult = createRenewalOrderStep({
+    const createdOrder = createRenewalOrderStep({
       context,
       build_result: buildResult,
       extra_adjustments: extraAdjustments,
@@ -111,7 +112,18 @@ export const processRenewalCycleWorkflow = createWorkflow(
     })
 
     labelSubscriptionOrderAdjustmentsStep({
-      order_id: orderResult.generated_order_id,
+      order_id: createdOrder.generated_order_id,
+    })
+
+    const applyRenewalCredits = createHook("applyRenewalCredits", {
+      order_id: createdOrder.generated_order_id,
+      renewal_cycle_id: context.renewal_cycle_id,
+      subscription: context.subscription,
+    })
+
+    const orderResult = createRenewalPaymentCollectionStep({
+      context,
+      order_result: createdOrder,
     })
 
     const setPaymentSessionData = createHook(
@@ -177,6 +189,7 @@ export const processRenewalCycleWorkflow = createWorkflow(
         setPaymentSessionData,
         resolveRenewalAdjustments,
         resolveRenewalBillingAddress,
+        applyRenewalCredits,
       ],
     })
   }

@@ -110,8 +110,48 @@ processRenewalCycleWorkflow.hooks.setPaymentSessionData(
   data (`payment_method`, `off_session`, `confirm`, `capture_method`).
 - When a handler returns a value it **completely replaces** the default `data` — there is no
   merge, so include every field your payment provider needs.
-- When the renewal is skipped or the order total is `0`, no payment session is created;
-  `payment_collections` and `order` are `null` and the handler result is ignored.
+- When the renewal is skipped or nothing is owed on the order (its total is `0`, or
+  `applyRenewalCredits` covered it), no payment session is created; `payment_collections` is
+  `null` and the handler result is ignored.
+
+### `processRenewalCycleWorkflow` — `applyRenewalCredits`
+
+Lets the host app pay part or all of the renewal order before the saved payment method is
+charged — e.g. from the customer's gift cards or store credit. It runs after the order is
+created and linked to the subscription, and before its payment collection is created:
+
+```ts
+import { processRenewalCycleWorkflow } from "@bethinkpl/reorder/workflows"
+import { StepResponse } from "@medusajs/framework/workflows-sdk"
+
+processRenewalCycleWorkflow.hooks.applyRenewalCredits(
+  async ({ order_id, renewal_cycle_id, subscription }, { container }) => {
+    if (!order_id) {
+      return new StepResponse(undefined)
+    }
+
+    // add credit lines to the order (e.g. createOrderCreditLinesWorkflow) ...
+    return new StepResponse(undefined)
+  }
+)
+```
+
+- The handler receives the renewal `order_id` (`null` on a skipped cycle), the
+  `renewal_cycle_id`, and the `subscription`.
+- It has no result. The plugin re-reads the order's `summary.pending_difference` afterwards and
+  charges only that. When nothing is left, no payment collection is created, no saved payment
+  method is needed, and the cycle succeeds without a charge. When something is left, the
+  subscription's saved payment method is required: without one the cycle fails with
+  `missing renewal payment context`, **no dunning case is opened**, and the cycle is retried
+  daily. The plugin never reverses what the handler applied, so apply partial credit only when
+  `subscription.payment_context.payment_method_id` is set.
+- It also runs when a retry reuses the order a failed attempt created, so the handler must be
+  idempotent: skip credits the order already carries.
+- A thrown error fails the renewal before any charge — the workflow reverts and the cycle plus
+  its attempt are marked FAILED (retryable). The order stays on the cycle for the retry.
+- `run-dunning-retry` doesn't call it; it collects whatever is still owed on the same order. The
+  scheduler's daily retry of a FAILED cycle does call it, and that retry keeps running while a
+  dunning case is open, so the handler can apply credits to an order that is already in dunning.
 
 ### `processRenewalCycleWorkflow` — `resolveRenewalAdjustments`
 

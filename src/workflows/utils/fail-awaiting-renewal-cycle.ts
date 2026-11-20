@@ -121,9 +121,9 @@ async function findAttemptForSession(
 }
 
 /**
- * When another holder keeps the lock for the whole wait, the report is recorded on the attempt it
- * names for the awaiting-payment sweep to apply: the bus would only redeliver it within seconds,
- * and nothing else keeps a failure.
+ * When another holder keeps the lock for the whole wait, a failure report is recorded on the
+ * attempt it names for the awaiting-payment sweep to apply: the bus would only redeliver it within
+ * seconds, and nothing else keeps a failure.
  */
 export async function failAwaitingRenewalCycle(
   container: MedusaContainer,

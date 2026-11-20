@@ -464,9 +464,9 @@ async function findPaidStaleCharge(
 }
 
 /**
- * Nothing else settles it: a capture that met the run's lock, or never arrived, is not delivered
- * again. The paid order decides, since the attempt's session may be missing when the run could
- * not record it.
+ * Nothing else settles a paid processing cycle: a capture that met the run's lock, or never
+ * arrived, is not delivered again. The paid order decides, since the attempt's session may be
+ * missing when the run could not record it.
  */
 async function settlePaidProcessingCycle(
   container: MedusaContainer,

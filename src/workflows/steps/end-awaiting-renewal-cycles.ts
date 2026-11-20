@@ -10,8 +10,8 @@ export type EndAwaitingRenewalCyclesStepInput =
   EndAwaitingRenewalCyclesOnCancellationInput
 
 /**
- * Its own step so a failure in a later step restores them; a failure inside it is undone by the
- * helper itself.
+ * Its own step so a failure in a later step restores the ended cycles. A throwing step is not
+ * compensated, so a failure inside it is undone by the helper itself.
  */
 export const endAwaitingRenewalCyclesStep = createStep(
   "end-awaiting-renewal-cycles",

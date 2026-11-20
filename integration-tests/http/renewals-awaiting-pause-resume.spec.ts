@@ -312,6 +312,33 @@ medusaIntegrationTestRunner({
         await expectDunningLockFree(caseId)
         await expectRenewalLockFree(id)
       })
+
+      it("applies a pause offer on a subscription with an active dunning case and lets go of that case's lock", async () => {
+        const seeded = await seedDunningCase(getContainer(), "SUB-AWP-DUNNING-OFFER", {
+          status: DunningCaseStatus.RETRY_SCHEDULED,
+          attempts: [DunningAttemptStatus.FAILED],
+        })
+        const cancellationCase = await createCancellationCaseSeed(getContainer(), {
+          subscription_id: seeded.subscription.id,
+          status: CancellationCaseStatus.EVALUATING_RETENTION,
+        })
+
+        const response = await api.post(
+          `/admin/cancellations/${cancellationCase.id}/apply-offer`,
+          {
+            offer_type: RetentionOfferType.PAUSE_OFFER,
+            offer_payload: { pause_offer: { pause_cycles: 1, resume_at: null, note: null } },
+          },
+          await asAdmin()
+        )
+
+        expect(response.status).toEqual(200)
+        expect((await subscriptions().retrieveSubscription(seeded.subscription.id)).status).toEqual(
+          SubscriptionStatus.PAUSED
+        )
+        await expectDunningLockFree(seeded.dunningCase.id)
+        await expectRenewalLockFree(seeded.subscription.id)
+      })
     })
 
     describe("accepting a retention offer while a renewal charge awaits the provider's answer", () => {

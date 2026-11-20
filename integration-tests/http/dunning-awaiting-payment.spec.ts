@@ -13,6 +13,7 @@ import { DUNNING_MODULE } from "../../src/modules/dunning"
 import { DunningEvents } from "../../src/modules/dunning/events"
 import type DunningModuleService from "../../src/modules/dunning/service"
 import { DunningAttemptStatus, DunningCaseStatus } from "../../src/modules/dunning/types"
+import { RetryBlockedReason } from "../../src/modules/dunning/utils/retry-eligibility"
 import { RENEWAL_MODULE } from "../../src/modules/renewal"
 import type RenewalModuleService from "../../src/modules/renewal/service"
 import { RenewalAttemptStatus, RenewalCycleStatus } from "../../src/modules/renewal/types"
@@ -174,7 +175,7 @@ medusaIntegrationTestRunner({
         const storeUrl = `/store/customers/me/subscriptions/${subscriptionId}`
 
         await expect(api.post(`${storeUrl}/retry-payment`, {}, store)).rejects.toMatchObject({
-          response: { status: 409, data: { blocked_reason: "payment_in_progress" } },
+          response: { status: 409, data: { blocked_reason: RetryBlockedReason.RETRY_IN_PROGRESS } },
         })
         expect((await api.get(storeUrl, store)).data.subscription).toMatchObject({
           payment_status: "recovery_required",
@@ -182,7 +183,7 @@ medusaIntegrationTestRunner({
             dunning_case_id: caseId,
             state: DunningCaseStatus.RETRYING,
             retry_eligible: false,
-            retry_blocked_reason: "payment_in_progress",
+            retry_blocked_reason: RetryBlockedReason.RETRY_IN_PROGRESS,
           },
         })
         await expect(
@@ -240,6 +241,48 @@ medusaIntegrationTestRunner({
           recovery_reason: "subscription_cancelled_by_customer",
           closed_at: expect.anything(),
         })
+      })
+
+      it("never shows the storefront the admin's payment_in_progress reason: the list, the detail and the retry refusal all report a retry in progress", async () => {
+        const container = getContainer()
+        const customerId = "cus_dunning_awaiting_store_vocabulary"
+        const seeded = await seedDunningCase(container, "SUB-DUN-AWAIT-STORE-VOCAB", {
+          customer_id: customerId,
+        })
+        const admin = { headers: await createAdminAuthHeaders(container) }
+        const store = { headers: await createStoreCustomerHeaders(container, customerId) }
+        const storeUrl = `/store/customers/me/subscriptions/${seeded.subscription.id}`
+        const retryInProgress = {
+          state: DunningCaseStatus.RETRYING,
+          retry_eligible: false,
+          retry_blocked_reason: RetryBlockedReason.RETRY_IN_PROGRESS,
+        }
+
+        const list = await api.get("/store/customers/me/subscriptions", store)
+        const detail = await api.get(storeUrl, store)
+        const refusal = await api
+          .post(`${storeUrl}/retry-payment`, {}, store)
+          .catch((error) => error.response)
+
+        expect(list.data.subscriptions).toEqual([
+          expect.objectContaining({ payment_recovery: expect.objectContaining(retryInProgress) }),
+        ])
+        expect(detail.data.subscription.payment_recovery).toMatchObject(retryInProgress)
+        expect(refusal).toMatchObject({
+          status: 409,
+          data: {
+            blocked_reason: RetryBlockedReason.RETRY_IN_PROGRESS,
+            message: expect.stringContaining(`(${RetryBlockedReason.RETRY_IN_PROGRESS})`),
+          },
+        })
+
+        for (const body of [list.data, detail.data, refusal.data]) {
+          expect(JSON.stringify(body)).not.toMatch(/"payment_in_progress"|\(payment_in_progress\)/)
+        }
+
+        expect(
+          (await api.get(`/admin/dunning/${seeded.dunningCase.id}`, admin)).data.dunning_case
+        ).toMatchObject({ retry_blocked_reason: RetryBlockedReason.PAYMENT_IN_PROGRESS })
       })
 
       it.each([

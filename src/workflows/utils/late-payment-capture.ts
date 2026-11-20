@@ -336,7 +336,11 @@ async function reconcileUnderLock(
     (state.attempt_open && (terminal || state.parent_closed)) ||
     (state.attempt_unapplied && reason === LatePaymentCapturedReason.SUBSCRIPTION_TERMINAL)
 
-  if (attempt && (close || reason)) {
+  // An attempt that already failed is marked even when nothing is reported, so that a redelivery
+  // after a later cancellation can't report a capture that was applied in the meantime.
+  const failedBefore = state.attempt_unapplied && !state.attempt_open
+
+  if (attempt && (close || reason || failedBefore)) {
     await recordOnAttempt(container, charge, attempt, {
       close,
       marker: { payment_id: input.payment_id, reason, at: new Date().toISOString() },

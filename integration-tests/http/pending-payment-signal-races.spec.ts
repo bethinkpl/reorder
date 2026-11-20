@@ -892,6 +892,40 @@ medusaIntegrationTestRunner({
         ])
       })
 
+      it("never reports a capture of a failed renewal attempt that its dunning case applied, even when it is delivered again after the subscription was cancelled", async () => {
+        const container = getContainer()
+        const seeded = await seedDunningCase(container, "SUB-APPLIED-THEN-CANCELLED")
+        const renewalSession = await createPaymentSessionFixture(container, {
+          amount: RENEWAL_AMOUNT,
+          context: { renewal_cycle_id: seeded.cycle.id },
+        })
+
+        await createRenewalAttemptSeed(container, {
+          renewal_cycle_id: seeded.cycle.id,
+          status: RenewalAttemptStatus.FAILED,
+          error_code: "resolved_unpaid",
+          payment_reference: renewalSession.session.id,
+          order_id: seeded.order.id,
+        })
+
+        const payment = await captureOnOrder(container, seeded.order.id, renewalSession.session.id, {
+          linkCollection: true,
+        })
+        const emitted = watchEvents(container)
+
+        await deliverCapture(container, payment.id)
+
+        expect((await readDunningState(container, seeded.dunningCase.id)).dunningCase).toMatchObject({
+          status: DunningCaseStatus.RECOVERED,
+          recovery_reason: "customer_payment",
+        })
+
+        await cancelSubscriptionWorkflow(container).run({ input: { id: seeded.subscription.id } })
+        await deliverCapture(container, payment.id)
+
+        expect(emitted(SubscriptionEvents.LATE_PAYMENT_CAPTURED)).toHaveLength(0)
+      })
+
       it("reports one of two tracked captures landing together on one order as the surplus, never both", async () => {
         const container = getContainer()
         const seeded = await seedDunningCase(container, "SUB-OVERPAID-TWICE-TRACKED")

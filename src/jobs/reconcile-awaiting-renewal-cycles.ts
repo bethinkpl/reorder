@@ -285,6 +285,21 @@ async function failStaleAttemptUnderLock(
   return true
 }
 
+/** A redelivery that left the attempt processing would otherwise be redelivered every run. */
+async function assertAttemptClosed(
+  renewalModule: RenewalModuleService,
+  attemptId: string,
+  paymentId: string
+) {
+  const [attempt] = await renewalModule.listRenewalAttempts({ id: attemptId })
+
+  if (attempt?.status === RenewalAttemptStatus.PROCESSING) {
+    throw new Error(
+      `Captured payment '${paymentId}' of attempt '${attemptId}' was delivered again, but the attempt is still processing`
+    )
+  }
+}
+
 /**
  * An attempt a cancellation left processing on its closed cycle: a captured payment whose event
  * was lost is delivered again, and an attempt with no result past the minimum age is failed.
@@ -327,6 +342,7 @@ async function reconcileAttemptsOfClosedCycles(
 
         if (capturedPaymentId) {
           await activateSubscriptionOnPaymentCaptured(container, capturedPaymentId)
+          await assertAttemptClosed(renewalModule, attempt.id, capturedPaymentId)
           result.late_captures += 1
         } else if (
           isAwaitingPaymentOverdue(attempt.started_at, input.now, minHours) &&

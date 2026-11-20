@@ -316,6 +316,16 @@ async function reconcileAttemptsOfClosedCases(
 
         if (capturedPaymentId) {
           await activateSubscriptionOnPaymentCaptured(container, capturedPaymentId)
+
+          const [redelivered] = await dunningModule.listDunningAttempts({ id: attempt.id })
+
+          // Left processing, it would otherwise be delivered again on every run.
+          if (redelivered?.status === DunningAttemptStatus.PROCESSING) {
+            throw new Error(
+              `Captured payment '${capturedPaymentId}' of attempt '${attempt.id}' was delivered again, but the attempt is still processing`
+            )
+          }
+
           result.late_captures += 1
 
           continue

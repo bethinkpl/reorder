@@ -537,7 +537,7 @@ medusaIntegrationTestRunner({
         expect(entries({ event: AWAITING_PAYMENT_OVERDUE_EVENT })).toHaveLength(0)
       })
 
-      it("fails a charge left in flight on a closed cycle once it is past the minimum age with no signal, and leaves a younger one alone", async () => {
+      it("fails a charge left in flight on a closed cycle once it is past the minimum age with no signal, leaves a younger one alone, and still reports a capture that arrives after that once", async () => {
         const container = getContainer()
         const seeded = await seedAwaitingRenewal(container, { reference: "SUB-AWL-SWEEP-STALE" })
 
@@ -573,6 +573,24 @@ medusaIntegrationTestRunner({
           expect.objectContaining({ renewal_cycle_id: seeded.cycle.id, alertable: false }),
         ])
         expect(emitted(SubscriptionEvents.LATE_PAYMENT_CAPTURED)).toHaveLength(0)
+
+        const payment = await captureOnOrder(container, seeded.order.id, seeded.session.id)
+
+        await deliverCapture(container, payment.id)
+        await deliverCapture(container, payment.id)
+
+        expect((await readRenewalState(container, seeded)).attempts).toEqual([
+          expect.objectContaining({
+            status: RenewalAttemptStatus.SUCCEEDED,
+            error_code: CAPTURED_AFTER_CLOSE_ERROR_CODE,
+          }),
+        ])
+        expect(emitted(SubscriptionEvents.LATE_PAYMENT_CAPTURED).map((message) => message.data)).toEqual([
+          expect.objectContaining({
+            payment_id: payment.id,
+            reason: LatePaymentCapturedReason.SUBSCRIPTION_TERMINAL,
+          }),
+        ])
       })
 
       it("delivers again the lost capture of a charge left in flight on a closed cycle, reporting it once for a refund", async () => {

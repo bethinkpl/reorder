@@ -8,9 +8,13 @@ import {
   createOrUpdateOrderPaymentCollectionWorkflow,
   createPaymentSessionsWorkflow,
 } from "@medusajs/medusa/core-flows"
+import { DUNNING_MODULE } from "../../modules/dunning"
+import type DunningModuleService from "../../modules/dunning/service"
+import { DunningCaseStatus } from "../../modules/dunning/types"
 import { RENEWAL_MODULE } from "../../modules/renewal"
 import RenewalModuleService from "../../modules/renewal/service"
 import {
+  CHARGE_IN_FLIGHT_RENEWAL_CYCLE_STATUSES,
   RenewalAppliedPendingUpdateData,
   RenewalApprovalStatus,
   RenewalAttemptStatus,
@@ -47,6 +51,11 @@ import {
   loadOrderPaymentCollections,
 } from "../utils/customer-payment-in-progress"
 import { toISOStringOrNull } from "../utils/date-output"
+import {
+  ChargeSessionMarker,
+  isChargeUnderWay,
+  type RenewalChargeContext,
+} from "../utils/charge-session"
 import { recordOrderCaptureTransactions } from "../utils/record-order-capture-transactions"
 import { resolvePaymentCollection } from "../utils/resolve-payment-collection"
 import { settleRenewalCycleSucceeded } from "../utils/settle-renewal-cycle-succeeded"
@@ -1032,7 +1041,7 @@ function readProviderErrorCode(error: unknown) {
   return typeof code === "string" && code ? code : null
 }
 
-function createPaymentQualifiedRenewalError(
+export function createPaymentQualifiedRenewalError(
   error: unknown,
   source: PaymentQualifiedFailureSource,
   renewalOrderId: string
@@ -1073,7 +1082,7 @@ function getPaymentQualifiedFailureContext(
   }
 }
 
-async function recordRenewalFailure(
+export async function recordRenewalFailure(
   container: MedusaContainer,
   context: RenewalExecutionContext,
   error: unknown
@@ -1248,6 +1257,37 @@ export async function assertNoCustomerPaymentInProgress(
   )
 }
 
+export async function assertSubscriptionFreeToCharge(
+  container: MedusaContainer,
+  cycle: { id: string, subscription_id: string }
+) {
+  const renewalModule = container.resolve<RenewalModuleService>(RENEWAL_MODULE)
+  const [chargingCycle] = await renewalModule.listRenewalCycles(
+    {
+      subscription_id: cycle.subscription_id,
+      status: [...CHARGE_IN_FLIGHT_RENEWAL_CYCLE_STATUSES],
+    },
+    { select: ["id"], take: 1 }
+  )
+
+  if (chargingCycle) {
+    throw renewalErrors.alreadyProcessing(cycle.id)
+  }
+
+  const dunningModule = container.resolve<DunningModuleService>(DUNNING_MODULE)
+  const [activeCase] = await dunningModule.listDunningCases(
+    {
+      subscription_id: cycle.subscription_id,
+      status: { $nin: [DunningCaseStatus.RECOVERED, DunningCaseStatus.UNRECOVERED] },
+    },
+    { select: ["id"], take: 1 }
+  )
+
+  if (activeCase) {
+    throw renewalErrors.dunningOwnsCycle(cycle.id, activeCase.id)
+  }
+}
+
 export const prepareRenewalCycleStep = createStep(
   "prepare-renewal-cycle",
   async function (
@@ -1263,13 +1303,15 @@ export const prepareRenewalCycleStep = createStep(
 
     const cycle = await loadCycle(container, input.renewal_cycle_id)
 
-    if (cycle.status === RenewalCycleStatus.PROCESSING) {
+    if (CHARGE_IN_FLIGHT_RENEWAL_CYCLE_STATUSES.includes(cycle.status)) {
       throw renewalErrors.alreadyProcessing(cycle.id)
     }
 
     if (cycle.status === RenewalCycleStatus.SUCCEEDED) {
       throw renewalErrors.duplicateExecutionBlocked(cycle.id)
     }
+
+    await assertSubscriptionFreeToCharge(container, cycle)
 
     const subscription = await loadSubscription(container, cycle.subscription_id)
 
@@ -1393,6 +1435,12 @@ export const prepareRenewalCycleStep = createStep(
       const cycle = await renewalModule.retrieveRenewalCycle(context.renewal_cycle_id)
 
       if (cycle.status !== RenewalCycleStatus.PROCESSING) {
+        return
+      }
+
+      const attempt = await renewalModule.retrieveRenewalAttempt(context.attempt_id)
+
+      if (await isChargeUnderWay(container, attempt, ChargeSessionMarker.RENEWAL)) {
         return
       }
 
@@ -1551,6 +1599,38 @@ export const createRenewalPaymentCollectionStep = createStep(
   }
 )
 
+async function parkRenewalCycle(container: MedusaContainer, context: RenewalExecutionContext) {
+  const logger = container.resolve("logger")
+  const renewalModule = container.resolve<RenewalModuleService>(RENEWAL_MODULE)
+  const logContext = {
+    event: "renewal.awaiting_payment",
+    correlation_id: context.correlation_id,
+    renewal_cycle_id: context.renewal_cycle_id,
+    subscription_id: context.subscription_id,
+  }
+
+  try {
+    const cycle = await renewalModule.retrieveRenewalCycle(context.renewal_cycle_id)
+
+    if (cycle.status !== RenewalCycleStatus.PROCESSING) {
+      return
+    }
+
+    await renewalModule.updateRenewalCycles({
+      id: context.renewal_cycle_id,
+      status: RenewalCycleStatus.AWAITING_PAYMENT,
+    })
+
+    logRenewalEvent(logger, "info", logContext)
+  } catch (error) {
+    logRenewalEvent(logger, "error", {
+      ...logContext,
+      alertable: true,
+      message: `Renewal '${context.renewal_cycle_id}' submitted a charge the provider has yet to confirm, but couldn't be marked awaiting payment and stays processing: ${getRenewalErrorMessage(error)}`,
+    })
+  }
+}
+
 export const authorizeRenewalPaymentStep = createStep(
   "authorize-renewal-payment",
   async function (
@@ -1564,10 +1644,11 @@ export const authorizeRenewalPaymentStep = createStep(
     const { context, order_result, payment_session_data } = input
 
     if (!order_result.payment) {
-      return new StepResponse(void 0)
+      return new StepResponse({ pending: false })
     }
 
     const orderId = order_result.order?.id as string
+    const renewalModule = container.resolve<RenewalModuleService>(RENEWAL_MODULE)
 
     try {
       const data =
@@ -1577,6 +1658,23 @@ export const authorizeRenewalPaymentStep = createStep(
           confirm: true,
           capture_method: "automatic",
         }
+
+      const chargeContext: RenewalChargeContext = {
+        correlation_id: context.correlation_id,
+        trigger_type: context.trigger_type,
+        triggered_by: context.triggered_by,
+        reason: context.reason,
+        operation_started_at: context.operation_started_at,
+        scheduled_for: context.scheduled_for,
+        previous_state: context.cycle_previous_state,
+        source_snapshot: order_result.resolved_source_snapshot,
+      }
+
+      await renewalModule.updateRenewalAttempts({
+        id: context.attempt_id,
+        order_id: orderId,
+        metadata: { charge_context: chargeContext },
+      })
 
       let paymentSessionResult: { result: PaymentSessionRecord }
 
@@ -1589,7 +1687,10 @@ export const authorizeRenewalPaymentStep = createStep(
             data,
             // What tells a later renewal tick, and the dunning retry, that this session is one of
             // ours rather than one the customer opened.
-            context: { renewal_cycle_id: context.renewal_cycle_id },
+            context: {
+              renewal_cycle_id: context.renewal_cycle_id,
+              [ChargeSessionMarker.RENEWAL]: context.attempt_id,
+            },
           },
         })
       } catch (error) {
@@ -1597,6 +1698,17 @@ export const authorizeRenewalPaymentStep = createStep(
           error,
           "payment_session",
           orderId
+        )
+      }
+
+      try {
+        await renewalModule.updateRenewalAttempts({
+          id: context.attempt_id,
+          payment_reference: paymentSessionResult.result.id,
+        })
+      } catch (error) {
+        container.resolve("logger").warn(
+          `Failed to record the payment session on renewal attempt '${context.attempt_id}': ${getRenewalErrorMessage(error)}`
         )
       }
 
@@ -1660,13 +1772,17 @@ export const authorizeRenewalPaymentStep = createStep(
             orderId
           )
         }
+      } else {
+        await parkRenewalCycle(container, context)
+
+        return new StepResponse({ pending: true })
       }
     } catch (error) {
       await recordRenewalFailure(container, context, error)
       throw error
     }
 
-    return new StepResponse(void 0)
+    return new StepResponse({ pending: false })
   }
 )
 
@@ -1676,11 +1792,21 @@ export const finalizeRenewalCycleStep = createStep(
     input: {
       context: RenewalExecutionContext
       order_result: RenewalOrderStepResult
+      authorization: { pending: boolean }
     },
     { container }
   ) {
     const { context, order_result } = input
     const generatedOrderId = order_result.generated_order_id
+
+    if (input.authorization.pending) {
+      return new StepResponse({
+        renewal_cycle: await loadCycle(container, context.renewal_cycle_id),
+        subscription_id: context.subscription_id,
+        attempt_id: context.attempt_id,
+        generated_order_id: generatedOrderId,
+      })
+    }
 
     try {
       const { renewal_cycle: updatedCycle } = await settleRenewalCycleSucceeded(

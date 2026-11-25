@@ -1,4 +1,7 @@
-import { DunningCaseStatus } from "../types"
+import {
+  CHARGE_IN_FLIGHT_DUNNING_CASE_STATUSES,
+  DunningCaseStatus,
+} from "../types"
 import { dunningErrors } from "./errors"
 import {
   CHARGEABLE_SUBSCRIPTION_STATUSES,
@@ -83,7 +86,7 @@ export function resolveRetryEligibility(input: RetryEligibilityInput): RetryElig
     return blocked(RetryBlockedReason.NO_ACTIVE_CASE)
   }
 
-  if (dunningCase.status === DunningCaseStatus.RETRYING) {
+  if (CHARGE_IN_FLIGHT_DUNNING_CASE_STATUSES.includes(dunningCase.status)) {
     return blocked(RetryBlockedReason.RETRY_IN_PROGRESS)
   }
 

@@ -2,6 +2,7 @@ import { createStep, StepResponse } from "@medusajs/framework/workflows-sdk"
 import { RENEWAL_MODULE } from "../../modules/renewal"
 import type RenewalModuleService from "../../modules/renewal/service"
 import {
+  CHARGE_IN_FLIGHT_RENEWAL_CYCLE_STATUSES,
   RenewalApprovalStatus,
   RenewalCycleStatus,
 } from "../../modules/renewal/types"
@@ -233,7 +234,7 @@ export const ensureNextRenewalCycleStep = createStep(
     )
 
     if (
-      existingCycle.status === RenewalCycleStatus.PROCESSING ||
+      CHARGE_IN_FLIGHT_RENEWAL_CYCLE_STATUSES.includes(existingCycle.status) ||
       existingCycle.status === RenewalCycleStatus.SUCCEEDED
     ) {
       return new StepResponse<

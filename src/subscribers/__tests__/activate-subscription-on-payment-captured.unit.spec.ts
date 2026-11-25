@@ -30,6 +30,13 @@ jest.mock("../../workflows/recover-dunning-from-captured-payment", () => ({
   }),
 }))
 
+const reconcileChargeRun = jest.fn(async (_input: unknown) => ({ actions: [], reported: false }))
+
+jest.mock("../../workflows/utils/in-flight-charge", () => ({
+  ...jest.requireActual("../../workflows/utils/in-flight-charge"),
+  reconcileCharge: (_container: unknown, input: unknown) => reconcileChargeRun(input),
+}))
+
 type Staged = Record<string, unknown[]>
 
 type UpdateCall = { id: string, status?: unknown, payment_context?: unknown }
@@ -40,7 +47,7 @@ const activationCall = { id: "sub_1", status: SubscriptionStatus.ACTIVE }
 
 function defaultStaged(): Staged {
   return {
-    payment: [{ id: "pay_1", payment_collection_id: "paycol_1" }],
+    payment: [{ id: "pay_1", payment_collection_id: "paycol_1", payment_session: { context: null } }],
     cart_payment_collection: [{ cart_id: "cart_1" }],
     subscription: [
       {
@@ -455,6 +462,32 @@ describe("activateSubscriptionOnPaymentCaptured", () => {
 
     expect(recoverDunningRun).not.toHaveBeenCalled()
     expect(errorLogs).toHaveLength(1)
+  })
+
+  it("still lands the new card when reconciling the renewal charge throws", async () => {
+    const captured: UpdateCall[] = []
+    const errorLogs: string[] = []
+    const staged = defaultStaged()
+    stagedSubscription(staged).status = SubscriptionStatus.ACTIVE
+    staged.payment = [
+      { id: "pay_1", payment_collection_id: "paycol_1", payment_session: { context: { renewal_attempt_id: "renatt_1" } } },
+    ]
+    reconcileChargeRun.mockRejectedValueOnce(new Error("boom"))
+
+    await activateSubscriptionOnPaymentCaptured(
+      buildContainer({
+        staged,
+        paymentMethods: [{ id: "pm_new", data: { created: 200 } }],
+        captured,
+        errorLogs,
+      }),
+      "pay_1"
+    )
+
+    expect(captured).toEqual([expect.objectContaining({ id: "sub_1" })])
+    expect(errorLogs.map((line) => JSON.parse(line))).toEqual([
+      expect.objectContaining({ event: "charge_reconcile_failed", alertable: true, message: "boom" }),
+    ])
   })
 
   it("is idempotent when the resolved method already matches the stored context", async () => {

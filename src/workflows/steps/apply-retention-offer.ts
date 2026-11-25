@@ -21,6 +21,7 @@ import { DunningCaseStatus } from "../../modules/dunning/types"
 import { SUBSCRIPTION_MODULE } from "../../modules/subscription"
 import type SubscriptionModuleService from "../../modules/subscription/service"
 import { SubscriptionStatus } from "../../modules/subscription/types"
+import { assertNoChargeInFlight } from "../utils/assert-no-charge-in-flight"
 import { CancellationSubscriptionDisplayRecord } from "./shared-cancellation-log"
 
 const APPLIABLE_CANCELLATION_CASE_STATUSES = new Set<CancellationCaseStatus>([
@@ -270,6 +271,10 @@ export const applyRetentionOfferStep = createStep(
       activeDunningCase,
       offerType: input.offer_type,
     })
+
+    if (input.offer_type === RetentionOfferType.PAUSE_OFFER) {
+      await assertNoChargeInFlight(container, subscription.id)
+    }
 
     const appliedAt = new Date()
     const finalCaseStatus =

@@ -83,6 +83,7 @@ const activeDunningStatuses = new Set([
   "open",
   "retry_scheduled",
   "retrying",
+  "awaiting_payment",
   "awaiting_manual_resolution",
 ])
 

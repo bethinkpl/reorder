@@ -82,6 +82,9 @@ function buildContainer(options: BuildContainerOptions = {}) {
 
   const dunningModule = {
     retrieveDunningCase: jest.fn(async () => dunningCase),
+    retrieveDunningAttempt: jest.fn(async (id: string) =>
+      (options.attempts ?? []).find((attempt) => attempt.id === id)
+    ),
     listDunningAttempts,
     updateDunningCases,
     createDunningAttempts,
@@ -149,6 +152,7 @@ function buildContainer(options: BuildContainerOptions = {}) {
     createDunningAttempts,
     updateDunningAttempts,
     authorizePaymentSession,
+    logger,
   }
 }
 
@@ -814,5 +818,155 @@ describe("runDunningRetry - parking instead of churning", () => {
       next_retry_at: null,
       recovery_reason: "payment_recovered",
     })
+  })
+
+  it("leaves the case awaiting a charge the provider has yet to answer", async () => {
+    const { container, updateDunningCases, updateDunningAttempts, authorizePaymentSession } =
+      buildContainer()
+    authorizePaymentSession.mockResolvedValue(null)
+
+    const response = await runDunningRetry(container, {
+      dunning_case_id: "dun_1",
+    })
+
+    expect(response.output).toMatchObject({
+      outcome: "awaiting_payment",
+      dunning_attempt_id: "dunatt_1",
+      attempt_counted: true,
+      error_code: null,
+      next_retry_at: null,
+    })
+    expect(
+      caseUpdate(updateDunningCases, DunningCaseStatus.AWAITING_PAYMENT)
+    ).toMatchObject({ id: "dun_1" })
+    expect(
+      caseUpdate(updateDunningCases, DunningCaseStatus.RETRY_SCHEDULED)
+    ).toBeUndefined()
+    expect(updateDunningAttempts.mock.calls).toEqual([
+      [{ id: "dunatt_1", payment_reference: "payses_1" }],
+    ])
+  })
+
+  it("keeps the case retrying when it can't be marked as awaiting the charge", async () => {
+    const { container, updateDunningCases, authorizePaymentSession, logger } =
+      buildContainer()
+    authorizePaymentSession.mockResolvedValue(null)
+    const writeCase = updateDunningCases.getMockImplementation()!
+    updateDunningCases.mockImplementation(async (payload) => {
+      if (payload.status === DunningCaseStatus.AWAITING_PAYMENT) {
+        throw new Error("case write failed")
+      }
+
+      return writeCase(payload)
+    })
+
+    const response = await runDunningRetry(container, {
+      dunning_case_id: "dun_1",
+    })
+
+    expect(response.output.outcome).toBe("awaiting_payment")
+    expect(
+      caseUpdate(updateDunningCases, DunningCaseStatus.RETRY_SCHEDULED)
+    ).toBeUndefined()
+    expect(logger.error).toHaveBeenCalledTimes(1)
+    expect(JSON.parse(logger.error.mock.calls[0][0])).toMatchObject({
+      event: "dunning.retry",
+      dunning_case_id: "dun_1",
+      alertable: true,
+    })
+  })
+
+  describe("with a failure the provider reported for its pending charge", () => {
+    const pendingAttempt = {
+      id: "dunatt_7",
+      dunning_case_id: "dun_1",
+      attempt_no: 2,
+      status: DunningAttemptStatus.PROCESSING,
+      payment_reference: "payses_7",
+      metadata: null,
+    }
+
+    const reportedFailure = (code: string) => ({
+      dunning_attempt_id: "dunatt_7",
+      session_id: "payses_7",
+      code,
+      message: "The provider declined the charge",
+    })
+
+    it("reschedules on the reported attempt without charging or spending another slot", async () => {
+      const {
+        container,
+        updateDunningCases,
+        updateDunningAttempts,
+        createDunningAttempts,
+      } = buildContainer({
+        attemptCount: 2,
+        caseStatus: DunningCaseStatus.RETRYING,
+        attempts: [pendingAttempt],
+      })
+
+      const response = await runDunningRetry(container, {
+        dunning_case_id: "dun_1",
+        reported_failure: reportedFailure("insufficient_funds"),
+      })
+
+      expect(response.output).toMatchObject({
+        outcome: "retry_scheduled",
+        dunning_attempt_id: "dunatt_7",
+        attempt_no: 2,
+        attempt_counted: true,
+        error_code: "insufficient_funds",
+      })
+      expect(createDunningAttempts).not.toHaveBeenCalled()
+      expect(createPaymentSessionsWorkflow).not.toHaveBeenCalled()
+      expect(
+        caseUpdate(updateDunningCases, DunningCaseStatus.RETRYING)
+      ).toBeUndefined()
+      expect(updateDunningAttempts).toHaveBeenCalledWith(
+        expect.objectContaining({
+          id: "dunatt_7",
+          status: DunningAttemptStatus.FAILED,
+          payment_reference: "payses_7",
+        })
+      )
+
+      const scheduled = caseUpdate(
+        updateDunningCases,
+        DunningCaseStatus.RETRY_SCHEDULED
+      )
+
+      expect(
+        scheduled.next_retry_at.getTime() - scheduled.last_attempt_at.getTime()
+      ).toBe(retrySchedule.intervals[2] * 60 * 1000)
+    })
+
+    it.each([
+      [
+        "a charge the provider canceled",
+        "canceled",
+        DunningCaseStatus.RETRY_SCHEDULED,
+        { outcome: "retry_scheduled", attempt_no: 2 },
+        { next_retry_at: expect.any(Date), recovery_reason: null },
+      ],
+    ])(
+      "answers a reported %s by its code alone",
+      async (_label, code, caseStatus, expectedOutput, expectedCase) => {
+        const { container, updateDunningCases } = buildContainer({
+          attemptCount: 2,
+          caseStatus: DunningCaseStatus.AWAITING_PAYMENT,
+          attempts: [pendingAttempt],
+        })
+
+        const response = await runDunningRetry(container, {
+          dunning_case_id: "dun_1",
+          reported_failure: reportedFailure(code),
+        })
+
+        expect(response.output).toMatchObject(expectedOutput)
+        expect(caseUpdate(updateDunningCases, caseStatus)).toMatchObject(
+          expectedCase
+        )
+      }
+    )
   })
 })

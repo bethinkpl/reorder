@@ -281,6 +281,13 @@ The job:
 
 The scheduler does not implement a separate business flow. It reuses the same core retry logic as manual `retry-now`.
 
+`src/jobs/reconcile-in-flight-charges.ts` runs every 30 minutes for renewal and dunning charges alike:
+- it reconciles `processing` attempts that started at least 10 minutes ago, and the newest attempt of every in-flight cycle or case (of a `processing` cycle or `retrying` case only once that attempt is 10 minutes old), without waiting for a lock
+- it settles a charge whose order was paid, ends the charge of a cancelled or terminal subscription, finishes a failure that was only partly recorded on a charge awaiting payment, closes an attempt that got no payment signal, and raises an alertable log once per attempt after `RENEWAL_AWAITING_PAYMENT_ALERT_HOURS` (default `96`)
+- the job lock assumes `locking.execute` renews its lease (Medusa >= 2.22 with Redis); on older hosts two pods may sweep at once, which at worst doubles an overdue alert
+
+A retry whose charge the provider confirms later sets the case to `awaiting_payment` and the run returns `outcome: "awaiting_payment"`. The scheduler counts it separately from failures. A capture settles the case through the recovery workflow, a failure runs the retry's decline branch. `retrying` and `awaiting_payment` count as in flight (`CHARGE_IN_FLIGHT_DUNNING_CASE_STATUSES`).
+
 ## 8. Concurrency and Operational Hardening
 
 The current implementation hardens both scheduler and manual retry execution.

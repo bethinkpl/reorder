@@ -73,7 +73,7 @@ medusaIntegrationTestRunner({
         )
 
         expect(response.subscription.id).toEqual(subscription.id)
-        expect(response.subscription.shipping_address.city).toEqual("Warszawa")
+        expect(response.subscription.shipping_address?.city).toEqual("Warszawa")
       })
 
       it("pauses and resumes a subscription", async () => {

@@ -316,6 +316,17 @@ It is responsible for:
 - delegating actual execution to the shared core renewal workflow
 - attaching a manual-operation correlation ID used by structured operational logging
 
+### Charges That Confirm Later
+
+When the provider answers `authorizePaymentSession` with `null`, the run keeps the charge's order and attempt, sets the cycle to `awaiting_payment` and returns without settling. `awaiting_payment` and `processing` count as in flight (`CHARGE_IN_FLIGHT_RENEWAL_CYCLE_STATUSES`).
+
+- the attempt's `metadata.charge_context` holds what settling or failing needs later, and the payment session carries `context.renewal_attempt_id`
+- `payment.captured` and failed or canceled `payment.webhook_received` events, and the sweep, all end in `reconcileCharge`, which takes `renewal:subscription:<subscription_id>` and applies one decision table
+- a capture settles the cycle, a failure records a renewal failure and opens dunning, as on the synchronous path
+- a run that submitted its charge is never marked failed by compensation
+- a cycle is refused while another cycle of the subscription is in flight, and while the subscription has an active dunning case
+- a cycle ended by a terminal subscription is written `failed`, which is what a host releasing credits applied by `applyRenewalCredits` should react to
+
 ## 7. Scheduled Processing
 
 `Renewals` are processed by the scheduled job:
@@ -330,6 +341,8 @@ The job:
 - emits a structured run summary with counters and duration
 
 The scheduler does not implement a separate business flow. It reuses the same core execution logic as manual force.
+
+`src/jobs/reconcile-in-flight-charges.ts` also runs every 30 minutes, see the dunning architecture.
 
 ## 8. Concurrency and Operational Hardening
 

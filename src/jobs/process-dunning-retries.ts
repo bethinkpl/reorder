@@ -116,6 +116,7 @@ async function runJob(container: MedusaContainer) {
     let failed = 0
     let blocked = 0
     let parked = 0
+    let awaiting = 0
     let attemptTotal = 0
     let recoveredTtrTotal = 0
     let recoveredTtrCount = 0
@@ -180,6 +181,8 @@ async function runJob(container: MedusaContainer) {
           unrecovered += 1
         } else if (outcome === "awaiting_manual_resolution") {
           parked += 1
+        } else if (outcome === "awaiting_payment") {
+          awaiting += 1
         } else if (outcome === "blocked") {
           blocked += 1
         } else {
@@ -218,6 +221,7 @@ async function runJob(container: MedusaContainer) {
       metadata: {
         raw_count: rawCount,
         parked_count: parked,
+        awaiting_count: awaiting,
       },
     })
   } catch (error) {

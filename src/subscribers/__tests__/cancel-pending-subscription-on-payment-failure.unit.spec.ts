@@ -1,8 +1,17 @@
 import type { MedusaContainer } from "@medusajs/framework/types"
 import { ContainerRegistrationKeys, Modules, PaymentActions } from "@medusajs/framework/utils"
+import { DUNNING_MODULE } from "../../modules/dunning"
+import { RENEWAL_MODULE } from "../../modules/renewal"
 import { SUBSCRIPTION_MODULE } from "../../modules/subscription"
 import { SubscriptionStatus } from "../../modules/subscription/types"
 import { cancelPendingSubscriptionOnPaymentFailure } from "../cancel-pending-subscription-on-payment-failure"
+
+const reconcileChargeRun = jest.fn(async (_input: unknown) => ({ actions: [], reported: false }))
+
+jest.mock("../../workflows/utils/in-flight-charge", () => ({
+  ...jest.requireActual("../../workflows/utils/in-flight-charge"),
+  reconcileCharge: (_container: unknown, input: unknown) => reconcileChargeRun(input),
+}))
 
 type Staged = Record<string, unknown[]>
 
@@ -31,9 +40,13 @@ function buildContainer(options: {
   staged: Staged
   action: string
   sessionId?: string | null
+  reason?: string
   captured: UpdateCall[]
+  logs?: { level: string, line: string }[]
 }) {
-  const { staged, action, sessionId = "payses_1", captured } = options
+  const { staged, action, sessionId = "payses_1", reason, captured, logs = [] } = options
+  const byReference = (entity: string) => async ({ payment_reference }: { payment_reference: string }) =>
+    (staged[entity] ?? []).filter((row) => (row as { payment_reference: string }).payment_reference === payment_reference)
 
   return {
     resolve(key: string) {
@@ -47,7 +60,7 @@ function buildContainer(options: {
         return {
           getWebhookActionAndData: async () => ({
             action,
-            data: sessionId ? { session_id: sessionId } : {},
+            data: sessionId ? { session_id: sessionId, reason } : {},
           }),
         }
       }
@@ -62,8 +75,20 @@ function buildContainer(options: {
         }
       }
 
+      if (key === RENEWAL_MODULE) {
+        return { listRenewalAttempts: byReference("renewal_attempt") }
+      }
+
+      if (key === DUNNING_MODULE) {
+        return { listDunningAttempts: byReference("dunning_attempt") }
+      }
+
       if (key === "logger") {
-        return { info: () => {}, warn: () => {} }
+        return {
+          info: () => {},
+          warn: (line: string) => logs.push({ level: "warn", line }),
+          error: (line: string) => logs.push({ level: "error", line }),
+        }
       }
 
       throw new Error(`Unexpected resolve('${key}')`)
@@ -152,5 +177,83 @@ describe("cancelPendingSubscriptionOnPaymentFailure", () => {
     await run({ staged, action: PaymentActions.CANCELED, captured })
 
     expect(captured).toEqual([])
+  })
+
+  describe("a charge the plugin made", () => {
+    beforeEach(() => {
+      reconcileChargeRun.mockReset()
+      reconcileChargeRun.mockResolvedValue({ actions: [], reported: false })
+    })
+
+    const markedStaged = () => ({
+      ...defaultStaged(),
+      payment_session: [
+        { id: "payses_1", payment_collection_id: "paycol_1", context: { renewal_attempt_id: "renatt_1" } },
+      ],
+    })
+
+    it.each([
+      [PaymentActions.CANCELED, undefined, "canceled"],
+      [PaymentActions.FAILED, "insufficient_funds", "insufficient_funds"],
+    ])("hands '%s' (%s) to the reconcile as a failure coded '%s' instead of the pending path", async (action, reason, code) => {
+      const captured: UpdateCall[] = []
+
+      await run({ staged: markedStaged(), action, reason, captured })
+
+      expect(reconcileChargeRun).toHaveBeenCalledWith({
+        kind: "renewal",
+        attempt_id: "renatt_1",
+        signal: "failed",
+        failure: { session_id: "payses_1", code, message: expect.any(String) },
+      })
+      expect(captured).toEqual([])
+    })
+
+    it.each([
+      ["renewal", { renewal_attempt: [{ id: "renatt_1", payment_reference: "payses_1" }] }, "renatt_1"],
+      ["dunning", { dunning_attempt: [{ id: "dunatt_1", payment_reference: "payses_1" }] }, "dunatt_1"],
+    ])("finds a %s attempt by its payment reference once the session is gone", async (kind, attempts, attemptId) => {
+      await run({
+        staged: { ...defaultStaged(), payment_session: [], ...attempts },
+        action: PaymentActions.FAILED,
+        captured: [],
+      })
+
+      expect(reconcileChargeRun).toHaveBeenCalledWith(
+        expect.objectContaining({ kind, attempt_id: attemptId, signal: "failed" })
+      )
+    })
+
+    const runFailing = (error: unknown, logs: { level: string, line: string }[]) => {
+      reconcileChargeRun.mockRejectedValueOnce(error)
+
+      return cancelPendingSubscriptionOnPaymentFailure(
+        buildContainer({ staged: markedStaged(), action: PaymentActions.FAILED, captured: [], logs }),
+        webhookEvent as never
+      )
+    }
+
+    it.each([
+      ["a busy lock", "warn", false, new Error("Failed to acquire lock for key \"renewal:subscription:sub_1\"")],
+      ["any other error", "error", true, new Error("boom")],
+    ])("on %s logs at %s and rethrows for the bus to retry", async (_, level, alertable, error) => {
+      const logs: { level: string, line: string }[] = []
+
+      await expect(runFailing(error, logs)).rejects.toBe(error)
+
+      expect(logs).toHaveLength(1)
+      expect(logs[0]!.level).toBe(level)
+      expect(JSON.parse(logs[0]!.line)).toMatchObject({ event: "charge_reconcile_failed", alertable })
+    })
+
+    it("drops the failure of a charge that is gone", async () => {
+      const logs: { level: string, line: string }[] = []
+
+      await expect(
+        runFailing({ __isMedusaError: true, type: "not_found", message: "gone" }, logs)
+      ).resolves.toBeUndefined()
+
+      expect(logs).toEqual([])
+    })
   })
 })

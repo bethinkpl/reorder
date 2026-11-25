@@ -1,6 +1,6 @@
 {
   "name": "@bethinkpl/reorder",
-  "version": "1.12.0",
+  "version": "1.13.0",
   "description": "Customized version of @reorderjs/reorder.",
   "license": "MIT",
   "author": {
@@ -40,13 +40,13 @@
   },
   "devDependencies": {
     "@eslint/js": "^10.0.1",
-    "@medusajs/admin-sdk": "2.12.4",
-    "@medusajs/cli": "2.12.4",
-    "@medusajs/framework": "2.12.4",
-    "@medusajs/icons": "2.12.4",
-    "@medusajs/medusa": "2.12.4",
-    "@medusajs/test-utils": "2.12.4",
-    "@medusajs/ui": "4.0.25",
+    "@medusajs/admin-sdk": "2.22.0",
+    "@medusajs/cli": "2.22.0",
+    "@medusajs/framework": "2.22.0",
+    "@medusajs/icons": "2.22.0",
+    "@medusajs/medusa": "2.22.0",
+    "@medusajs/test-utils": "2.22.0",
+    "@medusajs/ui": "4.2.7",
     "@stylistic/eslint-plugin": "^5.10.0",
     "@swc/core": "^1.7.28",
     "@swc/jest": "^0.2.39",
@@ -69,11 +69,11 @@
     "yalc": "^1.0.0-pre.53"
   },
   "peerDependencies": {
-    "@medusajs/admin-sdk": "^2.12.4",
-    "@medusajs/cli": "^2.12.4",
-    "@medusajs/framework": "^2.12.4",
-    "@medusajs/icons": "^2.12.4",
-    "@medusajs/medusa": "^2.12.4",
+    "@medusajs/admin-sdk": "^2.17.2",
+    "@medusajs/cli": "^2.17.2",
+    "@medusajs/framework": "^2.17.2",
+    "@medusajs/icons": "^2.17.2",
+    "@medusajs/medusa": "^2.17.2",
     "@medusajs/ui": "^4.0.25"
   },
   "engines": {

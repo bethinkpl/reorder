@@ -6,6 +6,7 @@ const optionalIsoDateTime = z.string().datetime().optional()
 const renewalCycleStatusSchema = z.enum([
   "scheduled",
   "processing",
+  "awaiting_payment",
   "succeeded",
   "failed",
 ])

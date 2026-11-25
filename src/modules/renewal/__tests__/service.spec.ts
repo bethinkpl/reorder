@@ -101,7 +101,9 @@ moduleIntegrationTestRunner<RenewalModuleService>({
 
       type CreateCycleInput = Parameters<
         RenewalModuleService["createRenewalCycles"]
-      >[0]
+      >[0] extends ReadonlyArray<infer Item>
+        ? Item
+        : Parameters<RenewalModuleService["createRenewalCycles"]>[0]
 
       // Fully-populated seed literal, typed against the generated create input so
       // no `as any` is needed; callers only override id/status/scheduled_for.

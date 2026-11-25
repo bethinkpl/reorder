@@ -8,6 +8,7 @@ import {
 } from "../../modules/subscription/types"
 import { subscriptionErrors } from "../../modules/subscription/utils/errors"
 import type { FrequencyInterval } from "../../common/types/frequency-interval"
+import { assertNoChargeInFlight } from "../utils/assert-no-charge-in-flight"
 
 export type PauseSubscriptionStepInput = {
   id: string
@@ -82,6 +83,8 @@ export const pauseSubscriptionStep = createStep(
         subscription.status
       )
     }
+
+    await assertNoChargeInFlight(container, input.id)
 
     const pausedAt = input.effective_at
       ? new Date(input.effective_at)

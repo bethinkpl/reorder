@@ -2,6 +2,7 @@ import { MedusaContainer } from "@medusajs/framework/types"
 import { RENEWAL_MODULE } from "../../modules/renewal"
 import RenewalModuleService from "../../modules/renewal/service"
 import {
+  CHARGE_IN_FLIGHT_RENEWAL_CYCLE_STATUSES,
   RenewalApprovalStatus,
   RenewalCycleStatus,
 } from "../../modules/renewal/types"
@@ -41,7 +42,7 @@ export function validateRenewalApprovalTransition(
     throw renewalErrors.approvalNotRequired(cycle.id)
   }
 
-  if (cycle.status === RenewalCycleStatus.PROCESSING) {
+  if (CHARGE_IN_FLIGHT_RENEWAL_CYCLE_STATUSES.includes(cycle.status)) {
     throw renewalErrors.invalidTransition(
       cycle.id,
       `Renewal '${cycle.id}' can't change approval state while processing`

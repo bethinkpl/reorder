@@ -15,10 +15,17 @@ import { findSubscriptionAndOrderForPaymentCollection } from "../modules/subscri
 import { refreshSubscriptionPaymentContext } from "../modules/subscription/utils/resolve-captured-payment-method"
 import { ensureNextRenewalCycleWorkflow } from "../workflows/ensure-next-renewal-cycle"
 import { recoverDunningFromCapturedPaymentWorkflow } from "../workflows/recover-dunning-from-captured-payment"
+import {
+  type ChargeMarker,
+  handleChargeReconcileFailure,
+  readChargeMarker,
+  reconcileCharge,
+} from "../workflows/utils/in-flight-charge"
 
 type PaymentRecord = {
   id: string
   payment_collection_id: string | null
+  payment_session: { context: Record<string, unknown> | null } | null
 }
 
 type SubscriptionRecord = {
@@ -120,6 +127,16 @@ async function runDunningRecovery(
   return true
 }
 
+async function reconcileCapture(container: MedusaContainer, marker: ChargeMarker, paymentId: string) {
+  try {
+    return (await reconcileCharge(container, { ...marker, signal: "captured", payment_id: paymentId })).reported
+  } catch (error) {
+    handleChargeReconcileFailure(container, error, { ...marker, signal: "captured" })
+
+    return false
+  }
+}
+
 export async function activateSubscriptionOnPaymentCaptured(
   container: MedusaContainer,
   paymentId: string
@@ -128,10 +145,11 @@ export async function activateSubscriptionOnPaymentCaptured(
 
   const { data: payments } = await query.graph({
     entity: "payment",
-    fields: ["id", "payment_collection_id"],
+    fields: ["id", "payment_collection_id", "payment_session.context"],
     filters: { id: paymentId },
   })
-  const paymentCollectionId = (payments as PaymentRecord[])[0]?.payment_collection_id
+  const payment = (payments as PaymentRecord[])[0]
+  const paymentCollectionId = payment?.payment_collection_id
   if (!paymentCollectionId) {
     return
   }
@@ -156,6 +174,7 @@ export async function activateSubscriptionOnPaymentCaptured(
   }
 
   const subscriptionModule = container.resolve<SubscriptionModuleService>(SUBSCRIPTION_MODULE)
+  const marker = readChargeMarker(payment.payment_session?.context)
 
   if (subscription.status === SubscriptionStatus.PENDING_PAYMENT) {
     await subscriptionModule.updateSubscriptions({
@@ -169,6 +188,8 @@ export async function activateSubscriptionOnPaymentCaptured(
   }
 
   if (TERMINAL_SUBSCRIPTION_STATUSES.includes(subscription.status)) {
+    const reported = marker ? await reconcileCapture(container, marker, paymentId) : false
+
     // An involuntary churn the customer has just paid off: the case on that order names the
     // remedy (`reverseInvoluntaryChurnWorkflow`), which the generic line below cannot.
     if (
@@ -181,6 +202,10 @@ export async function activateSubscriptionOnPaymentCaptured(
         include_unrecovered: true,
       }))
     ) {
+      return
+    }
+
+    if (reported) {
       return
     }
 
@@ -198,6 +223,10 @@ export async function activateSubscriptionOnPaymentCaptured(
     return
   }
 
+  if (marker?.kind === "renewal") {
+    await reconcileCapture(container, marker, paymentId)
+  }
+
   // Runs before the recovery below, and independently of it: the card the customer just paid with
   // has to land on the subscription even if closing the dunning case throws.
   await refreshSubscriptionPaymentContext(container, subscription)
@@ -211,4 +240,8 @@ export async function activateSubscriptionOnPaymentCaptured(
     subscription_id: subscription.id,
     payment_id: paymentId,
   })
+
+  if (marker?.kind === "dunning") {
+    await reconcileCapture(container, marker, paymentId)
+  }
 }

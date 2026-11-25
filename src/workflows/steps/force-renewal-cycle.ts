@@ -4,6 +4,7 @@ import RenewalModuleService from "../../modules/renewal/service"
 import { SUBSCRIPTION_MODULE } from "../../modules/subscription"
 import SubscriptionModuleService from "../../modules/subscription/service"
 import {
+  CHARGE_IN_FLIGHT_RENEWAL_CYCLE_STATUSES,
   RenewalApprovalStatus,
   RenewalCycleStatus,
 } from "../../modules/renewal/types"
@@ -22,6 +23,7 @@ import {
 } from "../../modules/activity-log/types"
 import { processRenewalCycleWorkflow } from "../process-renewal-cycle"
 import { persistSubscriptionLogEvent } from "./create-subscription-log-event"
+import { assertSubscriptionFreeToCharge } from "./process-renewal-cycle"
 
 export type ForceRenewalCycleStepInput = {
   renewal_cycle_id: string
@@ -75,7 +77,7 @@ export const forceRenewalCycleStep = createStep(
     })
 
     try {
-      if (cycle.status === RenewalCycleStatus.PROCESSING) {
+      if (CHARGE_IN_FLIGHT_RENEWAL_CYCLE_STATUSES.includes(cycle.status)) {
         throw renewalErrors.alreadyProcessing(cycle.id)
       }
 
@@ -102,6 +104,8 @@ export const forceRenewalCycleStep = createStep(
           `Renewal '${cycle.id}' requires approved changes before it can be force-run`
         )
       }
+
+      await assertSubscriptionFreeToCharge(container, cycle)
 
       await persistSubscriptionLogEvent(container, normalizeActivityLogEvent({
         subscription_id: cycle.subscription_id,

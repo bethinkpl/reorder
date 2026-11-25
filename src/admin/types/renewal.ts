@@ -1,6 +1,7 @@
 export enum RenewalCycleAdminStatus {
   SCHEDULED = "scheduled",
   PROCESSING = "processing",
+  AWAITING_PAYMENT = "awaiting_payment",
   SUCCEEDED = "succeeded",
   FAILED = "failed",
 }

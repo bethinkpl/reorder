@@ -24,7 +24,7 @@ import {
 } from "../modules/renewal/utils/observability"
 import { SUBSCRIPTION_MODULE } from "../modules/subscription"
 import type SubscriptionModuleService from "../modules/subscription/service"
-import { SubscriptionStatus } from "../modules/subscription/types"
+import { TERMINAL_SUBSCRIPTION_STATUSES } from "../modules/subscription/types"
 import { activateSubscriptionOnPaymentCaptured } from "../subscribers/activate-subscription-on-payment-captured"
 import { loadOrderAmounts } from "../workflows/steps/run-dunning-retry"
 import { endAwaitingRenewalCyclesOnCancellation } from "../workflows/utils/end-awaiting-renewal-cycle-on-cancellation"
@@ -238,17 +238,18 @@ async function underRenewalLock<T>(
   return run.acquired ? run.result : whenBusy
 }
 
-async function endCycleOfCancelledSubscription(
+async function endCycleOfEndedSubscription(
   container: MedusaContainer,
   cycle: { id: string, subscription_id: string }
 ): Promise<boolean> {
   const subscriptionModule =
     container.resolve<SubscriptionModuleService>(SUBSCRIPTION_MODULE)
-  const isCancelled = async () =>
-    (await subscriptionModule.retrieveSubscription(cycle.subscription_id)).status ===
-    SubscriptionStatus.CANCELLED
+  const hasEnded = async () =>
+    TERMINAL_SUBSCRIPTION_STATUSES.includes(
+      (await subscriptionModule.retrieveSubscription(cycle.subscription_id)).status
+    )
 
-  if (!(await isCancelled())) {
+  if (!(await hasEnded())) {
     return false
   }
 
@@ -256,7 +257,7 @@ async function endCycleOfCancelledSubscription(
     container,
     cycle.subscription_id,
     async () => {
-      if (!(await isCancelled())) {
+      if (!(await hasEnded())) {
         return false
       }
 
@@ -650,7 +651,7 @@ export async function reconcileAwaitingRenewalCycles(
       result.scanned += 1
 
       try {
-        if (await endCycleOfCancelledSubscription(container, cycle)) {
+        if (await endCycleOfEndedSubscription(container, cycle)) {
           result.ended_cancelled += 1
 
           continue

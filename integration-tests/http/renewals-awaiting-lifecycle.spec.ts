@@ -517,29 +517,62 @@ medusaIntegrationTestRunner({
     })
 
     describe("the awaiting-payment sweep after a cancellation", () => {
-      it("ends an awaiting cycle a failed cancellation left on a cancelled subscription, instead of reporting it", async () => {
-        const container = getContainer()
-        const seeded = await seedAwaitingRenewal(container, {
-          reference: "SUB-AWL-SWEEP-CANCELLED",
-          subscription_status: SubscriptionStatus.CANCELLED,
-        })
-        const entries = watchLogs(container)
+      it.each([
+        { status: SubscriptionStatus.CANCELLED, paid: false },
+        { status: SubscriptionStatus.PAYMENT_FAILED, paid: false },
+        { status: SubscriptionStatus.PAYMENT_FAILED, paid: true },
+      ])(
+        "ends an awaiting cycle left on a $status subscription instead of reporting it, and reports a capture on its order (paid: $paid) once for a refund",
+        async ({ status, paid }) => {
+          const container = getContainer()
+          const seeded = await seedAwaitingRenewal(container, {
+            reference: `SUB-AWL-SWEEP-${status}-${paid}`,
+            subscription_status: status,
+          })
+          const payment = paid ? await captureOnOrder(container, seeded.order.id, seeded.session.id) : null
+          const entries = watchLogs(container)
 
-        const result = await reconcileAwaitingRenewalCycles(container)
-        const state = await readRenewalState(container, seeded)
+          const result = await reconcileAwaitingRenewalCycles(container)
+          const state = await readRenewalState(container, seeded)
 
-        expect(result).toMatchObject({ ended_cancelled: 1, order_unpaid: 0, subscription_terminal: 0, failed: 0 })
-        expect(state.cycle).toMatchObject({
-          status: RenewalCycleStatus.FAILED,
-          last_error: expect.stringMatching(/cancel/i),
-        })
-        expect(state.attempts).toEqual([
-          expect.objectContaining({ id: seeded.attempt.id, status: RenewalAttemptStatus.PROCESSING }),
-        ])
-        expect(state.failedLogs).toEqual([expect.objectContaining({ actor_type: ActivityLogActorType.SYSTEM })])
-        expect(state.cases).toHaveLength(0)
-        expect(entries({ event: RenewalLogEvents.AWAITING_PAYMENT_OVERDUE })).toHaveLength(0)
-      })
+          expect(result).toMatchObject({
+            ended_cancelled: 1,
+            order_unpaid: 0,
+            subscription_terminal: 0,
+            late_captures: paid ? 1 : 0,
+            failed: 0,
+          })
+          expect(state.cycle).toMatchObject({
+            status: RenewalCycleStatus.FAILED,
+            last_error: expect.stringMatching(/cancel/i),
+          })
+          expect(state.attempts).toEqual([
+            expect.objectContaining({
+              id: seeded.attempt.id,
+              ...(paid
+                ? { status: RenewalAttemptStatus.SUCCEEDED, error_code: PaymentAttemptErrorCode.CAPTURED_AFTER_CLOSE }
+                : { status: RenewalAttemptStatus.PROCESSING }),
+            }),
+          ])
+          expect(state.failedLogs).toEqual([expect.objectContaining({ actor_type: ActivityLogActorType.SYSTEM })])
+          expect(state.cases).toHaveLength(0)
+          expect(entries({ event: RenewalLogEvents.AWAITING_PAYMENT_OVERDUE })).toHaveLength(0)
+
+          expect(await reconcileAwaitingRenewalCycles(container)).toMatchObject({ ended_cancelled: 0, late_captures: 0 })
+          expect(emitted(SubscriptionEvents.LATE_PAYMENT_CAPTURED).map((message) => message.data)).toEqual(
+            payment
+              ? [
+                  expect.objectContaining({
+                    payment_id: payment.id,
+                    renewal_cycle_id: seeded.cycle.id,
+                    reason: LatePaymentCapturedReason.SUBSCRIPTION_TERMINAL,
+                    refund_amount: AWAITING_ORDER_TOTAL,
+                  }),
+                ]
+              : []
+          )
+        }
+      )
 
       it("fails a charge left in flight on a closed cycle once it is past the minimum age with no signal, leaves a younger one alone, and still reports a capture that arrives after that once", async () => {
         const container = getContainer()

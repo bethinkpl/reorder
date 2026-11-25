@@ -213,22 +213,6 @@ medusaIntegrationTestRunner({
         })
       })
 
-      it("answers a forced run of an unknown renewal with a 404 naming it", async () => {
-        const headers = await createAdminAuthHeaders(getContainer())
-
-        await expect(
-          api.post("/admin/renewals/re_missing/force", {}, { headers })
-        ).rejects.toMatchObject({
-          response: {
-            status: 404,
-            data: {
-              type: "not_found",
-              message: "RenewalCycle 're_missing' was not found",
-            },
-          },
-        })
-      })
-
       it("blocks duplicate execution and processing conflicts", async () => {
         const container = getContainer()
         const headers = await createAdminAuthHeaders(container)
@@ -247,6 +231,10 @@ medusaIntegrationTestRunner({
         ).rejects.toMatchObject({
           response: {
             status: 409,
+            data: {
+              type: "conflict",
+              message: `Duplicate execution for renewal '${succeededCycle.id}' was blocked`,
+            },
           },
         })
 

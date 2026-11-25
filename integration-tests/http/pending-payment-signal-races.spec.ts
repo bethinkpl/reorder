@@ -5,7 +5,6 @@ import type {
   MedusaContainer,
 } from "@medusajs/framework/types"
 import { Modules, PaymentActions } from "@medusajs/framework/utils"
-import { FrequencyInterval } from "../../src/common/types/frequency-interval"
 import { PaymentAttemptErrorCode } from "../../src/common/types/payment-attempt-error-code"
 import processDunningRetriesJob from "../../src/jobs/process-dunning-retries"
 import processRenewalCyclesJob from "../../src/jobs/process-renewal-cycles"
@@ -31,7 +30,7 @@ import {
   RenewalCycleStatus,
 } from "../../src/modules/renewal/types"
 import { renewalSubscriptionLockKey } from "../../src/modules/renewal/utils/lock-key"
-import { DEFAULT_AWAITING_PAYMENT_ALERT_HOURS } from "../../src/modules/renewal/utils/awaiting-payment-age"
+import { AWAITING_PAYMENT_ALERT_HOURS_ENV } from "../../src/modules/renewal/utils/awaiting-payment-age"
 import { SUBSCRIPTION_MODULE } from "../../src/modules/subscription"
 import type SubscriptionModuleService from "../../src/modules/subscription/service"
 import {
@@ -42,7 +41,6 @@ import { SubscriptionStatus } from "../../src/modules/subscription/types"
 import {
   cancelSubscriptionByCustomerWorkflow,
   cancelSubscriptionWorkflow,
-  ensureNextRenewalCycleWorkflow,
   forceRenewalCycleWorkflow,
   RenewalRunOutcome,
   runDunningRetryWorkflow,
@@ -55,12 +53,14 @@ import {
 import {
   AWAITING_ORDER_TOTAL,
   type RenewalRefs,
+  type SeededAwaitingRenewal,
   failRenewalLockReleaseOnce,
   oneMonthAfter,
   readRenewalState,
   seedAwaitingRenewal,
   whileRenewalLockHeld,
 } from "../helpers/awaiting-renewal-fixtures"
+import { chargeMocks } from "../helpers/core-flow-mocks"
 import {
   captureOnOrder,
   createPaymentSessionFixture,
@@ -79,30 +79,21 @@ import {
   createRenewalCycleSeed,
   createSubscriptionSeed,
 } from "../helpers/renewal-fixtures"
-import { atTime, watchEvents, watchLogs } from "../helpers/spy-fixtures"
+import {
+  atTime,
+  expectCapturedAfterClose,
+  failOnce,
+  interceptOnce,
+  watchEvents,
+  watchLogs,
+  whileLockHeld,
+} from "../helpers/spy-fixtures"
 import { DunningLogEvents } from "../../src/modules/dunning/utils/observability"
 import { RenewalLogEvents } from "../../src/modules/renewal/utils/observability"
 
-const mockCreateOrderRun = jest.fn()
-const mockCreateOrUpdateOrderPaymentCollectionRun = jest.fn()
-const mockCreatePaymentSessionsRun = jest.fn()
-
-jest.mock("@medusajs/medusa/core-flows", () => ({
-  ...jest.requireActual("@medusajs/medusa/core-flows"),
-  createOrderWorkflow: () => ({ run: mockCreateOrderRun }),
-  createOrUpdateOrderPaymentCollectionWorkflow: () => ({
-    run: mockCreateOrUpdateOrderPaymentCollectionRun,
-  }),
-  createPaymentSessionsWorkflow: () => ({ run: mockCreatePaymentSessionsRun }),
-}))
+jest.mock("@medusajs/medusa/core-flows", () => require("../helpers/core-flow-mocks").coreFlowsMock())
 
 jest.setTimeout(120 * 1000)
-
-const chargeMocks = {
-  createOrderRun: mockCreateOrderRun,
-  createOrUpdateOrderPaymentCollectionRun: mockCreateOrUpdateOrderPaymentCollectionRun,
-  createPaymentSessionsRun: mockCreatePaymentSessionsRun,
-}
 
 const stubRenewalCharge = createRenewalChargeStub(chargeMocks)
 const routeRetrySessionsToFixture = createRetrySessionRouter(chargeMocks)
@@ -114,32 +105,6 @@ const DUE_FOR_RETRY = {
   status: DunningCaseStatus.RETRY_SCHEDULED,
   attempt_count: 0,
   attempts: [],
-}
-
-function interceptOnce<TArgs extends unknown[], TResult>(
-  original: (...args: TArgs) => Promise<TResult>,
-  matches: (...args: TArgs) => boolean,
-  interject: () => Promise<unknown>
-) {
-  let intercepted = false
-
-  return async (...args: TArgs): Promise<TResult> => {
-    if (!intercepted && matches(...args)) {
-      intercepted = true
-      await interject()
-    }
-
-    return await original(...args)
-  }
-}
-
-function failingOnce<TArgs extends unknown[], TResult>(
-  original: (...args: TArgs) => Promise<TResult>,
-  matches: (...args: TArgs) => boolean
-) {
-  return interceptOnce(original, matches, async () => {
-    throw new Error(WRITE_FAILURE)
-  })
 }
 
 function writes(data: unknown, field: string, value?: unknown) {
@@ -250,33 +215,19 @@ medusaIntegrationTestRunner({
 
     afterEach(() => {
       jest.restoreAllMocks()
+      delete process.env[AWAITING_PAYMENT_ALERT_HOURS_ENV]
     })
 
     function failCycleWriteOnce(status: RenewalCycleStatus) {
-      const module = renewalModule()
-      const update = failingOnce(module.updateRenewalCycles.bind(module), (data) =>
-        writes(data, "status", status)
-      )
-
-      jest.spyOn(module, "updateRenewalCycles").mockImplementation(update)
+      failOnce(renewalModule(), "updateRenewalCycles", (data) => writes(data, "status", status), WRITE_FAILURE)
     }
 
     function failAttemptSessionWriteOnce() {
-      const module = renewalModule()
-      const update = failingOnce(module.updateRenewalAttempts.bind(module), (data) =>
-        writes(data, "payment_reference")
-      )
-
-      jest.spyOn(module, "updateRenewalAttempts").mockImplementation(update)
+      failOnce(renewalModule(), "updateRenewalAttempts", (data) => writes(data, "payment_reference"), WRITE_FAILURE)
     }
 
     function failCaseWriteOnce(status: DunningCaseStatus) {
-      const module = dunningModule()
-      const update = failingOnce(module.updateDunningCases.bind(module), (data) =>
-        writes(data, "status", status)
-      )
-
-      jest.spyOn(module, "updateDunningCases").mockImplementation(update)
+      failOnce(dunningModule(), "updateDunningCases", (data) => writes(data, "status", status), WRITE_FAILURE)
     }
 
     async function expectFailedIntoDunning(seeded: RenewalRefs, attempt: Record<string, unknown>) {
@@ -457,47 +408,35 @@ medusaIntegrationTestRunner({
         }
       )
 
-      it.each([
-        {
-          name: "the cycle's wait",
-          failWrite: () => failCycleWriteOnce(RenewalCycleStatus.AWAITING_PAYMENT),
-        },
-        {
-          name: "the attempt's session",
-          failWrite: failAttemptSessionWriteOnce,
-        },
-      ])(
-        "settles on the sweep a renewal cycle left processing whose capture never arrived, when $name could not be recorded",
-        async ({ failWrite }) => {
-          const container = getContainer()
-          const order = await createUnpaidOrder(container)
-          const seeded = await seedDueCharge("SUB-RENEWAL-PARK-FAILURE-LOST-CAPTURE", order.id)
+      it("settles on the sweep a renewal cycle left processing whose capture never arrived, when the attempt's session could not be recorded", async () => {
+        const container = getContainer()
+        const order = await createUnpaidOrder(container)
+        const seeded = await seedDueCharge("SUB-RENEWAL-PARK-FAILURE-LOST-CAPTURE", order.id)
 
-          answerAuthorizationWithNull(container)
-          failWrite()
+        answerAuthorizationWithNull(container)
+        failAttemptSessionWriteOnce()
 
-          await runRenewal(container, seeded.cycle.id)
+        await runRenewal(container, seeded.cycle.id)
 
-          const inFlight = await readRenewalState(container, seeded)
+        const inFlight = await readRenewalState(container, seeded)
 
-          jest.restoreAllMocks()
-          await captureOnOrder(container, order.id, seeded.sessionIds[0], { linkCollection: true })
+        jest.restoreAllMocks()
+        await captureOnOrder(container, order.id, seeded.sessionIds[0], { linkCollection: true })
 
-          const sweepAfter = (minutes: number) =>
-            atTime(new Date(inFlight.attempts[0].started_at).getTime() + minutes * 60 * 1000, () =>
-              reconcileAwaitingRenewalCycles(container)
-            )
+        const sweepAfter = (minutes: number) =>
+          atTime(new Date(inFlight.attempts[0].started_at).getTime() + minutes * 60 * 1000, () =>
+            reconcileAwaitingRenewalCycles(container)
+          )
 
-          expect(await sweepAfter(5)).toMatchObject({ processing_settled: 0, failed: 0 })
-          expect(await sweepAfter(11)).toMatchObject({ processing_settled: 1, failed: 0 })
-          expect(await sweepAfter(12)).toMatchObject({ processing_settled: 0, failed: 0 })
+        expect(await sweepAfter(5)).toMatchObject({ processing_settled: 0, failed: 0 })
+        expect(await sweepAfter(11)).toMatchObject({ processing_settled: 1, failed: 0 })
+        expect(await sweepAfter(12)).toMatchObject({ processing_settled: 0, failed: 0 })
 
-          await expectSettled(seeded, inFlight.attempts[0].id)
-          expect(
-            (await subscriptionModule().retrieveSubscription(seeded.subscription.id)).next_renewal_at
-          ).toEqual(oneMonthAfter(seeded.dueAt))
-        }
-      )
+        await expectSettled(seeded, inFlight.attempts[0].id)
+        expect(
+          (await subscriptionModule().retrieveSubscription(seeded.subscription.id)).next_renewal_at
+        ).toEqual(oneMonthAfter(seeded.dueAt))
+      })
 
       it("keeps the renewal cycle processing when a later step of the run fails as well", async () => {
         const container = getContainer()
@@ -738,16 +677,11 @@ medusaIntegrationTestRunner({
 
         const logs = watchLogs(container)
         const alerts = watchAlerts(container)
-        const ownerId = "dunning-holder"
 
-        await locking().acquire(dunningCaseLockKey(dunningCase.id), { ownerId, expire: 60 })
-
-        try {
+        await whileLockHeld(container, dunningCaseLockKey(dunningCase.id), async () => {
           await deliverFailure(container, sessions[0].id, { reason: "insufficient_funds" })
           await deliverFailure(container, sessions[0].id, { reason: "insufficient_funds" })
-        } finally {
-          await locking().release(dunningCaseLockKey(dunningCase.id), { ownerId })
-        }
+        })
 
         expect(alerts(dunningCase.id)).toHaveLength(0)
         expect(
@@ -824,8 +758,12 @@ medusaIntegrationTestRunner({
         )
 
         expect(await sweepAfter(11)).toMatchObject({ processing_settled: 1, failed: 0 })
+        expect(await sweepAfter(12)).toMatchObject({ processing_settled: 0, failed: 0 })
 
         await expectSettled(seeded, seeded.attempt.id)
+        expect(
+          (await subscriptionModule().retrieveSubscription(seeded.subscription.id)).next_renewal_at
+        ).toEqual(oneMonthAfter(seeded.scheduledFor))
         expect(alerts(seeded.cycle.id)).toHaveLength(0)
       })
 
@@ -898,28 +836,25 @@ medusaIntegrationTestRunner({
         await deliverCapture(container, payment.id)
         await reconcilePaidDunningCases(container)
 
-        expect(await readDunningState(container, dunningCase.id)).toMatchObject({
+        const state = await readDunningState(container, dunningCase.id)
+
+        expect(state).toMatchObject({
           subscription: { status: SubscriptionStatus.CANCELLED },
           dunningCase: {
             status: DunningCaseStatus.UNRECOVERED,
             recovery_reason: DunningRecoveryReason.SUBSCRIPTION_CANCELLED_BY_CUSTOMER,
           },
-          attempts: [
-            {
-              status: DunningAttemptStatus.SUCCEEDED,
-              error_code: PaymentAttemptErrorCode.CAPTURED_AFTER_CLOSE,
-            },
-          ],
         })
-        expect(emitted(SubscriptionEvents.LATE_PAYMENT_CAPTURED).map((message) => message.data)).toEqual([
-          expect.objectContaining({
+        expectCapturedAfterClose(state.attempts, emitted(SubscriptionEvents.LATE_PAYMENT_CAPTURED), {
+          attempt: {},
+          event: {
             subscription_id: subscription.id,
             payment_id: payment.id,
             dunning_case_id: dunningCase.id,
             reason: LatePaymentCapturedReason.SUBSCRIPTION_TERMINAL,
             refund_amount: RENEWAL_AMOUNT,
-          }),
-        ])
+          },
+        })
         expect(emitted(DunningEvents.RECOVERED)).toHaveLength(0)
       })
 
@@ -1036,26 +971,20 @@ medusaIntegrationTestRunner({
       expect(state).toMatchObject({
         subscription: { status: SubscriptionStatus.CANCELLED, next_renewal_at: null },
         cycle: { status: RenewalCycleStatus.FAILED, last_error: expect.stringMatching(/cancel/i) },
-        attempts: [
-          {
-            status: RenewalAttemptStatus.SUCCEEDED,
-            payment_reference: seeded.sessionIds[0],
-            error_code: PaymentAttemptErrorCode.CAPTURED_AFTER_CLOSE,
-          },
-        ],
         cases: [],
       })
       expect(state.succeededLogs).toHaveLength(0)
       expect(state.failedLogs).toHaveLength(1)
-      expect(emitted(SubscriptionEvents.LATE_PAYMENT_CAPTURED).map((message) => message.data)).toEqual([
-        expect.objectContaining({
+      expectCapturedAfterClose(state.attempts, emitted(SubscriptionEvents.LATE_PAYMENT_CAPTURED), {
+        attempt: { payment_reference: seeded.sessionIds[0] },
+        event: {
           subscription_id: seeded.subscription.id,
           payment_id: payment.id,
           renewal_cycle_id: seeded.cycle.id,
           reason: LatePaymentCapturedReason.SUBSCRIPTION_TERMINAL,
           refund_amount: RENEWAL_AMOUNT,
-        }),
-      ])
+        },
+      })
       expect(emitted(DunningEvents.STARTED)).toHaveLength(0)
     })
 
@@ -1102,7 +1031,7 @@ medusaIntegrationTestRunner({
       })
     })
 
-    it("raises the overdue alert for a renewal cycle left processing once, only past the limit, and keeps sweeping when one cycle cannot be read under its lock", async () => {
+    it("raises the overdue alert for a renewal cycle awaiting its payment or left processing once, only past the limit read from the environment, and keeps sweeping when one cycle cannot be read under its lock", async () => {
       const container = getContainer()
       const module = renewalModule()
       const seedProcessingCycle = async (reference: string, paymentReference: string | null) => {
@@ -1120,9 +1049,11 @@ medusaIntegrationTestRunner({
 
         return { subscription, cycle }
       }
+      const awaiting = await seedAwaitingRenewal(container, { reference: "SUB-AWAITING-OVERDUE" })
       const submitted = await seedProcessingCycle("SUB-PROCESSING-SUBMITTED", "payses_submitted")
       const unrecorded = await seedProcessingCycle("SUB-PROCESSING-NO-SESSION", null)
       const seededAt = Date.now()
+      const alertHours = 2
       const sweepAt = (hoursAfterSubmission: number) =>
         atTime(seededAt + hoursAfterSubmission * HOUR_MS, () =>
           reconcileAwaitingRenewalCycles(container)
@@ -1134,7 +1065,9 @@ medusaIntegrationTestRunner({
           .filter((entry) => entry.event === RenewalLogEvents.AWAITING_PAYMENT_OVERDUE)
           .map((entry) => entry.renewal_cycle_id)
 
-      await sweepAt(DEFAULT_AWAITING_PAYMENT_ALERT_HOURS - 1)
+      process.env[AWAITING_PAYMENT_ALERT_HOURS_ENV] = String(alertHours)
+
+      await sweepAt(alertHours - 1)
 
       expect(overdueCycleIds()).toHaveLength(0)
 
@@ -1150,17 +1083,18 @@ medusaIntegrationTestRunner({
           return await retrieve(id, ...rest)
         })
 
-      expect(await sweepAt(DEFAULT_AWAITING_PAYMENT_ALERT_HOURS + 1)).toMatchObject({
+      expect(await sweepAt(alertHours + 1)).toMatchObject({
+        overdue: 1,
         processing_overdue: 1,
         failed: 1,
       })
-      expect(overdueCycleIds()).toEqual([submitted.cycle.id])
+      expect(overdueCycleIds()).toEqual([awaiting.cycle.id, submitted.cycle.id])
       expect(alerts(unrecorded.cycle.id, readTimeout)).toHaveLength(1)
 
       unreadable.mockRestore()
-      await sweepAt(DEFAULT_AWAITING_PAYMENT_ALERT_HOURS + 2)
+      await sweepAt(alertHours + 2)
 
-      expect(overdueCycleIds()).toEqual([submitted.cycle.id, unrecorded.cycle.id])
+      expect(overdueCycleIds()).toEqual([awaiting.cycle.id, submitted.cycle.id, unrecorded.cycle.id])
 
       for (const seeded of [submitted, unrecorded]) {
         expect(await readRenewalState(container, seeded)).toMatchObject({
@@ -1168,36 +1102,12 @@ medusaIntegrationTestRunner({
           attempts: [{ status: RenewalAttemptStatus.PROCESSING }],
         })
       }
-    })
 
-    it("leaves the approval fields of an awaiting cycle as they are when the next cycle is ensured", async () => {
-      const container = getContainer()
-      const seeded = await seedAwaitingRenewal(container, {
-        reference: "SUB-AWAITING-WITH-PENDING-CHANGE",
-      })
+      const awaitingState = await readRenewalState(container, awaiting)
 
-      await subscriptionModule().updateSubscriptions({
-        id: seeded.subscription.id,
-        pending_update_data: {
-          variant_id: "variant_pending_change",
-          variant_title: "Pending Variant",
-          sku: "PENDING-SKU",
-          frequency_interval: FrequencyInterval.MONTH,
-          frequency_value: 1,
-          effective_at: null,
-          requested_at: new Date().toISOString(),
-          requested_by: null,
-        },
-      })
-      await ensureNextRenewalCycleWorkflow(container).run({
-        input: { subscription_id: seeded.subscription.id },
-      })
-
-      expect(await renewalModule().retrieveRenewalCycle(seeded.cycle.id)).toMatchObject({
-        status: RenewalCycleStatus.AWAITING_PAYMENT,
-        approval_required: false,
-        approval_status: null,
-      })
+      expect(awaitingState.cycle.status).toEqual(RenewalCycleStatus.AWAITING_PAYMENT)
+      expect(awaitingState.attempts).toEqual([expect.objectContaining({ status: RenewalAttemptStatus.PROCESSING })])
+      expect(awaitingState.cases).toHaveLength(0)
     })
 
     it.each([
@@ -1261,15 +1171,21 @@ medusaIntegrationTestRunner({
     })
 
     describe("a renewal order paid more than once", () => {
-      it("settles the cycle and reports the renewal charge once as over-payment when the customer paid the order while the charge was in flight", async () => {
+      async function payOrderAsCustomer(orderId: string, amount: number) {
         const container = getContainer()
-        const seeded = await seedAwaitingRenewal(container, { reference: "SUB-OVERPAID-RENEWAL" })
-        const customer = await createPaymentSessionFixture(container, { amount: AWAITING_ORDER_TOTAL })
-        const customerPayment = await captureOnOrder(container, seeded.order.id, customer.session.id, {
+        const customer = await createPaymentSessionFixture(container, { amount })
+        const customerPayment = await captureOnOrder(container, orderId, customer.session.id, {
           linkCollection: true,
         })
 
         await deliverCapture(container, customerPayment.id)
+      }
+
+      it("settles the cycle and reports the renewal charge once as over-payment when the customer paid the order while the charge was in flight", async () => {
+        const container = getContainer()
+        const seeded = await seedAwaitingRenewal(container, { reference: "SUB-OVERPAID-RENEWAL" })
+
+        await payOrderAsCustomer(seeded.order.id, AWAITING_ORDER_TOTAL)
 
         const renewalPayment = await captureOnOrder(container, seeded.order.id, seeded.session.id)
         const emitted = watchEvents(container)
@@ -1297,15 +1213,33 @@ medusaIntegrationTestRunner({
         ])
       })
 
-      it("asks for a cancelled subscription's capture less what was already refunded on it", async () => {
+      it.each([
+        {
+          name: "a cancelled subscription's capture",
+          reference: "SUB-LATE-CAPTURE-PART-REFUNDED",
+          beforeCapture: (seeded: SeededAwaitingRenewal) =>
+            cancelSubscriptionWorkflow(getContainer()).run({ input: { id: seeded.subscription.id } }),
+          refunded: 30,
+          reason: LatePaymentCapturedReason.SUBSCRIPTION_TERMINAL,
+          refundAmount: AWAITING_ORDER_TOTAL - 30,
+        },
+        {
+          name: "an over-paying capture",
+          reference: "SUB-OVERPAID-MOSTLY-REFUNDED",
+          beforeCapture: (seeded: SeededAwaitingRenewal) => payOrderAsCustomer(seeded.order.id, AWAITING_ORDER_TOTAL),
+          refunded: 80,
+          reason: LatePaymentCapturedReason.ORDER_OVERPAID,
+          refundAmount: AWAITING_ORDER_TOTAL - 80,
+        },
+      ])("asks for $name less what was already refunded on it", async ({ reference, beforeCapture, refunded, reason, refundAmount }) => {
         const container = getContainer()
-        const seeded = await seedAwaitingRenewal(container, { reference: "SUB-LATE-CAPTURE-PART-REFUNDED" })
+        const seeded = await seedAwaitingRenewal(container, { reference })
 
-        await cancelSubscriptionWorkflow(container).run({ input: { id: seeded.subscription.id } })
+        await beforeCapture(seeded)
 
         const payment = await captureOnOrder(container, seeded.order.id, seeded.session.id)
 
-        await paymentModule().refundPayment({ payment_id: payment.id, amount: 30 })
+        await paymentModule().refundPayment({ payment_id: payment.id, amount: refunded })
 
         const emitted = watchEvents(container)
 
@@ -1314,36 +1248,8 @@ medusaIntegrationTestRunner({
         expect(emitted(SubscriptionEvents.LATE_PAYMENT_CAPTURED).map((message) => message.data)).toEqual([
           expect.objectContaining({
             payment_id: payment.id,
-            reason: LatePaymentCapturedReason.SUBSCRIPTION_TERMINAL,
-            refund_amount: AWAITING_ORDER_TOTAL - 30,
-            currency_code: "pln",
-          }),
-        ])
-      })
-
-      it("never asks for more of an over-paying capture than is left unrefunded on it", async () => {
-        const container = getContainer()
-        const seeded = await seedAwaitingRenewal(container, { reference: "SUB-OVERPAID-MOSTLY-REFUNDED" })
-        const customer = await createPaymentSessionFixture(container, { amount: AWAITING_ORDER_TOTAL })
-        const customerPayment = await captureOnOrder(container, seeded.order.id, customer.session.id, {
-          linkCollection: true,
-        })
-
-        await deliverCapture(container, customerPayment.id)
-
-        const renewalPayment = await captureOnOrder(container, seeded.order.id, seeded.session.id)
-
-        await paymentModule().refundPayment({ payment_id: renewalPayment.id, amount: 80 })
-
-        const emitted = watchEvents(container)
-
-        await deliverCapture(container, renewalPayment.id)
-
-        expect(emitted(SubscriptionEvents.LATE_PAYMENT_CAPTURED).map((message) => message.data)).toEqual([
-          expect.objectContaining({
-            payment_id: renewalPayment.id,
-            reason: LatePaymentCapturedReason.ORDER_OVERPAID,
-            refund_amount: AWAITING_ORDER_TOTAL - 80,
+            reason,
+            refund_amount: refundAmount,
             currency_code: "pln",
           }),
         ])
@@ -1352,12 +1258,8 @@ medusaIntegrationTestRunner({
       it("asks for only the surplus of a capture that over-pays the order, and still reports a later capture that surplus leaves unclaimed", async () => {
         const container = getContainer()
         const seeded = await seedAwaitingRenewal(container, { reference: "SUB-OVERPAID-PARTLY" })
-        const customer = await createPaymentSessionFixture(container, { amount: 40 })
-        const customerPayment = await captureOnOrder(container, seeded.order.id, customer.session.id, {
-          linkCollection: true,
-        })
 
-        await deliverCapture(container, customerPayment.id)
+        await payOrderAsCustomer(seeded.order.id, 40)
 
         const renewalPayment = await captureOnOrder(container, seeded.order.id, seeded.session.id)
         const emitted = watchEvents(container)

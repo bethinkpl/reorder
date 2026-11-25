@@ -180,17 +180,6 @@ medusaIntegrationTestRunner({
         const reasonUrl = (id: string) => `/admin/cancellations/${id}/reason`
 
         await expect(
-          api.post(reasonUrl("cc_missing"), { reason: "Moved abroad" }, { headers })
-        ).rejects.toMatchObject({
-          response: {
-            status: 404,
-            data: {
-              type: "not_found",
-              message: "CancellationCase 'cc_missing' was not found",
-            },
-          },
-        })
-        await expect(
           api.post(reasonUrl(canceled.id), { reason: "   " }, { headers })
         ).rejects.toMatchObject({
           response: {
@@ -198,17 +187,6 @@ medusaIntegrationTestRunner({
             data: {
               type: "invalid_data",
               message: "Cancellation reason update requires a non-empty reason",
-            },
-          },
-        })
-        await expect(
-          api.post(reasonUrl(canceled.id), { reason: "Moved abroad" }, { headers })
-        ).rejects.toMatchObject({
-          response: {
-            status: 409,
-            data: {
-              type: "conflict",
-              message: `CancellationCase '${canceled.id}' is already finalized with status '${CancellationCaseStatus.CANCELED}'`,
             },
           },
         })

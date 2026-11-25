@@ -23,7 +23,7 @@ type GraphInput = {
   filters?: { id?: string | string[] }
 }
 
-type GraphQuery = {
+export type GraphQuery = {
   graph: (input: GraphInput) => Promise<{ data: unknown[] }>
 }
 

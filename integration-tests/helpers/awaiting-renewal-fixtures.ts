@@ -20,6 +20,7 @@ import { SUBSCRIPTION_MODULE } from "../../src/modules/subscription"
 import type SubscriptionModuleService from "../../src/modules/subscription/service"
 import { SubscriptionStatus } from "../../src/modules/subscription/types"
 import { createPaymentSessionFixture } from "./payment-fixtures"
+import { failOnce, whileLockHeld } from "./spy-fixtures"
 import {
   createRenewalAttemptSeed,
   createRenewalCycleSeed,
@@ -162,17 +163,7 @@ export async function whileRenewalLockHeld<T>(
   subscriptionId: string,
   run: () => Promise<T>
 ) {
-  const locking = container.resolve(Modules.LOCKING)
-  const key = renewalSubscriptionLockKey(subscriptionId)
-  const ownerId = `renewal-run-on-${subscriptionId}`
-
-  await locking.acquire(key, { ownerId, expire: 60 })
-
-  try {
-    return await run()
-  } finally {
-    await locking.release(key, { ownerId })
-  }
+  return await whileLockHeld(container, renewalSubscriptionLockKey(subscriptionId), run)
 }
 
 export function failRenewalLockReleaseOnce(
@@ -181,16 +172,12 @@ export function failRenewalLockReleaseOnce(
   message: string
 ) {
   const locking = container.resolve(Modules.LOCKING)
-  const release = locking.release.bind(locking)
   const key = renewalSubscriptionLockKey(subscriptionId)
-  let failed = false
 
-  jest.spyOn(locking, "release").mockImplementation(async (keys, args) => {
-    if (!failed && (Array.isArray(keys) ? keys : [keys]).includes(key)) {
-      failed = true
-      throw new Error(message)
-    }
-
-    return release(keys, args)
-  })
+  failOnce<typeof locking, string | string[]>(
+    locking,
+    "release",
+    (keys) => (Array.isArray(keys) ? keys : [keys]).includes(key),
+    message
+  )
 }

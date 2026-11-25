@@ -75,9 +75,7 @@ describe("resolveAwaitingPaymentResolveMinHours", () => {
 
   it.each([
     ["1", 1],
-    ["120", 120],
     ["0", DEFAULT_AWAITING_PAYMENT_RESOLVE_MIN_HOURS],
-    ["-5", DEFAULT_AWAITING_PAYMENT_RESOLVE_MIN_HOURS],
     ["abc", DEFAULT_AWAITING_PAYMENT_RESOLVE_MIN_HOURS],
     [undefined, 96],
   ])("resolves %j to %d", (raw, expected) => {

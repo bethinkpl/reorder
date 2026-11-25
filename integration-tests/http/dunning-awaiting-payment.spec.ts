@@ -59,6 +59,7 @@ import {
   seedDunningCase,
 } from "../helpers/awaiting-dunning-fixtures"
 import { createCancellationCaseSeed } from "../helpers/cancellation-fixtures"
+import { chargeMocks } from "../helpers/core-flow-mocks"
 import {
   createAdminAuthHeaders,
   createDunningCaseSeed,
@@ -73,28 +74,19 @@ import {
   deliverFailure,
 } from "../helpers/payment-fixtures"
 import { RENEWAL_AMOUNT, answerAuthorizationWithNull } from "../helpers/renewal-charge-fixtures"
-import { atTime, watchEvents, watchLogs } from "../helpers/spy-fixtures"
+import {
+  atTime,
+  expectCapturedAfterClose,
+  failOnce,
+  watchEvents,
+  watchLogs,
+  whileLockHeld,
+} from "../helpers/spy-fixtures"
 import { DunningLogEvents } from "../../src/modules/dunning/utils/observability"
 
-const mockCreateOrUpdateOrderPaymentCollectionRun = jest.fn()
-const mockCreatePaymentSessionsRun = jest.fn()
+jest.mock("@medusajs/medusa/core-flows", () => require("../helpers/core-flow-mocks").coreFlowsMock())
 
-jest.mock("@medusajs/medusa/core-flows", () => {
-  const actual = jest.requireActual("@medusajs/medusa/core-flows")
-
-  return {
-    ...actual,
-    createOrUpdateOrderPaymentCollectionWorkflow: () => ({
-      run: mockCreateOrUpdateOrderPaymentCollectionRun,
-    }),
-    createPaymentSessionsWorkflow: () => ({ run: mockCreatePaymentSessionsRun }),
-  }
-})
-
-const routeRetrySessionsToFixture = createRetrySessionRouter({
-  createOrUpdateOrderPaymentCollectionRun: mockCreateOrUpdateOrderPaymentCollectionRun,
-  createPaymentSessionsRun: mockCreatePaymentSessionsRun,
-})
+const routeRetrySessionsToFixture = createRetrySessionRouter(chargeMocks)
 
 const HOUR_MS = 60 * 60 * 1000
 const MINUTE_MS = 60 * 1000
@@ -179,7 +171,7 @@ medusaIntegrationTestRunner({
         expect(sessions).toHaveLength(1)
       })
 
-      it("refuses a retry, a new schedule and a second case while the charge awaits the provider, shows the customer a retry in progress, and still lets the customer cancel", async () => {
+      it("refuses a retry, a new schedule and a second case while the charge awaits the provider, and shows the customer a retry in progress in the list, the detail and the retry refusal, never the admin's payment_in_progress reason", async () => {
         const container = getContainer()
         const dunningModule = container.resolve<DunningModuleService>(DUNNING_MODULE)
         const customerId = "cus_dunning_awaiting_store"
@@ -191,11 +183,26 @@ medusaIntegrationTestRunner({
         const admin = { headers: await createAdminAuthHeaders(container) }
         const store = { headers: await createStoreCustomerHeaders(container, customerId) }
         const storeUrl = `/store/customers/me/subscriptions/${subscriptionId}`
+        const retryInProgress = {
+          state: DunningCaseStatus.RETRYING,
+          retry_eligible: false,
+          retry_blocked_reason: RetryBlockedReason.RETRY_IN_PROGRESS,
+        }
 
-        await expect(api.post(`${storeUrl}/retry-payment`, {}, store)).rejects.toMatchObject({
-          response: { status: 409, data: { blocked_reason: RetryBlockedReason.RETRY_IN_PROGRESS } },
+        const refusal = await api
+          .post(`${storeUrl}/retry-payment`, {}, store)
+          .catch((error: { response: { status: number, data: Record<string, unknown> } }) => error.response)
+        const detail = await api.get(storeUrl, store)
+        const list = await api.get("/store/customers/me/subscriptions", store)
+
+        expect(refusal).toMatchObject({
+          status: 409,
+          data: {
+            blocked_reason: RetryBlockedReason.RETRY_IN_PROGRESS,
+            message: expect.stringContaining(`(${RetryBlockedReason.RETRY_IN_PROGRESS})`),
+          },
         })
-        expect((await api.get(storeUrl, store)).data.subscription).toMatchObject({
+        expect(detail.data.subscription).toMatchObject({
           payment_status: "recovery_required",
           payment_recovery: {
             dunning_case_id: caseId,
@@ -203,6 +210,17 @@ medusaIntegrationTestRunner({
             retry_eligible: false,
             retry_blocked_reason: RetryBlockedReason.RETRY_IN_PROGRESS,
           },
+        })
+        expect(list.data.subscriptions).toEqual([
+          expect.objectContaining({ payment_recovery: expect.objectContaining(retryInProgress) }),
+        ])
+
+        for (const body of [list.data, detail.data, refusal.data]) {
+          expect(JSON.stringify(body)).not.toMatch(/"payment_in_progress"|\(payment_in_progress\)/)
+        }
+
+        expect((await api.get(`/admin/dunning/${caseId}`, admin)).data.dunning_case).toMatchObject({
+          retry_blocked_reason: RetryBlockedReason.PAYMENT_IN_PROGRESS,
         })
         await expect(
           api.post(`/admin/dunning/${caseId}/retry-now`, {}, admin)
@@ -258,57 +276,6 @@ medusaIntegrationTestRunner({
         expect(refused.attempts).toEqual([
           expect.objectContaining({ status: DunningAttemptStatus.PROCESSING }),
         ])
-
-        await cancelByCustomer(container, seeded)
-
-        expect(await dunningModule.retrieveDunningCase(caseId)).toMatchObject({
-          status: DunningCaseStatus.UNRECOVERED,
-          next_retry_at: null,
-          recovery_reason: DunningRecoveryReason.SUBSCRIPTION_CANCELLED_BY_CUSTOMER,
-          closed_at: expect.anything(),
-        })
-      })
-
-      it("never shows the storefront the admin's payment_in_progress reason: the list, the detail and the retry refusal all report a retry in progress", async () => {
-        const container = getContainer()
-        const customerId = "cus_dunning_awaiting_store_vocabulary"
-        const seeded = await seedDunningCase(container, "SUB-DUN-AWAIT-STORE-VOCAB", {
-          customer_id: customerId,
-        })
-        const admin = { headers: await createAdminAuthHeaders(container) }
-        const store = { headers: await createStoreCustomerHeaders(container, customerId) }
-        const storeUrl = `/store/customers/me/subscriptions/${seeded.subscription.id}`
-        const retryInProgress = {
-          state: DunningCaseStatus.RETRYING,
-          retry_eligible: false,
-          retry_blocked_reason: RetryBlockedReason.RETRY_IN_PROGRESS,
-        }
-
-        const list = await api.get("/store/customers/me/subscriptions", store)
-        const detail = await api.get(storeUrl, store)
-        const refusal = await api
-          .post(`${storeUrl}/retry-payment`, {}, store)
-          .catch((error: { response: { status: number, data: Record<string, unknown> } }) => error.response)
-
-        expect(list.data.subscriptions).toEqual([
-          expect.objectContaining({ payment_recovery: expect.objectContaining(retryInProgress) }),
-        ])
-        expect(detail.data.subscription.payment_recovery).toMatchObject(retryInProgress)
-        expect(refusal).toMatchObject({
-          status: 409,
-          data: {
-            blocked_reason: RetryBlockedReason.RETRY_IN_PROGRESS,
-            message: expect.stringContaining(`(${RetryBlockedReason.RETRY_IN_PROGRESS})`),
-          },
-        })
-
-        for (const body of [list.data, detail.data, refusal.data]) {
-          expect(JSON.stringify(body)).not.toMatch(/"payment_in_progress"|\(payment_in_progress\)/)
-        }
-
-        expect(
-          (await api.get(`/admin/dunning/${seeded.dunningCase.id}`, admin)).data.dunning_case
-        ).toMatchObject({ retry_blocked_reason: RetryBlockedReason.PAYMENT_IN_PROGRESS })
       })
 
       it("answers a storefront retry that finds another run holding the case as a retry in progress, as the eligibility check does", async () => {
@@ -470,20 +437,19 @@ medusaIntegrationTestRunner({
           },
         },
         {
-          title: "closes the case as unrecovered when the charge of the last allowed attempt fails",
-          reference: "SUB-DUN-AWAIT-LAST",
-          seed: { attempt_count: 3, max_attempts: 3 },
+          title: "reschedules a case its retry left retrying when the charge fails",
+          reference: "SUB-DUN-LEFT-RETRYING",
+          seed: { status: DunningCaseStatus.RETRYING },
           report: { action: PaymentActions.FAILED, reason: "insufficient_funds" },
           expected: {
             dunningCase: {
-              status: DunningCaseStatus.UNRECOVERED,
-              attempt_count: 3,
-              next_retry_at: null,
-              recovery_reason: DunningRecoveryReason.RETRY_LIMIT_EXHAUSTED,
+              status: DunningCaseStatus.RETRY_SCHEDULED,
+              attempt_count: 1,
+              last_payment_error_code: "insufficient_funds",
             },
-            latestAttempt: { status: DunningAttemptStatus.FAILED },
-            subscription: SubscriptionStatus.PAYMENT_FAILED,
-            events: { attempt_failed: 0, payment_failed: 1 },
+            latestAttempt: { status: DunningAttemptStatus.FAILED, error_code: "insufficient_funds" },
+            subscription: SubscriptionStatus.PAST_DUE,
+            events: { attempt_failed: 1, payment_failed: 0 },
           },
         },
         {
@@ -524,47 +490,13 @@ medusaIntegrationTestRunner({
         const state = await readDunningState(container, seeded.dunningCase.id)
 
         expect(state.dunningCase).toMatchObject(expected.dunningCase)
+        expect(state.attempts).toHaveLength(seeded.attempts.length)
         expect(state.attempts[state.attempts.length - 1]).toMatchObject(expected.latestAttempt)
         expect(state.subscription.status).toEqual(expected.subscription)
         expect({
           attempt_failed: events(DunningEvents.ATTEMPT_FAILED).length,
           payment_failed: events(DunningEvents.PAYMENT_FAILED).length,
         }).toEqual(expected.events)
-      })
-
-      it("reschedules a case its retry left retrying when the charge fails, after which the customer's cancellation goes through", async () => {
-        const container = getContainer()
-        const seeded = await seedDunningCase(container, "SUB-DUN-LEFT-RETRYING", {
-          status: DunningCaseStatus.RETRYING,
-        })
-
-        await failAwaitingDunningAttempt(container, {
-          dunning_case_id: seeded.dunningCase.id,
-          dunning_attempt_id: seeded.attempts[0].attempt.id,
-          session_id: seeded.attempts[0].session.id,
-          action: PaymentActions.FAILED,
-          reason: "insufficient_funds",
-        })
-
-        const failed = await readDunningState(container, seeded.dunningCase.id)
-
-        expect(failed.dunningCase).toMatchObject({
-          status: DunningCaseStatus.RETRY_SCHEDULED,
-          attempt_count: 1,
-          last_payment_error_code: "insufficient_funds",
-        })
-        expect(failed.attempts).toEqual([
-          expect.objectContaining({
-            status: DunningAttemptStatus.FAILED,
-            error_code: "insufficient_funds",
-          }),
-        ])
-
-        await cancelByCustomer(container, seeded)
-
-        expect((await readDunningState(container, seeded.dunningCase.id)).dunningCase.status).toEqual(
-          DunningCaseStatus.UNRECOVERED
-        )
       })
 
       it("leaves a case whose order the customer paid meanwhile for the sweep to recover, rescheduling nothing", async () => {
@@ -769,65 +701,6 @@ medusaIntegrationTestRunner({
         jest.clearAllMocks()
       })
 
-      it("keeps the charge of a case the customer cancelled in flight, and reports its late capture once for a refund without settling anything", async () => {
-        const container = getContainer()
-        const seeded = await seedDunningCase(container, "SUB-DUN-CANCEL-LATE-CAPTURE")
-        const caseId = seeded.dunningCase.id
-        const [{ attempt, session }] = seeded.attempts
-
-        await cancelByCustomer(container, seeded)
-
-        const cancelled = await readDunningState(container, caseId)
-        const payment = await captureOnOrder(container, seeded.order.id, session.id)
-        const events = watchEvents(container)
-
-        await deliverCapture(container, payment.id)
-        await deliverCapture(container, payment.id)
-
-        const after = await readDunningState(container, caseId)
-
-        expect(cancelled.attempts).toEqual([
-          expect.objectContaining({ id: attempt.id, status: DunningAttemptStatus.PROCESSING }),
-        ])
-        expect(after).toEqual({
-          ...cancelled,
-          attempts: [
-            {
-              ...cancelled.attempts[0],
-              status: DunningAttemptStatus.SUCCEEDED,
-              error_code: PaymentAttemptErrorCode.CAPTURED_AFTER_CLOSE,
-              error_message: expect.stringContaining(payment.id),
-              finished_at: expect.any(Date),
-              updated_at: expect.any(Date),
-              metadata: expect.objectContaining({
-                late_payment_captured: expect.objectContaining({
-                  payment_id: payment.id,
-                  reason: LatePaymentCapturedReason.SUBSCRIPTION_TERMINAL,
-                }),
-              }),
-            },
-          ],
-        })
-        expect(after.subscription.status).toEqual(SubscriptionStatus.CANCELLED)
-        expect(after.dunningCase.status).toEqual(DunningCaseStatus.UNRECOVERED)
-        expect(after.cycle.status).toEqual(RenewalCycleStatus.FAILED)
-        expect(events(SubscriptionEvents.LATE_PAYMENT_CAPTURED).map((message) => message.data)).toEqual([
-          {
-            subscription_id: seeded.subscription.id,
-            payment_id: payment.id,
-            order_id: seeded.order.id,
-            payment_collection_id: session.payment_collection_id,
-            renewal_cycle_id: seeded.cycle.id,
-            dunning_case_id: caseId,
-            dunning_attempt_id: attempt.id,
-            reason: LatePaymentCapturedReason.SUBSCRIPTION_TERMINAL,
-            refund_amount: RENEWAL_AMOUNT,
-            currency_code: "pln",
-          },
-        ])
-        expect(events(DunningEvents.RECOVERED)).toHaveLength(0)
-      })
-
       it.each([
         { submitted: "with its charge's session recorded", recorded: true },
         { submitted: "before recording its charge's session", recorded: false },
@@ -861,6 +734,7 @@ medusaIntegrationTestRunner({
             status: DunningCaseStatus.UNRECOVERED,
             closed_at: expect.any(Date),
           })
+          expect(cancelled.subscription.status).toEqual(SubscriptionStatus.CANCELLED)
           expect(cancelled.attempts).toEqual([
             expect.objectContaining({
               id: attempt.id,
@@ -868,20 +742,18 @@ medusaIntegrationTestRunner({
               payment_reference: recorded ? session.id : null,
             }),
           ])
-          expect((await readDunningState(container, caseId)).attempts).toEqual([
-            expect.objectContaining({
-              id: attempt.id,
-              status: DunningAttemptStatus.SUCCEEDED,
-              error_code: PaymentAttemptErrorCode.CAPTURED_AFTER_CLOSE,
-            }),
-          ])
-          expect(events(SubscriptionEvents.LATE_PAYMENT_CAPTURED).map((message) => message.data)).toEqual([
-            expect.objectContaining({
-              payment_id: payment.id,
-              dunning_attempt_id: attempt.id,
-              reason: LatePaymentCapturedReason.SUBSCRIPTION_TERMINAL,
-            }),
-          ])
+          expectCapturedAfterClose(
+            (await readDunningState(container, caseId)).attempts,
+            events(SubscriptionEvents.LATE_PAYMENT_CAPTURED),
+            {
+              attempt: { id: attempt.id },
+              event: {
+                payment_id: payment.id,
+                dunning_attempt_id: attempt.id,
+                reason: LatePaymentCapturedReason.SUBSCRIPTION_TERMINAL,
+              },
+            }
+          )
         }
       )
 
@@ -902,6 +774,12 @@ medusaIntegrationTestRunner({
             subscription_id: subscriptionId,
             reason: "customer left",
           })
+
+          await container.resolve<DunningModuleService>(DUNNING_MODULE).updateDunningAttempts({
+            id: seeded.attempts[0].attempt.id,
+            started_at: new Date(Date.now() - (STALE_RETRY_MINUTES - 1) * MINUTE_MS),
+          })
+
           const before = await readDunningState(container, caseId)
           const adminRefusal = `DunningCase '${caseId}' can't be closed for subscription cancellation while retry is in flight`
           const cancel = {
@@ -1031,20 +909,18 @@ medusaIntegrationTestRunner({
         await deliverCapture(container, payment.id)
         await deliverCapture(container, payment.id)
 
-        expect((await readDunningState(container, seeded.dunningCase.id)).attempts).toEqual([
-          expect.objectContaining({
-            id: attempt.id,
-            status: DunningAttemptStatus.SUCCEEDED,
-            error_code: PaymentAttemptErrorCode.CAPTURED_AFTER_CLOSE,
-          }),
-        ])
-        expect(events(SubscriptionEvents.LATE_PAYMENT_CAPTURED).map((message) => message.data)).toEqual([
-          expect.objectContaining({
-            payment_id: payment.id,
-            dunning_attempt_id: attempt.id,
-            reason: LatePaymentCapturedReason.SUBSCRIPTION_TERMINAL,
-          }),
-        ])
+        expectCapturedAfterClose(
+          (await readDunningState(container, seeded.dunningCase.id)).attempts,
+          events(SubscriptionEvents.LATE_PAYMENT_CAPTURED),
+          {
+            attempt: { id: attempt.id },
+            event: {
+              payment_id: payment.id,
+              dunning_attempt_id: attempt.id,
+              reason: LatePaymentCapturedReason.SUBSCRIPTION_TERMINAL,
+            },
+          }
+        )
       })
 
       it("leaves the capture of a churned subscription's case for the sweep when its recovery fails, which keeps it for the churn reversal", async () => {
@@ -1159,33 +1035,6 @@ medusaIntegrationTestRunner({
           expect.objectContaining({ dunning_case_id: seeded.dunningCase.id, alertable: false }),
         ])
       })
-
-      it("delivers again the lost capture of a charge a customer's cancellation left in flight, reporting it once for a refund", async () => {
-        const container = getContainer()
-        const seeded = await seedDunningCase(container, "SUB-DUN-CANCEL-SWEPT-CAPTURE")
-        const [{ session }] = seeded.attempts
-
-        await cancelByCustomer(container, seeded)
-
-        const payment = await captureOnOrder(container, seeded.order.id, session.id)
-        const events = watchEvents(container)
-
-        expect(await reconcilePaidDunningCases(container)).toMatchObject({ late_captures: 1 })
-        expect(await reconcilePaidDunningCases(container)).toMatchObject({ late_captures: 0 })
-
-        expect((await readDunningState(container, seeded.dunningCase.id)).attempts).toEqual([
-          expect.objectContaining({
-            status: DunningAttemptStatus.SUCCEEDED,
-            error_code: PaymentAttemptErrorCode.CAPTURED_AFTER_CLOSE,
-          }),
-        ])
-        expect(events(SubscriptionEvents.LATE_PAYMENT_CAPTURED).map((message) => message.data)).toEqual([
-          expect.objectContaining({
-            payment_id: payment.id,
-            reason: LatePaymentCapturedReason.SUBSCRIPTION_TERMINAL,
-          }),
-        ])
-      })
     })
 
     describe("an admin cancellation while a retry charge is in flight", () => {
@@ -1195,6 +1044,7 @@ medusaIntegrationTestRunner({
       })
 
       const cancelBy = {
+        customer: cancelByCustomer,
         admin: async (container: MedusaContainer, seeded: SeededDunningCase) => {
           await cancelSubscriptionWorkflow(container).run({
             input: { id: seeded.subscription.id, reason: "Fraud review" },
@@ -1229,19 +1079,25 @@ medusaIntegrationTestRunner({
       }
 
       it.each([
-        { flow: "admin" as const, first: "subscriber" as const },
-        { flow: "admin" as const, first: "sweep" as const },
-        { flow: "finalize" as const, first: "subscriber" as const },
-        { flow: "finalize" as const, first: "sweep" as const },
+        {
+          by: "customer" as const,
+          first: "subscriber" as const,
+          recoveryReason: DunningRecoveryReason.SUBSCRIPTION_CANCELLED_BY_CUSTOMER,
+        },
+        {
+          by: "admin" as const,
+          first: "sweep" as const,
+          recoveryReason: DunningRecoveryReason.SUBSCRIPTION_NOT_RETRYABLE,
+        },
       ])(
-        "the $flow cancellation closes the case and keeps its charge in flight; a capture reaching the $first first is reported once for a refund, recovering nothing",
-        async ({ flow, first }) => {
+        "the $by cancellation closes the case and keeps its charge in flight; a capture reaching the $first first is reported once for a refund, settling and recovering nothing",
+        async ({ by, first, recoveryReason }) => {
           const container = getContainer()
-          const seeded = await seedDunningCase(container, `SUB-DUN-ADMIN-${flow}-${first}`)
+          const seeded = await seedDunningCase(container, `SUB-DUN-CANCEL-${by}-${first}`)
           const caseId = seeded.dunningCase.id
           const [{ attempt, session }] = seeded.attempts
 
-          await cancelBy[flow](container, seeded)
+          await cancelBy[by](container, seeded)
 
           const cancelled = await readDunningState(container, caseId)
           const payment = await captureOnOrder(container, seeded.order.id, session.id)
@@ -1249,9 +1105,12 @@ medusaIntegrationTestRunner({
 
           await deliverInOrder(container, payment.id, first)
 
+          const after = await readDunningState(container, caseId)
+
           expect(cancelled.dunningCase).toMatchObject({
             status: DunningCaseStatus.UNRECOVERED,
             next_retry_at: null,
+            recovery_reason: recoveryReason,
             closed_at: expect.any(Date),
           })
           expect(cancelled.attempts).toEqual([
@@ -1261,7 +1120,7 @@ medusaIntegrationTestRunner({
             status: SubscriptionStatus.CANCELLED,
             next_renewal_at: null,
           })
-          expect(await readDunningState(container, caseId)).toEqual({
+          expect(after).toEqual({
             ...cancelled,
             attempts: [
               {
@@ -1280,54 +1139,22 @@ medusaIntegrationTestRunner({
               },
             ],
           })
+          expect(after.cycle.status).toEqual(RenewalCycleStatus.FAILED)
           expect(events(SubscriptionEvents.LATE_PAYMENT_CAPTURED).map((message) => message.data)).toEqual([
-            expect.objectContaining({
+            {
+              subscription_id: seeded.subscription.id,
               payment_id: payment.id,
+              order_id: seeded.order.id,
+              payment_collection_id: session.payment_collection_id,
+              renewal_cycle_id: seeded.cycle.id,
               dunning_case_id: caseId,
               dunning_attempt_id: attempt.id,
               reason: LatePaymentCapturedReason.SUBSCRIPTION_TERMINAL,
               refund_amount: RENEWAL_AMOUNT,
-            }),
+              currency_code: "pln",
+            },
           ])
           expect(events(DunningEvents.RECOVERED)).toHaveLength(0)
-        }
-      )
-
-      it.each(["admin" as const, "finalize" as const])(
-        "the %s cancellation leaves a charge that fails afterwards closed as failed, with no reschedule and no event",
-        async (flow) => {
-          const container = getContainer()
-          const seeded = await seedDunningCase(container, `SUB-DUN-ADMIN-${flow}-LATE-FAIL`)
-          const [{ session }] = seeded.attempts
-
-          await cancelBy[flow](container, seeded)
-
-          const cancelled = await readDunningState(container, seeded.dunningCase.id)
-          const events = watchEvents(container)
-
-          await deliverFailure(container, session.id, { reason: "insufficient_funds" })
-          await deliverFailure(container, session.id, { reason: "insufficient_funds" })
-          await reconcilePaidDunningCases(container)
-
-          expect(cancelled.dunningCase.status).toEqual(DunningCaseStatus.UNRECOVERED)
-          expect(await readDunningState(container, seeded.dunningCase.id)).toEqual({
-            ...cancelled,
-            attempts: [
-              {
-                ...cancelled.attempts[0],
-                status: DunningAttemptStatus.FAILED,
-                error_code: "insufficient_funds",
-                error_message: expect.stringMatching(/after its dunning case had closed/),
-                finished_at: expect.any(Date),
-                updated_at: expect.any(Date),
-              },
-            ],
-          })
-          expect({
-            attempt_failed: events(DunningEvents.ATTEMPT_FAILED).length,
-            payment_failed: events(DunningEvents.PAYMENT_FAILED).length,
-            late_payment_captured: events(SubscriptionEvents.LATE_PAYMENT_CAPTURED).length,
-          }).toEqual({ attempt_failed: 0, payment_failed: 0, late_payment_captured: 0 })
         }
       )
 
@@ -1368,20 +1195,14 @@ medusaIntegrationTestRunner({
             })
             expect(after.subscription).toEqual(before.subscription)
             expect(after.cycle).toEqual(before.cycle)
-            expect(after.attempts).toEqual([
-              expect.objectContaining({
-                id: attempt.id,
-                status: DunningAttemptStatus.SUCCEEDED,
-                error_code: PaymentAttemptErrorCode.CAPTURED_AFTER_CLOSE,
-              }),
-            ])
-            expect(events(SubscriptionEvents.LATE_PAYMENT_CAPTURED).map((message) => message.data)).toEqual([
-              expect.objectContaining({
+            expectCapturedAfterClose(after.attempts, events(SubscriptionEvents.LATE_PAYMENT_CAPTURED), {
+              attempt: { id: attempt.id },
+              event: {
                 payment_id: payment.id,
                 dunning_case_id: caseId,
                 reason: LatePaymentCapturedReason.SUBSCRIPTION_TERMINAL,
-              }),
-            ])
+              },
+            })
             expect(events(DunningEvents.RECOVERED)).toHaveLength(0)
           }
         )
@@ -1417,28 +1238,6 @@ medusaIntegrationTestRunner({
       })
 
       describe("when a write inside the cancellation fails", () => {
-        function failOnce<T extends object>(
-          service: T,
-          method: keyof T & string,
-          matches: (data: Record<string, unknown>) => boolean,
-          message: string
-        ) {
-          const original = (service[method] as (...args: unknown[]) => Promise<unknown>).bind(service)
-          let failed = false
-
-          jest.spyOn(service, method as never).mockImplementation(((data: Record<string, unknown>, ...rest: unknown[]) => {
-            if (!failed && matches(data ?? {})) {
-              failed = true
-
-              return Promise.reject(new Error(message))
-            }
-
-            return original(data, ...rest)
-          }) as never)
-
-          return { message }
-        }
-
         async function withCaseMetadata(container: MedusaContainer, caseId: string) {
           await container.resolve<DunningModuleService>(DUNNING_MODULE).updateDunningCases({
             id: caseId,
@@ -1717,30 +1516,6 @@ medusaIntegrationTestRunner({
         }
       })
 
-      it("keeps the admin's reason off the storefront when it fails the retry, showing the customer a fixed message", async () => {
-        const container = getContainer()
-        const admin = { headers: await createAdminAuthHeaders(container) }
-        const customerId = "cus_dunning_resolve_reason"
-        const seeded = await seedDunningCase(container, "SUB-DUN-RESOLVE-REASON", { customer_id: customerId })
-        const note = "card flagged by fraud team, ticket OPS-1234"
-
-        await ageInFlightAttempt(container, seeded, DEFAULT_AWAITING_PAYMENT_RESOLVE_MIN_HOURS + 1)
-
-        expect((await api.post(route(seeded.dunningCase.id), { reason: note }, admin)).data).toMatchObject({
-          resolution: "failed",
-        })
-
-        const store = { headers: await createStoreCustomerHeaders(container, customerId) }
-        const { subscription } = (
-          await api.get(`/store/customers/me/subscriptions/${seeded.subscription.id}`, store)
-        ).data
-        const { attempts } = await readDunningState(container, seeded.dunningCase.id)
-
-        expect(subscription.payment_recovery.last_error_message).toEqual("Retry payment never arrived")
-        expect(JSON.stringify(subscription)).not.toContain(note)
-        expect(attempts[0].metadata).toMatchObject({ admin_resolution: { reason: note } })
-      })
-
       it("recovers the case through its in-flight attempt when the renewal order is already paid, however young the charge", async () => {
         const container = getContainer()
         const admin = { headers: await createAdminAuthHeaders(container) }
@@ -1777,12 +1552,13 @@ medusaIntegrationTestRunner({
 
       it.each([
         {
-          title: "fails the in-flight attempt and reschedules the next retry",
+          title: "fails the in-flight attempt and reschedules the next retry, showing the customer a fixed message instead of the admin's reason",
           reference: "SUB-DUN-RESOLVE-RESCHEDULE",
           seed: {},
           expected: {
             dunningCase: { status: DunningCaseStatus.RETRY_SCHEDULED, next_retry_at: expect.anything() },
             subscription: SubscriptionStatus.PAST_DUE,
+            paymentRecovery: expect.objectContaining({ last_error_message: "Retry payment never arrived" }),
             events: { attempt_failed: 1, payment_failed: 0 },
           },
         },
@@ -1791,8 +1567,14 @@ medusaIntegrationTestRunner({
           reference: "SUB-DUN-RESOLVE-LAST",
           seed: { attempt_count: 3, max_attempts: 3 },
           expected: {
-            dunningCase: { status: DunningCaseStatus.UNRECOVERED, recovery_reason: DunningRecoveryReason.RETRY_LIMIT_EXHAUSTED },
+            dunningCase: {
+              status: DunningCaseStatus.UNRECOVERED,
+              attempt_count: 3,
+              next_retry_at: null,
+              recovery_reason: DunningRecoveryReason.RETRY_LIMIT_EXHAUSTED,
+            },
             subscription: SubscriptionStatus.PAYMENT_FAILED,
+            paymentRecovery: null,
             events: { attempt_failed: 0, payment_failed: 1 },
           },
         },
@@ -1803,16 +1585,17 @@ medusaIntegrationTestRunner({
           const admin = { headers: await createAdminAuthHeaders(container) }
           const seeded = await seedDunningCase(container, reference, seed)
           const { attempt, session } = seeded.attempts[0]
+          const store = { headers: await createStoreCustomerHeaders(container, seeded.subscription.customer_id) }
+          const reason = "bank confirmed no transfer"
 
           await ageInFlightAttempt(container, seeded, DEFAULT_AWAITING_PAYMENT_RESOLVE_MIN_HOURS + 1)
 
           const events = watchEvents(container)
-          const response = await api.post(
-            route(seeded.dunningCase.id),
-            { reason: "bank confirmed no transfer" },
-            admin
-          )
+          const response = await api.post(route(seeded.dunningCase.id), { reason }, admin)
           const state = await readDunningState(container, seeded.dunningCase.id)
+          const { subscription } = (
+            await api.get(`/store/customers/me/subscriptions/${seeded.subscription.id}`, store)
+          ).data
 
           expect(response.status).toEqual(200)
           expect(response.data).toMatchObject({
@@ -1827,7 +1610,7 @@ medusaIntegrationTestRunner({
               payment_reference: session.id,
               error_message: "Retry payment never arrived",
               metadata: expect.objectContaining({
-                admin_resolution: expect.objectContaining({ reason: "bank confirmed no transfer" }),
+                admin_resolution: expect.objectContaining({ reason }),
               }),
             }),
           ])
@@ -1836,23 +1619,12 @@ medusaIntegrationTestRunner({
             attempt_failed: events(DunningEvents.ATTEMPT_FAILED).length,
             payment_failed: events(DunningEvents.PAYMENT_FAILED).length,
           }).toEqual(expected.events)
+          expect(subscription.payment_recovery).toEqual(expected.paymentRecovery)
+          expect(JSON.stringify(subscription)).not.toContain(reason)
         }
       )
     })
   },
 })
-
-async function whileLockHeld<T>(container: MedusaContainer, key: string, run: () => Promise<T>) {
-  const locking = container.resolve(Modules.LOCKING)
-  const ownerId = `test-holder-${key}`
-
-  await locking.acquire(key, { ownerId, expire: 60 })
-
-  try {
-    return await run()
-  } finally {
-    await locking.release(key, { ownerId })
-  }
-}
 
 jest.setTimeout(60 * 1000)

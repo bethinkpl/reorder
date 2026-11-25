@@ -1,11 +1,10 @@
 import type { MedusaContainer } from "@medusajs/framework/types"
-import { ContainerRegistrationKeys } from "@medusajs/framework/utils"
 import {
   type PaymentFailureAction,
   type PaymentFailureHandling,
   readReportedPaymentFailure,
   type RecordedPaymentFailureOutcome,
-  type ReportedPaymentFailure,
+  toReportedPaymentFailure,
 } from "../../common/types/reported-payment-failure"
 import { DUNNING_MODULE } from "../../modules/dunning"
 import { DunningEvents } from "../../modules/dunning/events"
@@ -43,42 +42,9 @@ export type FailAwaitingDunningAttemptInput = {
   reason: string | null
 }
 
-type PaymentSessionRecord = {
-  id: string
-  context: Record<string, unknown> | null
-}
-
 type RetryMarkers = {
   dunning_case_id: string
   dunning_attempt_id: string
-}
-
-async function readRetryMarkers(
-  container: MedusaContainer,
-  sessionId: string
-): Promise<RetryMarkers | null> {
-  const query = container.resolve(ContainerRegistrationKeys.QUERY)
-
-  const { data: sessions } = await query.graph({
-    entity: "payment_session",
-    fields: ["id", "context"],
-    filters: { id: sessionId },
-  })
-
-  const session: PaymentSessionRecord | undefined = sessions[0]
-  const caseId = session?.context?.dunning_case_id
-  const attemptId = session?.context?.dunning_attempt_id
-
-  if (
-    typeof caseId !== "string" ||
-    !caseId ||
-    typeof attemptId !== "string" ||
-    !attemptId
-  ) {
-    return null
-  }
-
-  return { dunning_case_id: caseId, dunning_attempt_id: attemptId }
 }
 
 async function loadCaseStatus(
@@ -151,16 +117,10 @@ async function failAttemptOfClosedCaseUnderLock(
  */
 export async function failAwaitingDunningAttempt(
   container: MedusaContainer,
-  input: FailAwaitingDunningAttemptInput
+  input: FailAwaitingDunningAttemptInput & RetryMarkers
 ): Promise<PaymentFailureHandling> {
-  const markers = await readRetryMarkers(container, input.session_id)
-
-  if (!markers) {
-    return "ignored"
-  }
-
   const dunningModule = container.resolve<DunningModuleService>(DUNNING_MODULE)
-  const status = await loadCaseStatus(dunningModule, markers.dunning_case_id)
+  const status = await loadCaseStatus(dunningModule, input.dunning_case_id)
 
   if (
     !status ||
@@ -172,8 +132,8 @@ export async function failAwaitingDunningAttempt(
 
   const run = await tryUnderLock(
     container,
-    dunningCaseLockKey(markers.dunning_case_id),
-    () => applyDunningPaymentFailureUnderLock(container, { ...input, ...markers }),
+    dunningCaseLockKey(input.dunning_case_id),
+    () => applyDunningPaymentFailureUnderLock(container, input),
     { wait_seconds: RUN_LOCK_WAIT_SECONDS, hold_seconds: LOCK_HOLD_SECONDS }
   )
 
@@ -185,7 +145,7 @@ export async function failAwaitingDunningAttempt(
     return run.result.applied ? "applied" : "ignored"
   }
 
-  if (!(await recordDunningPaymentFailure(container, { ...input, ...markers }))) {
+  if (!(await recordDunningPaymentFailure(container, input))) {
     throw run.error
   }
 
@@ -210,16 +170,9 @@ async function recordDunningPaymentFailure(
     return false
   }
 
-  const failure: ReportedPaymentFailure = {
-    session_id: input.session_id,
-    action: input.action,
-    reason: input.reason,
-    received_at: new Date().toISOString(),
-  }
-
   await dunningModule.updateDunningAttempts({
     id: attempt.id,
-    reported_payment_failure: failure,
+    reported_payment_failure: toReportedPaymentFailure(input),
   })
 
   logDunningEvent(container.resolve("logger"), "info", {
@@ -240,17 +193,12 @@ export type DunningPaymentFailureApplication = {
   output: RunDunningRetryStepOutput | null
 }
 
-export async function applyDunningPaymentFailureUnderLock(
+async function applyDunningPaymentFailureUnderLock(
   container: MedusaContainer,
   input: FailAwaitingDunningAttemptInput & RetryMarkers
 ): Promise<DunningPaymentFailureApplication> {
-  const status = await loadCaseStatus(
-    container.resolve<DunningModuleService>(DUNNING_MODULE),
-    input.dunning_case_id
-  )
-
-  if (status && CLOSED_DUNNING_CASE_STATUSES.includes(status)) {
-    return { applied: await failAttemptOfClosedCaseUnderLock(container, input), output: null }
+  if (await failAttemptOfClosedCaseUnderLock(container, input)) {
+    return { applied: true, output: null }
   }
 
   const output = await failAwaitingDunningAttemptUnderLock(container, input)

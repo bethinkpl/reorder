@@ -11,7 +11,6 @@ import {
 } from "../modules/renewal/types"
 import {
   isAwaitingPaymentOverdue,
-  isOverdueAlertDue,
   resolveAwaitingPaymentAlertHours,
   resolveAwaitingPaymentResolveMinHours,
   withOverdueAlertMarker,
@@ -25,16 +24,19 @@ import {
 import { SUBSCRIPTION_MODULE } from "../modules/subscription"
 import type SubscriptionModuleService from "../modules/subscription/service"
 import { TERMINAL_SUBSCRIPTION_STATUSES } from "../modules/subscription/types"
-import { activateSubscriptionOnPaymentCaptured } from "../subscribers/activate-subscription-on-payment-captured"
 import { loadOrderAmounts } from "../workflows/steps/run-dunning-retry"
-import { endAwaitingRenewalCyclesOnCancellation } from "../workflows/utils/end-awaiting-renewal-cycle-on-cancellation"
-import { runUnderLock, tryUnderLock } from "../workflows/utils/run-under-lock"
-import { applyRecordedRenewalPaymentFailureUnderLock } from "../workflows/utils/fail-awaiting-renewal-cycle"
 import {
-  findCapturedPaymentId,
-  isSubmittedSessionGone,
-} from "../workflows/utils/late-payment-capture"
-import { isLockBusyError } from "../common/utils/lock-busy-error"
+  dueOverdueAlert,
+  forEachPage,
+  type OverdueAlertInput,
+  redeliverLostCapture,
+  runSweepJob,
+  SWEEP_PARENT_LOCK,
+} from "../workflows/utils/awaiting-charge-sweep"
+import { endAwaitingRenewalCyclesOnCancellation } from "../workflows/utils/end-awaiting-renewal-cycle-on-cancellation"
+import { tryUnderLock } from "../workflows/utils/run-under-lock"
+import { applyRecordedRenewalPaymentFailureUnderLock } from "../workflows/utils/fail-awaiting-renewal-cycle"
+import { isSubmittedSessionGone } from "../workflows/utils/late-payment-capture"
 import {
   settleAwaitingRenewalCycle,
   settleAwaitingRenewalCycleUnderLock,
@@ -43,25 +45,8 @@ import {
 import { renewalSubscriptionLockKey } from "../modules/renewal/utils/lock-key"
 
 const JOB_NAME = "reconcile-awaiting-renewal-cycles"
-const JOB_LOCK_KEY = "jobs:reconcile-awaiting-renewal-cycles"
-/**
- * The lock is not renewed while held, so it lasts as long as a sweep realistically can, and expires
- * before the next scheduled run: a crashed run skips at most one tick, and a sweep that overruns it
- * only overlaps the next one, whose writes the per-cycle and per-case locks still serialise.
- */
-const JOB_LOCK = { wait_seconds: 1, hold_seconds: 25 * 60 }
-const BATCH_SIZE = 200
-const ALERT_LOCK_TIMEOUT_SECONDS = 5
-const RENEWAL_LOCK_TIMEOUT_SECONDS = 5
-const RENEWAL_LOCK_HOLD_SECONDS = 120
 /** Well past the 120 s a renewal run holds its lock, so a run still in progress is never touched. */
 const STALE_PROCESSING_MINUTES = 10
-
-type OverdueAlertInput = {
-  now: Date
-  alertHours: number
-  correlationId: string
-}
 
 export type ReconcileAwaitingRenewalCyclesResult = Record<
   | SettleAwaitingRenewalCycleOutcome
@@ -94,27 +79,8 @@ async function findDueOverdueAlert(
     { renewal_cycle_id: cycle.id },
     { order: { attempt_no: "DESC" }, take: 1 }
   )
-  const alertKey = latest?.id ?? cycle.id
-  const submittedAt = latest?.started_at ?? cycle.updated_at
 
-  if (
-    !isOverdueAlertDue({
-      metadata: cycle.metadata,
-      alert_key: alertKey,
-      submitted_at: submittedAt,
-      now: input.now,
-      limit_hours: input.alertHours,
-    })
-  ) {
-    return null
-  }
-
-  return {
-    cycle,
-    alertKey,
-    submittedAt: new Date(submittedAt).toISOString(),
-    paymentSessionId: latest?.payment_reference ?? null,
-  }
+  return dueOverdueAlert(cycle, latest, input)
 }
 
 async function raiseOverdueAlertOnce(
@@ -141,7 +107,7 @@ async function raiseOverdueAlertOnce(
 
       await renewalModule.updateRenewalCycles({
         id: cycle.id,
-        metadata: withOverdueAlertMarker(due.cycle.metadata, due.alertKey),
+        metadata: withOverdueAlertMarker(due.parent.metadata, due.alertKey),
       })
 
       logRenewalEvent(container.resolve("logger"), "warn", {
@@ -165,7 +131,7 @@ async function raiseOverdueAlertOnce(
 
       return true
     },
-    { wait_seconds: ALERT_LOCK_TIMEOUT_SECONDS, hold_seconds: RENEWAL_LOCK_HOLD_SECONDS }
+    SWEEP_PARENT_LOCK
   )
 
   return run.acquired && run.result
@@ -230,10 +196,12 @@ async function underRenewalLock<T>(
   job: () => Promise<T>,
   whenBusy: T
 ): Promise<T> {
-  const run = await tryUnderLock(container, renewalSubscriptionLockKey(subscriptionId), job, {
-    wait_seconds: RENEWAL_LOCK_TIMEOUT_SECONDS,
-    hold_seconds: RENEWAL_LOCK_HOLD_SECONDS,
-  })
+  const run = await tryUnderLock(
+    container,
+    renewalSubscriptionLockKey(subscriptionId),
+    job,
+    SWEEP_PARENT_LOCK
+  )
 
   return run.acquired ? run.result : whenBusy
 }
@@ -319,94 +287,73 @@ async function failStaleAttemptUnderLock(
   return true
 }
 
-async function assertAttemptClosed(
-  renewalModule: RenewalModuleService,
-  attemptId: string,
-  paymentId: string
-) {
-  const [attempt] = await renewalModule.listRenewalAttempts({ id: attemptId })
-
-  if (attempt?.status === RenewalAttemptStatus.PROCESSING) {
-    throw new Error(
-      `Captured payment '${paymentId}' of attempt '${attemptId}' was delivered again, but the attempt is still processing`
-    )
-  }
-}
-
 async function applyRecordedPaymentFailures(
   container: MedusaContainer,
   input: OverdueAlertInput,
   result: ReconcileAwaitingRenewalCyclesResult
 ): Promise<void> {
   const renewalModule = container.resolve<RenewalModuleService>(RENEWAL_MODULE)
-  let cursor: string | null = null
 
-  while (true) {
-    const attempts = await renewalModule.listRenewalAttempts(
-      {
-        reported_payment_failure: { $ne: null },
-        ...(cursor ? { id: { $gt: cursor } } : {}),
-      } as never,
-      { select: ["id", "renewal_cycle_id"], take: BATCH_SIZE, order: { id: "ASC" } }
-    )
-    const cycles = attempts.length
-      ? await renewalModule.listRenewalCycles(
-          { id: attempts.map((attempt) => attempt.renewal_cycle_id) },
-          { select: ["id", "subscription_id"] }
-        )
-      : []
-    const cyclesById = new Map(cycles.map((cycle) => [cycle.id, cycle]))
+  await forEachPage(
+    (after, page) =>
+      renewalModule.listRenewalAttempts(
+        { reported_payment_failure: { $ne: null }, ...after } as never,
+        { select: ["id", "renewal_cycle_id"], ...page }
+      ),
+    async (attempts) => {
+      const cycles = attempts.length
+        ? await renewalModule.listRenewalCycles(
+            { id: attempts.map((attempt) => attempt.renewal_cycle_id) },
+            { select: ["id", "subscription_id"] }
+          )
+        : []
+      const cyclesById = new Map(cycles.map((cycle) => [cycle.id, cycle]))
 
-    for (const attempt of attempts) {
-      const cycle = cyclesById.get(attempt.renewal_cycle_id)
+      for (const attempt of attempts) {
+        const cycle = cyclesById.get(attempt.renewal_cycle_id)
 
-      if (!cycle) {
-        continue
-      }
-
-      try {
-        const outcome = await underRenewalLock(
-          container,
-          cycle.subscription_id,
-          () => applyRecordedRenewalPaymentFailureUnderLock(container, attempt.id),
-          null
-        )
-
-        if (!outcome) {
+        if (!cycle) {
           continue
         }
 
-        if (outcome === "applied") {
-          result.recorded_failures_applied += 1
-        }
+        try {
+          const outcome = await underRenewalLock(
+            container,
+            cycle.subscription_id,
+            () => applyRecordedRenewalPaymentFailureUnderLock(container, attempt.id),
+            null
+          )
 
-        logRenewalEvent(container.resolve("logger"), "info", {
-          event: RenewalLogEvents.RECORDED_PAYMENT_FAILURE,
-          correlation_id: input.correlationId,
-          renewal_cycle_id: cycle.id,
-          subscription_id: cycle.subscription_id,
-          job_name: JOB_NAME,
-          alertable: false,
-          message:
-            outcome === "applied"
-              ? `Applied the payment failure recorded on attempt '${attempt.id}' while its renewal lock was busy`
-              : outcome === "order_paid"
-                ? `Dropped the payment failure recorded on attempt '${attempt.id}': its renewal order has been paid since`
-                : `Dropped the payment failure recorded on attempt '${attempt.id}': nothing it names is still in flight`,
-          metadata: { attempt_id: attempt.id },
-        })
-      } catch (error) {
-        result.failed += 1
-        reportCycleFailure(container, cycle.id, error)
+          if (!outcome) {
+            continue
+          }
+
+          if (outcome === "applied") {
+            result.recorded_failures_applied += 1
+          }
+
+          logRenewalEvent(container.resolve("logger"), "info", {
+            event: RenewalLogEvents.RECORDED_PAYMENT_FAILURE,
+            correlation_id: input.correlationId,
+            renewal_cycle_id: cycle.id,
+            subscription_id: cycle.subscription_id,
+            job_name: JOB_NAME,
+            alertable: false,
+            message:
+              outcome === "applied"
+                ? `Applied the payment failure recorded on attempt '${attempt.id}' while its renewal lock was busy`
+                : outcome === "order_paid"
+                  ? `Dropped the payment failure recorded on attempt '${attempt.id}': its renewal order has been paid since`
+                  : `Dropped the payment failure recorded on attempt '${attempt.id}': nothing it names is still in flight`,
+            metadata: { attempt_id: attempt.id },
+          })
+        } catch (error) {
+          result.failed += 1
+          reportCycleFailure(container, cycle.id, error)
+        }
       }
     }
-
-    if (attempts.length < BATCH_SIZE) {
-      return
-    }
-
-    cursor = attempts[attempts.length - 1].id
-  }
+  )
 }
 
 async function reconcileAttemptsOfClosedCycles(
@@ -416,62 +363,51 @@ async function reconcileAttemptsOfClosedCycles(
 ): Promise<void> {
   const renewalModule = container.resolve<RenewalModuleService>(RENEWAL_MODULE)
   const minHours = resolveAwaitingPaymentResolveMinHours()
-  let cursor: string | null = null
 
-  while (true) {
-    const attempts = await renewalModule.listRenewalAttempts(
-      {
-        status: RenewalAttemptStatus.PROCESSING,
-        ...(cursor ? { id: { $gt: cursor } } : {}),
-      },
-      { take: BATCH_SIZE, order: { id: "ASC" } }
-    )
-    const cycles = attempts.length
-      ? await renewalModule.listRenewalCycles({
-          id: attempts.map((attempt) => attempt.renewal_cycle_id),
-        })
-      : []
-    const cyclesById = new Map(cycles.map((cycle) => [cycle.id, cycle]))
+  await forEachPage(
+    (after, page) =>
+      renewalModule.listRenewalAttempts({ status: RenewalAttemptStatus.PROCESSING, ...after }, page),
+    async (attempts) => {
+      const cycles = attempts.length
+        ? await renewalModule.listRenewalCycles({
+            id: attempts.map((attempt) => attempt.renewal_cycle_id),
+          })
+        : []
+      const cyclesById = new Map(cycles.map((cycle) => [cycle.id, cycle]))
 
-    for (const attempt of attempts) {
-      const cycle = cyclesById.get(attempt.renewal_cycle_id)
+      for (const attempt of attempts) {
+        const cycle = cyclesById.get(attempt.renewal_cycle_id)
 
-      if (!cycle || !CLOSED_RENEWAL_CYCLE_STATUSES.includes(cycle.status)) {
-        continue
-      }
-
-      try {
-        const capturedPaymentId = attempt.payment_reference
-          ? await findCapturedPaymentId(container, attempt.payment_reference)
-          : null
-
-        if (capturedPaymentId) {
-          await activateSubscriptionOnPaymentCaptured(container, capturedPaymentId)
-          await assertAttemptClosed(renewalModule, attempt.id, capturedPaymentId)
-          result.late_captures += 1
-        } else if (
-          isAwaitingPaymentOverdue(attempt.started_at, input.now, minHours) &&
-          (await underRenewalLock(
-            container,
-            cycle.subscription_id,
-            () => failStaleAttemptUnderLock(container, attempt.id, { ...input, minHours }),
-            false
-          ))
-        ) {
-          result.stale_attempts_closed += 1
+        if (!cycle || !CLOSED_RENEWAL_CYCLE_STATUSES.includes(cycle.status)) {
+          continue
         }
-      } catch (error) {
-        result.failed += 1
-        reportCycleFailure(container, cycle.id, error)
+
+        try {
+          if (
+            await redeliverLostCapture(container, attempt, async () =>
+              (await renewalModule.listRenewalAttempts({ id: attempt.id }))[0]?.status ===
+              RenewalAttemptStatus.PROCESSING
+            )
+          ) {
+            result.late_captures += 1
+          } else if (
+            isAwaitingPaymentOverdue(attempt.started_at, input.now, minHours) &&
+            (await underRenewalLock(
+              container,
+              cycle.subscription_id,
+              () => failStaleAttemptUnderLock(container, attempt.id, { ...input, minHours }),
+              false
+            ))
+          ) {
+            result.stale_attempts_closed += 1
+          }
+        } catch (error) {
+          result.failed += 1
+          reportCycleFailure(container, cycle.id, error)
+        }
       }
     }
-
-    if (attempts.length < BATCH_SIZE) {
-      return
-    }
-
-    cursor = attempts[attempts.length - 1].id
-  }
+  )
 }
 
 async function findPaidStaleCharge(
@@ -557,47 +493,35 @@ async function reconcileProcessingCycles(
   result: ReconcileAwaitingRenewalCyclesResult
 ): Promise<void> {
   const renewalModule = container.resolve<RenewalModuleService>(RENEWAL_MODULE)
-  let cursor: string | null = null
 
-  while (true) {
-    const cycles = await renewalModule.listRenewalCycles(
-      {
-        status: RenewalCycleStatus.PROCESSING,
-        ...(cursor ? { id: { $gt: cursor } } : {}),
-      },
-      {
-        select: ["id", "subscription_id"],
-        take: BATCH_SIZE,
-        order: { id: "ASC" },
-      }
-    )
-
-    for (const cycle of cycles) {
-      try {
-        if (await settlePaidProcessingCycle(container, cycle, input)) {
-          result.processing_settled += 1
-        } else if (
-          await raiseOverdueAlertOnce(
-            container,
-            cycle,
-            RenewalCycleStatus.PROCESSING,
-            input
-          )
-        ) {
-          result.processing_overdue += 1
+  await forEachPage(
+    (after, page) =>
+      renewalModule.listRenewalCycles(
+        { status: RenewalCycleStatus.PROCESSING, ...after },
+        { select: ["id", "subscription_id"], ...page }
+      ),
+    async (cycles) => {
+      for (const cycle of cycles) {
+        try {
+          if (await settlePaidProcessingCycle(container, cycle, input)) {
+            result.processing_settled += 1
+          } else if (
+            await raiseOverdueAlertOnce(
+              container,
+              cycle,
+              RenewalCycleStatus.PROCESSING,
+              input
+            )
+          ) {
+            result.processing_overdue += 1
+          }
+        } catch (error) {
+          result.failed += 1
+          reportCycleFailure(container, cycle.id, error)
         }
-      } catch (error) {
-        result.failed += 1
-        reportCycleFailure(container, cycle.id, error)
       }
     }
-
-    if (cycles.length < BATCH_SIZE) {
-      return
-    }
-
-    cursor = cycles[cycles.length - 1].id
-  }
+  )
 }
 
 /**
@@ -630,67 +554,55 @@ export async function reconcileAwaitingRenewalCycles(
     recorded_failures_applied: 0,
     processing_settled: 0,
   }
-  let cursor: string | null = null
 
   await applyRecordedPaymentFailures(container, alertInput, result)
 
-  while (true) {
-    const cycles = await renewalModule.listRenewalCycles(
-      {
-        status: RenewalCycleStatus.AWAITING_PAYMENT,
-        ...(cursor ? { id: { $gt: cursor } } : {}),
-      },
-      {
-        select: ["id", "subscription_id"],
-        take: BATCH_SIZE,
-        order: { id: "ASC" },
-      }
-    )
+  await forEachPage(
+    (after, page) =>
+      renewalModule.listRenewalCycles(
+        { status: RenewalCycleStatus.AWAITING_PAYMENT, ...after },
+        { select: ["id", "subscription_id"], ...page }
+      ),
+    async (cycles) => {
+      for (const cycle of cycles) {
+        result.scanned += 1
 
-    for (const cycle of cycles) {
-      result.scanned += 1
+        try {
+          if (await endCycleOfEndedSubscription(container, cycle)) {
+            result.ended_cancelled += 1
 
-      try {
-        if (await endCycleOfEndedSubscription(container, cycle)) {
-          result.ended_cancelled += 1
+            continue
+          }
 
-          continue
+          const outcome = await settleAwaitingRenewalCycle(container, cycle.id)
+
+          result[outcome] += 1
+
+          if (outcome !== "order_unpaid") {
+            continue
+          }
+
+          if (await reportMissingSession(container, cycle, alertInput)) {
+            result.session_missing += 1
+          }
+
+          if (
+            await raiseOverdueAlertOnce(
+              container,
+              cycle,
+              RenewalCycleStatus.AWAITING_PAYMENT,
+              alertInput
+            )
+          ) {
+            result.overdue += 1
+          }
+        } catch (error) {
+          result.failed += 1
+          reportCycleFailure(container, cycle.id, error)
         }
-
-        const outcome = await settleAwaitingRenewalCycle(container, cycle.id)
-
-        result[outcome] += 1
-
-        if (outcome !== "order_unpaid") {
-          continue
-        }
-
-        if (await reportMissingSession(container, cycle, alertInput)) {
-          result.session_missing += 1
-        }
-
-        if (
-          await raiseOverdueAlertOnce(
-            container,
-            cycle,
-            RenewalCycleStatus.AWAITING_PAYMENT,
-            alertInput
-          )
-        ) {
-          result.overdue += 1
-        }
-      } catch (error) {
-        result.failed += 1
-        reportCycleFailure(container, cycle.id, error)
       }
     }
-
-    if (cycles.length < BATCH_SIZE) {
-      break
-    }
-
-    cursor = cycles[cycles.length - 1].id
-  }
+  )
 
   await reconcileProcessingCycles(container, alertInput, result)
   await reconcileAttemptsOfClosedCycles(container, alertInput, result)
@@ -701,31 +613,15 @@ export async function reconcileAwaitingRenewalCycles(
 export default async function reconcileAwaitingRenewalCyclesJob(
   container: MedusaContainer
 ) {
-  const logger = container.resolve("logger")
-  const startedAt = Date.now()
+  await runSweepJob(
+    container,
+    { name: JOB_NAME, lockKey: "jobs:reconcile-awaiting-renewal-cycles", errorMessage: getRenewalErrorMessage },
+    async () => {
+      const result = await reconcileAwaitingRenewalCycles(container)
 
-  try {
-    await runUnderLock(
-      container,
-      JOB_LOCK_KEY,
-      async () => {
-        const result = await reconcileAwaitingRenewalCycles(container)
-
-        logger.info(
-          `[${JOB_NAME}] scanned ${result.scanned} awaiting renewal cycle(s), settled ${result.settled}, closed without moving dates ${result.closed_superseded}, still unpaid ${result.order_unpaid} (overdue ${result.overdue}, payment session gone ${result.session_missing}), processing cycles settled on a paid order ${result.processing_settled}, submitted charges overdue while processing ${result.processing_overdue}, terminal subscription ${result.subscription_terminal}, ended for a cancelled subscription ${result.ended_cancelled}, late captures redelivered ${result.late_captures}, stale attempts closed ${result.stale_attempts_closed}, recorded payment failures applied ${result.recorded_failures_applied}, no longer awaiting ${result.not_awaiting}, failed ${result.failed} in ${Date.now() - startedAt}ms`
-        )
-      },
-      JOB_LOCK
-    )
-  } catch (error) {
-    const message = getRenewalErrorMessage(error)
-
-    if (isLockBusyError(error)) {
-      logger.warn(`[${JOB_NAME}] did not complete: ${message}`)
-    } else {
-      logger.error(`[${JOB_NAME}] did not complete: ${message}`)
+      return `scanned ${result.scanned} awaiting renewal cycle(s), settled ${result.settled}, closed without moving dates ${result.closed_superseded}, still unpaid ${result.order_unpaid} (overdue ${result.overdue}, payment session gone ${result.session_missing}), processing cycles settled on a paid order ${result.processing_settled}, submitted charges overdue while processing ${result.processing_overdue}, terminal subscription ${result.subscription_terminal}, ended for a cancelled subscription ${result.ended_cancelled}, late captures redelivered ${result.late_captures}, stale attempts closed ${result.stale_attempts_closed}, recorded payment failures applied ${result.recorded_failures_applied}, no longer awaiting ${result.not_awaiting}, failed ${result.failed}`
     }
-  }
+  )
 }
 
 export const config = {

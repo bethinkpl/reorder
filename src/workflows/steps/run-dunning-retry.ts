@@ -37,7 +37,6 @@ import {
   toRetryBlockedError,
 } from "../../modules/dunning/utils/retry-eligibility"
 import { RenewalSettlementSource } from "../../modules/renewal/types"
-import { ensureNextRenewalCycleWorkflow } from "../ensure-next-renewal-cycle"
 import {
   hasCustomerPaymentInProgress,
   loadOrderPaymentCollections,
@@ -50,10 +49,7 @@ import {
   settleDunningCaseRecovered,
   type SettleDunningCaseRecoveredResult,
 } from "../utils/settle-dunning-recovery"
-import {
-  settleRenewalCycleSucceeded,
-  SUBSCRIPTION_CANCELLED_REFUSAL,
-} from "../utils/settle-renewal-cycle-succeeded"
+import { settleRenewalCycleAndScheduleNext } from "../utils/settle-renewal-cycle-and-schedule-next"
 import { settleSubscriptionPaymentFailure } from "../utils/settle-subscription-payment-failure"
 import { SUBSCRIPTION_MODULE } from "../../modules/subscription"
 import type SubscriptionModuleService from "../../modules/subscription/service"
@@ -1206,28 +1202,15 @@ async function finalizeRecoveredRenewal(
     )
   }
 
-  await nonFatal("settling its renewal cycle", async () => {
-    const settlement = await settleRenewalCycleSucceeded(container, {
+  await nonFatal("settling its renewal cycle", () =>
+    settleRenewalCycleAndScheduleNext(container, {
       renewal_cycle_id: dunningCase.renewal_cycle_id,
       subscription_id: subscription.id,
       order_id: dunningCase.renewal_order_id,
       finished_at: input.finishedAt,
-      // Dunning only follows a charge, and a run with the skip set charges nothing: a skip the
-      // subscription has now was requested after the cycle ran, for a later one.
-      consumed_skip_next_cycle: false,
       source: input.source,
     })
-
-    // Also after a supersession: an earlier settlement of this cycle may have moved the dates and
-    // failed before it scheduled the next cycle.
-    if (settlement.reason === SUBSCRIPTION_CANCELLED_REFUSAL) {
-      return
-    }
-
-    await ensureNextRenewalCycleWorkflow(container).run({
-      input: { subscription_id: subscription.id },
-    })
-  })
+  )
 }
 
 function outcomeOfCaseSettledElsewhere(
@@ -1955,8 +1938,11 @@ export async function settleDeclinedRetryAttempt(
   const shouldCloseAsUnrecovered =
     outcome.kind === "permanent_failure" ||
     consumedAttempts >= dunningCase.max_attempts
+  const nextRetryAt = shouldCloseAsUnrecovered
+    ? null
+    : calculateNextRetryAt(dunningCase.retry_schedule!, consumedAttempts, finishedAt)
 
-  if (shouldCloseAsUnrecovered) {
+  if (!nextRetryAt) {
     if (!(await hasReachedProvider(container, dunningCase.id))) {
       return (await parkForManualResolution(container, {
         dunningCase,
@@ -1979,7 +1965,9 @@ export async function settleDeclinedRetryAttempt(
     const recoveryReason =
       outcome.kind === "permanent_failure"
         ? DunningRecoveryReason.PERMANENT_PAYMENT_FAILURE
-        : DunningRecoveryReason.RETRY_LIMIT_EXHAUSTED
+        : shouldCloseAsUnrecovered
+          ? DunningRecoveryReason.RETRY_LIMIT_EXHAUSTED
+          : DunningRecoveryReason.RETRY_SCHEDULE_EXHAUSTED
 
     const settlement = await settleSubscriptionPaymentFailure(container, {
       subscription_id: subscription.id,
@@ -2036,92 +2024,6 @@ export async function settleDeclinedRetryAttempt(
       error_code: outcome.error_code,
       next_retry_at: null,
       recovery_reason: recoveryReason,
-      park_reason: null,
-      attempt_counted: true,
-    }
-  }
-
-  const nextRetryAt = calculateNextRetryAt(
-    dunningCase.retry_schedule!,
-    consumedAttempts,
-    finishedAt
-  )
-
-  if (!nextRetryAt) {
-    if (!(await hasReachedProvider(container, dunningCase.id))) {
-      return (await parkForManualResolution(container, {
-        dunningCase,
-        caseMetadata,
-        attempt,
-        attemptStatus: DunningAttemptStatus.FAILED,
-        attemptNo,
-        attemptCount: consumedAttempts,
-        attemptCounted: true,
-        parkReason: "unreached_provider",
-        outcome,
-        finishedAt,
-        correlationId,
-        durationMs: Date.now() - startedAtMs,
-        subscriptionStatus: subscription.status,
-        markCaseParked,
-      })).output
-    }
-
-    const settlement = await settleSubscriptionPaymentFailure(container, {
-      subscription_id: subscription.id,
-      dunning_case_id: dunningCase.id,
-      recovery_reason: DunningRecoveryReason.RETRY_SCHEDULE_EXHAUSTED,
-      at: finishedAt,
-    })
-
-    const updatedCase = await dunningModule.updateDunningCases({
-      id: dunningCase.id,
-      status: DunningCaseStatus.UNRECOVERED,
-      next_retry_at: null,
-      last_attempt_at: finishedAt,
-      last_payment_error_code: outcome.error_code,
-      last_payment_error_message: outcome.error_message,
-      closed_at: finishedAt,
-      recovery_reason: DunningRecoveryReason.RETRY_SCHEDULE_EXHAUSTED,
-      metadata: caseMetadata,
-    } as any)
-
-    logDunningEvent(logger, "warn", {
-      event: DunningLogEvents.RETRY,
-      outcome: "failed",
-      correlation_id: correlationId,
-      dunning_case_id: updatedCase.id,
-      subscription_id: updatedCase.subscription_id,
-      renewal_cycle_id: updatedCase.renewal_cycle_id,
-      attempt_no: attemptNo,
-      duration_ms: Date.now() - startedAtMs,
-      failure_count: 1,
-      unrecovered_count: 1,
-      avg_attempts: attemptNo,
-      failure_kind: "retry_exhausted",
-      alertable: false,
-      message: outcome.error_message,
-      metadata: {
-        retry_outcome: "unrecovered",
-        error_code: outcome.error_code,
-        payment_reference: outcome.payment_reference,
-      },
-    })
-
-    return {
-      dunning_case_id: updatedCase.id,
-      dunning_attempt_id: attempt.id,
-      outcome: "unrecovered",
-      subscription_id: updatedCase.subscription_id,
-      subscription_status: settlement.status,
-      renewal_order_id: dunningCase.renewal_order_id,
-      settled_now: settlement.settled,
-      recovered_now: false,
-      correlation_id: correlationId,
-      attempt_no: attemptNo,
-      error_code: outcome.error_code,
-      next_retry_at: null,
-      recovery_reason: DunningRecoveryReason.RETRY_SCHEDULE_EXHAUSTED,
       park_reason: null,
       attempt_counted: true,
     }

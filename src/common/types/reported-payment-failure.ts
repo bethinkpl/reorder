@@ -16,6 +16,12 @@ export type ReportedPaymentFailure = {
   received_at: string
 }
 
+export function toReportedPaymentFailure(
+  input: Pick<ReportedPaymentFailure, "session_id" | "action" | "reason">
+): ReportedPaymentFailure {
+  return { session_id: input.session_id, action: input.action, reason: input.reason, received_at: new Date().toISOString() }
+}
+
 export function readReportedPaymentFailure(value: unknown): ReportedPaymentFailure | null {
   if (typeof value !== "object" || value === null) {
     return null

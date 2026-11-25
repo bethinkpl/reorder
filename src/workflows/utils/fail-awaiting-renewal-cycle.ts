@@ -4,7 +4,7 @@ import {
   type PaymentFailureHandling,
   readReportedPaymentFailure,
   type RecordedPaymentFailureOutcome,
-  type ReportedPaymentFailure,
+  toReportedPaymentFailure,
 } from "../../common/types/reported-payment-failure"
 import {
   ActivityLogActorType,
@@ -181,16 +181,9 @@ async function recordRenewalPaymentFailure(
     return false
   }
 
-  const failure: ReportedPaymentFailure = {
-    session_id: input.session_id,
-    action: input.action,
-    reason: input.reason,
-    received_at: new Date().toISOString(),
-  }
-
   await renewalModule.updateRenewalAttempts({
     id: attempt.id,
-    reported_payment_failure: failure,
+    reported_payment_failure: toReportedPaymentFailure(input),
   })
 
   logRenewalEvent(container.resolve("logger"), "info", {
@@ -206,22 +199,14 @@ async function recordRenewalPaymentFailure(
   return true
 }
 
-export async function applyRenewalPaymentFailureUnderLock(
+async function applyRenewalPaymentFailureUnderLock(
   container: MedusaContainer,
   input: FailAwaitingRenewalCycleInput
 ): Promise<boolean> {
-  const cycle = await loadCycle(
-    container.resolve<RenewalModuleService>(RENEWAL_MODULE),
-    input.renewal_cycle_id
+  return (
+    (await failAttemptOfClosedCycleUnderLock(container, input)) ||
+    (await failAwaitingRenewalCycleUnderLock(container, input))
   )
-
-  if (!cycle) {
-    return false
-  }
-
-  return CLOSED_RENEWAL_CYCLE_STATUSES.includes(cycle.status)
-    ? await failAttemptOfClosedCycleUnderLock(container, input)
-    : await failAwaitingRenewalCycleUnderLock(container, input)
 }
 
 export async function applyRecordedRenewalPaymentFailureUnderLock(

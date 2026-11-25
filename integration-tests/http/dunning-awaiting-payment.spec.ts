@@ -407,6 +407,8 @@ medusaIntegrationTestRunner({
         const container = getContainer()
         const seeded = await seedDunningCase(container, "SUB-DUN-AWAIT-FAILED")
         const failure = {
+          dunning_case_id: seeded.dunningCase.id,
+          dunning_attempt_id: seeded.attempts[0].attempt.id,
           session_id: seeded.attempts[0].session.id,
           action: PaymentActions.FAILED,
           reason: "insufficient_funds",
@@ -513,6 +515,8 @@ medusaIntegrationTestRunner({
         const events = watchEvents(container)
 
         await failAwaitingDunningAttempt(container, {
+          dunning_case_id: seeded.dunningCase.id,
+          dunning_attempt_id: seeded.attempts[0].attempt.id,
           session_id: seeded.attempts[0].session.id,
           ...report,
         })
@@ -535,6 +539,8 @@ medusaIntegrationTestRunner({
         })
 
         await failAwaitingDunningAttempt(container, {
+          dunning_case_id: seeded.dunningCase.id,
+          dunning_attempt_id: seeded.attempts[0].attempt.id,
           session_id: seeded.attempts[0].session.id,
           action: PaymentActions.FAILED,
           reason: "insufficient_funds",

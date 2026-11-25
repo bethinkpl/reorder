@@ -140,6 +140,7 @@ export async function cancelPendingSubscriptionOnPaymentFailure(
   const renewalMarkers = readRenewalSessionMarkers(session?.context)
   const renewalCycleId = renewalMarkers.renewal_cycle_id
   const dunningCaseId = session?.context?.dunning_case_id
+  const dunningAttemptId = session?.context?.dunning_attempt_id
   const reason =
     typeof decoded?.reason === "string" && decoded.reason ? decoded.reason : null
 
@@ -165,6 +166,10 @@ export async function cancelPendingSubscriptionOnPaymentFailure(
   }
 
   if (typeof dunningCaseId === "string" && dunningCaseId) {
+    if (typeof dunningAttemptId !== "string" || !dunningAttemptId) {
+      return
+    }
+
     await reportingFailure(
       container,
       {
@@ -174,6 +179,8 @@ export async function cancelPendingSubscriptionOnPaymentFailure(
       },
       () =>
         failAwaitingDunningAttempt(container, {
+          dunning_case_id: dunningCaseId,
+          dunning_attempt_id: dunningAttemptId,
           session_id: sessionId,
           action: processed.action,
           reason,

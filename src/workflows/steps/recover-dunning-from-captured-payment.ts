@@ -21,12 +21,9 @@ import { SUBSCRIPTION_MODULE } from "../../modules/subscription"
 import type SubscriptionModuleService from "../../modules/subscription/service"
 import { SubscriptionStatus } from "../../modules/subscription/types"
 import { subscriptionErrors } from "../../modules/subscription/utils/errors"
-import { ensureNextRenewalCycleWorkflow } from "../ensure-next-renewal-cycle"
 import { settleDunningCaseRecovered } from "../utils/settle-dunning-recovery"
-import {
-  settleRenewalCycleSucceeded,
-  SUBSCRIPTION_CANCELLED_REFUSAL,
-} from "../utils/settle-renewal-cycle-succeeded"
+import { settleRenewalCycleAndScheduleNext } from "../utils/settle-renewal-cycle-and-schedule-next"
+import { SUBSCRIPTION_CANCELLED_REFUSAL } from "../utils/settle-renewal-cycle-succeeded"
 import { loadOrderAmounts } from "./run-dunning-retry"
 
 type DunningCaseRecord = {
@@ -232,25 +229,12 @@ export async function recoverDunningFromCapturedPayment(
     source: RenewalSettlementSource = RenewalSettlementSource.CUSTOMER_PAYMENT
   ) => {
     try {
-      const settlement = await settleRenewalCycleSucceeded(container, {
+      await settleRenewalCycleAndScheduleNext(container, {
         renewal_cycle_id: dunningCase.renewal_cycle_id,
         subscription_id: subscription.id,
         order_id: dunningCase.renewal_order_id,
         finished_at: now,
-        // Dunning only follows a charge, and a run with the skip set charges nothing: a skip the
-        // subscription has now was requested after the cycle ran, for a later one.
-        consumed_skip_next_cycle: false,
         source,
-      })
-
-      // Also after a supersession: an earlier settlement of this cycle may have moved the dates
-      // and failed before it scheduled the next cycle.
-      if (settlement.reason === SUBSCRIPTION_CANCELLED_REFUSAL) {
-        return
-      }
-
-      await ensureNextRenewalCycleWorkflow(container).run({
-        input: { subscription_id: subscription.id },
       })
     } catch (error) {
       logDunningEvent(logger, "error", {

@@ -1,11 +1,11 @@
 import { createStep, StepResponse } from "@medusajs/framework/workflows-sdk"
-import { Modules } from "@medusajs/framework/utils"
 import type { MedusaContainer } from "@medusajs/framework/types"
 import { isActiveDunningCase } from "../../modules/cancellation/utils/retention-offer-policy"
 import { DUNNING_MODULE } from "../../modules/dunning"
 import type DunningModuleService from "../../modules/dunning/service"
 import { DunningCaseStatus } from "../../modules/dunning/types"
 import { dunningErrors } from "../../modules/dunning/utils/errors"
+import { withLock } from "../utils/with-lock"
 
 export const SUBSCRIPTION_CANCELLED_RECOVERY_REASON =
   "subscription_cancelled_by_customer"
@@ -67,7 +67,6 @@ export const closeSubscriptionDunningStep = createStep(
   ) {
     const dunningModule =
       container.resolve<DunningModuleService>(DUNNING_MODULE)
-    const locking = (container as MedusaContainer).resolve(Modules.LOCKING)
 
     const dunningCases = (await dunningModule.listDunningCases({
       subscription_id: input.subscription_id,
@@ -81,8 +80,10 @@ export const closeSubscriptionDunningStep = createStep(
     const closedCases: DunningCaseRecord[] = []
 
     for (const candidateCase of candidateCases) {
-      await locking.execute(
+      await withLock(
+        container as MedusaContainer,
         `dunning:${candidateCase.id}`,
+        { wait_seconds: DUNNING_CASE_LOCK_TIMEOUT_SECONDS, ttl_seconds: 120 },
         async () => {
           const currentCase = (await dunningModule.retrieveDunningCase(
             candidateCase.id
@@ -113,9 +114,6 @@ export const closeSubscriptionDunningStep = createStep(
           } as any)
 
           closedCases.push(currentCase)
-        },
-        {
-          timeout: DUNNING_CASE_LOCK_TIMEOUT_SECONDS,
         }
       )
     }

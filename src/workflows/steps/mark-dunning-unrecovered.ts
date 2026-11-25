@@ -1,7 +1,10 @@
 import { createStep, StepResponse } from "@medusajs/framework/workflows-sdk"
 import { DUNNING_MODULE } from "../../modules/dunning"
 import type DunningModuleService from "../../modules/dunning/service"
-import { DunningCaseStatus } from "../../modules/dunning/types"
+import {
+  CHARGE_IN_FLIGHT_DUNNING_CASE_STATUSES,
+  DunningCaseStatus,
+} from "../../modules/dunning/types"
 import { dunningErrors } from "../../modules/dunning/utils/errors"
 import { settleSubscriptionPaymentFailure } from "../utils/settle-subscription-payment-failure"
 
@@ -64,7 +67,7 @@ export const markDunningUnrecoveredStep = createStep(
       throw dunningErrors.alreadyUnrecovered(dunningCase.id)
     }
 
-    if (dunningCase.status === DunningCaseStatus.RETRYING) {
+    if (CHARGE_IN_FLIGHT_DUNNING_CASE_STATUSES.includes(dunningCase.status)) {
       throw dunningErrors.retryInFlightTransitionBlocked(
         dunningCase.id,
         "be marked unrecovered"

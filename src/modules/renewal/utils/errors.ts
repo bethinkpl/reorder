@@ -57,6 +57,12 @@ export const renewalErrors = {
       `Renewal order creation failed for renewal '${renewalCycleId}'`
     )
   },
+  dunningOwnsCycle(renewalCycleId: string, dunningCaseId: string) {
+    return new MedusaError(
+      MedusaError.Types.CONFLICT,
+      `Renewal '${renewalCycleId}' was blocked: dunning case '${dunningCaseId}' is already processing this subscription's payment`
+    )
+  },
   customerPaymentInProgress(renewalCycleId: string, orderId: string) {
     return new MedusaError(
       MedusaError.Types.CONFLICT,

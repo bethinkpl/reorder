@@ -44,7 +44,7 @@ type RenewalCycleRecord = {
   subscription_id: string
   scheduled_for: string
   processed_at: string | null
-  status: "scheduled" | "processing" | "succeeded" | "failed"
+  status: "scheduled" | "processing" | "succeeded" | "failed" | "awaiting_payment"
   approval_required: boolean
   approval_status: "pending" | "approved" | "rejected" | null
   approval_decided_at: string | null
@@ -216,6 +216,8 @@ function mapCycleStatus(status: RenewalCycleRecord["status"]) {
       return RenewalCycleAdminStatus.SCHEDULED
     case RenewalCycleStatus.PROCESSING:
       return RenewalCycleAdminStatus.PROCESSING
+    case RenewalCycleStatus.AWAITING_PAYMENT:
+      return RenewalCycleAdminStatus.AWAITING_PAYMENT
     case RenewalCycleStatus.SUCCEEDED:
       return RenewalCycleAdminStatus.SUCCEEDED
     case RenewalCycleStatus.FAILED:

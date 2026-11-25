@@ -138,7 +138,7 @@ export const processRenewalCycleWorkflow = createWorkflow(
     )
     const paymentSessionData = setPaymentSessionData.getResult()
 
-    authorizeRenewalPaymentStep({
+    const authorization = authorizeRenewalPaymentStep({
       context,
       order_result: orderResult,
       payment_session_data: paymentSessionData,
@@ -147,6 +147,7 @@ export const processRenewalCycleWorkflow = createWorkflow(
     const result = finalizeRenewalCycleStep({
       context,
       order_result: orderResult,
+      authorization,
     })
 
     const ensureInput = transform({ result }, function ({ result }) {

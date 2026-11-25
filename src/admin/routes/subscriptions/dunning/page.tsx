@@ -40,6 +40,7 @@ const statusFilterOptions = [
   { label: "Open", value: DunningCaseAdminStatus.OPEN },
   { label: "Retry scheduled", value: DunningCaseAdminStatus.RETRY_SCHEDULED },
   { label: "Retrying", value: DunningCaseAdminStatus.RETRYING },
+  { label: "Awaiting payment", value: DunningCaseAdminStatus.AWAITING_PAYMENT },
   {
     label: "Awaiting manual resolution",
     value: DunningCaseAdminStatus.AWAITING_MANUAL_RESOLUTION,

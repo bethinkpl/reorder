@@ -38,6 +38,7 @@ import {
   loadOrderPaymentCollections,
   type PaymentSessionRecord,
 } from "../utils/customer-payment-in-progress"
+import type { ReportedChargeFailure } from "../utils/in-flight-charge"
 import { recordOrderCaptureTransactions } from "../utils/record-order-capture-transactions"
 import { resolvePaymentCollection } from "../utils/resolve-payment-collection"
 import { settleDunningCaseRecovered } from "../utils/settle-dunning-recovery"
@@ -59,7 +60,7 @@ type SubscriptionRecord = {
   payment_context: SubscriptionPaymentContext | null
 }
 
-type DunningCaseRecord = {
+export type DunningCaseRecord = {
   id: string
   subscription_id: string
   renewal_cycle_id: string
@@ -136,6 +137,13 @@ type PaymentRetryOutcome =
     error_message: null
     provider_reached: boolean
   }
+  | {
+    kind: "awaiting"
+    payment_reference: string
+    error_code: null
+    error_message: null
+    provider_reached: true
+  }
   | PaymentRetryFailureOutcome
 
 type DunningParkReason =
@@ -185,6 +193,8 @@ export type RunDunningRetryStepInput = {
   payment_session_data?: Record<string, unknown>
 }
 
+export type ReportedDunningFailure = ReportedChargeFailure & { dunning_attempt_id: string }
+
 export type RunDunningRetryStepOutput = {
   dunning_case_id: string
   dunning_attempt_id: string
@@ -192,6 +202,7 @@ export type RunDunningRetryStepOutput = {
     | "recovered"
     | "retry_scheduled"
     | "unrecovered"
+    | "awaiting_payment"
     | "awaiting_manual_resolution"
   subscription_id: string
   subscription_status: SubscriptionStatus
@@ -400,7 +411,7 @@ export async function loadOrderAmounts(
   }
 }
 
-async function settleNonRetryableCase(
+export async function settleNonRetryableCase(
   dunningModule: DunningModuleService,
   dunningCase: DunningCaseRecord,
   subscriptionStatus: SubscriptionStatus,
@@ -755,10 +766,10 @@ export async function executePaymentRetry(
 
     if (!payment?.id) {
       return {
-        kind: "temporary_failure",
+        kind: "awaiting",
         payment_reference: paymentSession.id,
-        error_code: "payment_authorization_missing",
-        error_message: "Payment authorization did not return a payment reference",
+        error_code: null,
+        error_message: null,
         provider_reached: true,
       }
     }
@@ -1091,7 +1102,7 @@ async function finalizeRecoveredRenewal(
 
 export async function runDunningRetry(
   container: MedusaContainer,
-  input: RunDunningRetryStepInput
+  input: RunDunningRetryStepInput & { reported_failure?: ReportedDunningFailure }
 ): Promise<StepResponse<RunDunningRetryStepOutput>> {
   const logger = container.resolve("logger")
   const dunningModule = container.resolve<DunningModuleService>(DUNNING_MODULE)
@@ -1101,8 +1112,16 @@ export async function runDunningRetry(
     input.correlation_id ??
     createDunningCorrelationId(`dunning-retry-${input.ignore_schedule ? "manual" : "scheduled"}`)
 
+  const reported = input.reported_failure
   const dunningCase = await loadDunningCase(container, input.dunning_case_id)
-  const attemptNo = await getNextAttemptNo(container, dunningCase)
+  const reportedAttempt = reported
+    ? ((await dunningModule.retrieveDunningAttempt(
+        reported.dunning_attempt_id
+      )) as DunningAttemptRecord)
+    : null
+  const attemptNo = reportedAttempt
+    ? reportedAttempt.attempt_no
+    : await getNextAttemptNo(container, dunningCase)
   const transitionSnapshot: RetryTransitionSnapshot = {
     status: dunningCase.status,
     attempt_count: dunningCase.attempt_count,
@@ -1112,7 +1131,7 @@ export async function runDunningRetry(
   }
   // Budget position, not row number: `attempt_no` stays monotonic across aborted rows, so it can
   // neither index the retry schedule nor drive the attempt limit.
-  const consumedAttempts = transitionSnapshot.attempt_count + 1
+  const consumedAttempts = transitionSnapshot.attempt_count + (reported ? 0 : 1)
   let transitionedToRetrying = false
   // A holder rather than a plain `let`: the catch has to read what the park wrote from inside it.
   const parked: { output: RunDunningRetryStepOutput | null } = { output: null }
@@ -1168,15 +1187,12 @@ export async function runDunningRetry(
       })
     }
 
-    const eligibility = validateRetryableCase(
-      dunningCase,
-      subscription,
-      now,
-      input.ignore_schedule
-    )
+    const eligibility = reported
+      ? null
+      : validateRetryableCase(dunningCase, subscription, now, input.ignore_schedule)
 
     if (
-      eligibility.blocked_reason === RetryBlockedReason.SUBSCRIPTION_NOT_RETRYABLE
+      eligibility?.blocked_reason === RetryBlockedReason.SUBSCRIPTION_NOT_RETRYABLE
     ) {
       await settleNonRetryableCase(
         dunningModule,
@@ -1192,7 +1208,7 @@ export async function runDunningRetry(
       )
     }
 
-    if (eligibility.blocked_reason === RetryBlockedReason.NO_PAYMENT_METHOD) {
+    if (eligibility?.blocked_reason === RetryBlockedReason.NO_PAYMENT_METHOD) {
       // A card the customer has yet to add is theirs to fix, so the case must not carry a park
       // reason that tells the storefront an operator has to step in first.
       await dunningModule.updateDunningCases({
@@ -1210,25 +1226,25 @@ export async function runDunningRetry(
 
     const startedAt = now
     const retryMetadata: Record<string, unknown> = {
-      ...appendRetryAuditMetadata(
-        dunningCase.metadata,
-        input,
-        startedAt.toISOString()
-      ),
+      ...(reported
+        ? dunningCase.metadata
+        : appendRetryAuditMetadata(dunningCase.metadata, input, startedAt.toISOString())),
       park_reason: null,
     }
 
-    await dunningModule.updateDunningCases({
-      id: dunningCase.id,
-      status: DunningCaseStatus.RETRYING,
-      attempt_count: consumedAttempts,
-      next_retry_at: null,
-      last_attempt_at: startedAt,
-      metadata: retryMetadata,
-    } as any)
-    transitionedToRetrying = true
+    if (!reported) {
+      await dunningModule.updateDunningCases({
+        id: dunningCase.id,
+        status: DunningCaseStatus.RETRYING,
+        attempt_count: consumedAttempts,
+        next_retry_at: null,
+        last_attempt_at: startedAt,
+        metadata: retryMetadata,
+      } as any)
+      transitionedToRetrying = true
+    }
 
-    const attempt = (await dunningModule.createDunningAttempts({
+    const attempt = reportedAttempt ?? (await dunningModule.createDunningAttempts({
       dunning_case_id: dunningCase.id,
       attempt_no: attemptNo,
       started_at: startedAt,
@@ -1244,7 +1260,10 @@ export async function runDunningRetry(
       },
     } as any)) as DunningAttemptRecord
 
-    const outcome = await executePaymentRetry(
+    const outcome = (reported && {
+      ...classifyPaymentRetryFailure(Object.assign(new Error(reported.message), { code: reported.code }), null),
+      payment_reference: reported.session_id,
+    }) ?? await executePaymentRetry(
       container,
       subscription,
       dunningCase.renewal_order_id!,
@@ -1350,6 +1369,45 @@ export async function runDunningRetry(
         park_reason: null,
         attempt_counted: true,
         time_to_recover_ms: timeToRecoverMs,
+      })
+    }
+
+    if (outcome.kind === "awaiting") {
+      try {
+        await dunningModule.updateDunningCases({
+          id: dunningCase.id,
+          status: DunningCaseStatus.AWAITING_PAYMENT,
+        })
+      } catch (error) {
+        logDunningEvent(logger, "error", {
+          event: "dunning.retry",
+          outcome: "failed",
+          correlation_id: correlationId,
+          dunning_case_id: dunningCase.id,
+          subscription_id: dunningCase.subscription_id,
+          renewal_cycle_id: dunningCase.renewal_cycle_id,
+          attempt_no: attemptNo,
+          alertable: true,
+          message: `DunningCase '${dunningCase.id}' left 'retrying': its charge on payment session '${outcome.payment_reference}' is pending, but marking it awaiting payment failed: ${getDunningErrorMessage(error)}`,
+        })
+      }
+
+      return new StepResponse<RunDunningRetryStepOutput>({
+        dunning_case_id: dunningCase.id,
+        dunning_attempt_id: attempt.id,
+        outcome: "awaiting_payment",
+        subscription_id: dunningCase.subscription_id,
+        subscription_status: subscription.status,
+        renewal_order_id: dunningCase.renewal_order_id,
+        settled_now: false,
+        recovered_now: false,
+        correlation_id: correlationId,
+        attempt_no: attemptNo,
+        error_code: null,
+        next_retry_at: null,
+        recovery_reason: null,
+        park_reason: null,
+        attempt_counted: true,
       })
     }
 

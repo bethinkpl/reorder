@@ -175,6 +175,8 @@ function mapCaseStatus(status: DunningCaseRecord["status"]) {
       return DunningCaseAdminStatus.RETRY_SCHEDULED
     case DunningCaseStatus.RETRYING:
       return DunningCaseAdminStatus.RETRYING
+    case DunningCaseStatus.AWAITING_PAYMENT:
+      return DunningCaseAdminStatus.AWAITING_PAYMENT
     case DunningCaseStatus.AWAITING_MANUAL_RESOLUTION:
       return DunningCaseAdminStatus.AWAITING_MANUAL_RESOLUTION
     case DunningCaseStatus.RECOVERED:

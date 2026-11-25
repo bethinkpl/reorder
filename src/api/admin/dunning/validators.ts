@@ -7,6 +7,7 @@ const dunningCaseStatusSchema = z.enum([
   "open",
   "retry_scheduled",
   "retrying",
+  "awaiting_payment",
   "awaiting_manual_resolution",
   "recovered",
   "unrecovered",

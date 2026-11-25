@@ -93,6 +93,7 @@ type DunningCaseRecord = {
     | "open"
     | "retry_scheduled"
     | "retrying"
+    | "awaiting_payment"
     | "awaiting_manual_resolution"
     | "recovered"
     | "unrecovered"
@@ -384,6 +385,7 @@ async function getActiveDunningSummaryMap(
 
   const activeStatusOrder = new Map([
     ["retrying", 0],
+    ["awaiting_payment", 0],
     ["retry_scheduled", 1],
     ["awaiting_manual_resolution", 2],
     ["open", 3],
@@ -401,7 +403,7 @@ async function getActiveDunningSummaryMap(
   for (const [subscriptionId, records] of grouped.entries()) {
     const active = records
       .filter((record) =>
-        ["open", "retry_scheduled", "retrying", "awaiting_manual_resolution"].includes(
+        ["open", "retry_scheduled", "retrying", "awaiting_payment", "awaiting_manual_resolution"].includes(
           record.status
         )
       )

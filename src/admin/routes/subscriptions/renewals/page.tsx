@@ -36,6 +36,7 @@ const columnHelper = createDataTableColumnHelper<RenewalCycleAdminListItem>()
 const statusFilterOptions = [
   { label: "Scheduled", value: RenewalCycleAdminStatus.SCHEDULED },
   { label: "Processing", value: RenewalCycleAdminStatus.PROCESSING },
+  { label: "Awaiting payment", value: RenewalCycleAdminStatus.AWAITING_PAYMENT },
   { label: "Succeeded", value: RenewalCycleAdminStatus.SUCCEEDED },
   { label: "Failed", value: RenewalCycleAdminStatus.FAILED },
 ] as const

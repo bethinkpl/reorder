@@ -9,6 +9,7 @@ import {
   SubscriptionWorkflowRecord,
   SubscriptionWorkflowStepResult,
 } from "./pause-subscription"
+import { assertNoChargeInFlight } from "../utils/assert-no-charge-in-flight"
 
 export type ResumeSubscriptionStepInput = {
   id: string
@@ -34,6 +35,8 @@ export const resumeSubscriptionStep = createStep(
         subscription.status
       )
     }
+
+    await assertNoChargeInFlight(container, input.id)
 
     const nextRenewalAt = input.resume_at
       ? new Date(input.resume_at)

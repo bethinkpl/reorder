@@ -759,6 +759,8 @@ function formatCycleStatus(status: RenewalCycleAdminStatus) {
       return "Scheduled"
     case RenewalCycleAdminStatus.PROCESSING:
       return "Processing"
+    case RenewalCycleAdminStatus.AWAITING_PAYMENT:
+      return "Awaiting payment"
     case RenewalCycleAdminStatus.SUCCEEDED:
       return "Succeeded"
     case RenewalCycleAdminStatus.FAILED:
@@ -828,6 +830,7 @@ function getCycleStatusColor(status: RenewalCycleAdminStatus) {
     case RenewalCycleAdminStatus.SCHEDULED:
       return "blue"
     case RenewalCycleAdminStatus.PROCESSING:
+    case RenewalCycleAdminStatus.AWAITING_PAYMENT:
       return "orange"
     case RenewalCycleAdminStatus.SUCCEEDED:
       return "green"

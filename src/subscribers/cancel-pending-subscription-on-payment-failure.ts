@@ -9,6 +9,12 @@ import {
 import { SubscriptionStatus } from "../modules/subscription/types"
 import { cancelAbandonedSubscription } from "../modules/subscription/utils/cancel-abandoned-subscription"
 import { findSubscriptionIdForPaymentCollection } from "../modules/subscription/utils/find-subscription-for-payment"
+import {
+  findChargeByPaymentReference,
+  handleChargeReconcileFailure,
+  readChargeMarker,
+  reconcileCharge,
+} from "../workflows/utils/in-flight-charge"
 
 type WebhookEventData = {
   provider: string
@@ -22,6 +28,7 @@ type WebhookEventData = {
 type PaymentSessionRecord = {
   id: string
   payment_collection_id: string | null
+  context: Record<string, unknown> | null
 }
 
 type SubscriptionRecord = {
@@ -62,7 +69,8 @@ export async function cancelPendingSubscriptionOnPaymentFailure(
   }
 
   const processed = await paymentModule.getWebhookActionAndData(input as never)
-  const sessionId = (processed?.data as { session_id?: string } | undefined)?.session_id
+  const decoded = processed?.data as { session_id?: string, reason?: string } | undefined
+  const sessionId = decoded?.session_id
 
   if (!processed?.action || !FAILURE_ACTIONS.includes(processed.action) || !sessionId) {
     return
@@ -72,11 +80,35 @@ export async function cancelPendingSubscriptionOnPaymentFailure(
 
   const { data: sessions } = await query.graph({
     entity: "payment_session",
-    fields: ["id", "payment_collection_id"],
+    fields: ["id", "payment_collection_id", "context"],
     filters: { id: sessionId },
   })
 
-  const paymentCollectionId = (sessions as PaymentSessionRecord[])[0]?.payment_collection_id
+  const session = (sessions as PaymentSessionRecord[])[0]
+  const marker = session
+    ? readChargeMarker(session.context)
+    : await findChargeByPaymentReference(container, sessionId)
+
+  if (marker) {
+    const code = decoded?.reason || processed.action
+    const message = `Payment provider reported '${code}' for payment session '${sessionId}'`
+
+    try {
+      await reconcileCharge(container, {
+        ...marker,
+        signal: "failed",
+        failure: { session_id: sessionId, code, message },
+      })
+    } catch (error) {
+      if (handleChargeReconcileFailure(container, error, { ...marker, signal: "failed" })) {
+        throw error
+      }
+    }
+
+    return
+  }
+
+  const paymentCollectionId = session?.payment_collection_id
 
   if (!paymentCollectionId) {
     return

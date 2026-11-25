@@ -5,7 +5,13 @@ export enum RenewalCycleStatus {
   PROCESSING = "processing",
   SUCCEEDED = "succeeded",
   FAILED = "failed",
+  AWAITING_PAYMENT = "awaiting_payment",
 }
+
+export const CHARGE_IN_FLIGHT_RENEWAL_CYCLE_STATUSES: readonly RenewalCycleStatus[] = [
+  RenewalCycleStatus.AWAITING_PAYMENT,
+  RenewalCycleStatus.PROCESSING,
+]
 
 export enum RenewalAttemptStatus {
   PROCESSING = "processing",

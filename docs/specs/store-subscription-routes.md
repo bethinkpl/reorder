@@ -52,6 +52,7 @@ Current pricing semantics:
 - `resume`
   - optional body
   - returns updated status summary
+- `pause` and `resume` answer `409 { type: "conflict", code: "renewal_payment_in_progress", message }` while a renewal or dunning charge of the subscription waits for the payment provider; the customer can retry once it has settled or failed
 - `skip-next-delivery`
   - optional body
   - returns unchanged technical `next_renewal_at`

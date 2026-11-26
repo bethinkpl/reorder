@@ -181,6 +181,8 @@ const PERMANENT_DECLINE_CODES: readonly string[] = [
   "card_not_supported",
   "invalid_account",
   "new_account_information_available",
+  // Przelewy24 no longer knows the card, and the host revokes it.
+  "instrument_unknown",
 ]
 
 export type RunDunningRetryStepInput = {

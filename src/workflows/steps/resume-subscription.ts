@@ -9,7 +9,7 @@ import {
   SubscriptionWorkflowRecord,
   SubscriptionWorkflowStepResult,
 } from "./pause-subscription"
-import { assertNoChargeInFlight } from "../utils/assert-no-charge-in-flight"
+import { withNoChargeInFlight } from "../utils/assert-no-charge-in-flight"
 
 export type ResumeSubscriptionStepInput = {
   id: string
@@ -36,28 +36,28 @@ export const resumeSubscriptionStep = createStep(
       )
     }
 
-    await assertNoChargeInFlight(container, input.id)
-
     const nextRenewalAt = input.resume_at
       ? new Date(input.resume_at)
       : input.preserve_billing_anchor
         ? subscription.next_renewal_at
         : subscription.next_renewal_at ?? new Date()
 
-    const updated = await subscriptionModuleService.updateSubscriptions({
-      id: input.id,
-      status: SubscriptionStatus.ACTIVE,
-      paused_at: null,
-      next_renewal_at: nextRenewalAt,
-      metadata: {
-        ...(subscription.metadata ?? {}),
-        resume_context: {
-          resume_at: input.resume_at ?? null,
-          preserve_billing_anchor: input.preserve_billing_anchor ?? false,
-          triggered_by: input.triggered_by ?? null,
+    const updated = await withNoChargeInFlight(container, input.id, () =>
+      subscriptionModuleService.updateSubscriptions({
+        id: input.id,
+        status: SubscriptionStatus.ACTIVE,
+        paused_at: null,
+        next_renewal_at: nextRenewalAt,
+        metadata: {
+          ...(subscription.metadata ?? {}),
+          resume_context: {
+            resume_at: input.resume_at ?? null,
+            preserve_billing_anchor: input.preserve_billing_anchor ?? false,
+            triggered_by: input.triggered_by ?? null,
+          },
         },
-      },
-    })
+      })
+    )
 
     return new StepResponse<SubscriptionWorkflowStepResult, SubscriptionWorkflowRecord>(
       {

@@ -3,6 +3,7 @@ import { SUBSCRIPTION_MODULE } from "../../modules/subscription"
 import SubscriptionModuleService from "../../modules/subscription/service"
 import { SubscriptionStatus } from "../../modules/subscription/types"
 import { subscriptionErrors } from "../../modules/subscription/utils/errors"
+import { withNoChargeInFlight } from "../utils/assert-no-charge-in-flight"
 import {
   asSubscriptionUpdateInput,
   asSubscriptionWorkflowRecord,
@@ -45,17 +46,20 @@ export const skipNextDeliveryStep = createStep(
 
     const updatedAt = new Date().toISOString()
 
-    const updated = await subscriptionModuleService.updateSubscriptions({
-      id: input.id,
-      skip_next_cycle: true,
-      metadata: {
-        ...(subscription.metadata ?? {}),
-        skip_next_delivery_context: {
-          triggered_by: input.triggered_by ?? null,
-          updated_at: updatedAt,
+    // A charge in flight would settle the cycle and reset `skip_next_cycle`, losing this skip.
+    const updated = await withNoChargeInFlight(container, input.id, () =>
+      subscriptionModuleService.updateSubscriptions({
+        id: input.id,
+        skip_next_cycle: true,
+        metadata: {
+          ...(subscription.metadata ?? {}),
+          skip_next_delivery_context: {
+            triggered_by: input.triggered_by ?? null,
+            updated_at: updatedAt,
+          },
         },
-      },
-    })
+      })
+    )
 
     return new StepResponse<SubscriptionWorkflowStepResult, SubscriptionWorkflowRecord>(
       {

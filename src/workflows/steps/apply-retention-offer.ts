@@ -21,7 +21,7 @@ import { DunningCaseStatus } from "../../modules/dunning/types"
 import { SUBSCRIPTION_MODULE } from "../../modules/subscription"
 import type SubscriptionModuleService from "../../modules/subscription/service"
 import { SubscriptionStatus } from "../../modules/subscription/types"
-import { assertNoChargeInFlight } from "../utils/assert-no-charge-in-flight"
+import { withNoChargeInFlight } from "../utils/assert-no-charge-in-flight"
 import { CancellationSubscriptionDisplayRecord } from "./shared-cancellation-log"
 
 const APPLIABLE_CANCELLATION_CASE_STATUSES = new Set<CancellationCaseStatus>([
@@ -272,106 +272,109 @@ export const applyRetentionOfferStep = createStep(
       offerType: input.offer_type,
     })
 
-    if (input.offer_type === RetentionOfferType.PAUSE_OFFER) {
-      await assertNoChargeInFlight(container, subscription.id)
-    }
+    const apply = async () => {
+      const appliedAt = new Date()
+      const finalCaseStatus =
+        input.offer_type === RetentionOfferType.PAUSE_OFFER
+          ? CancellationCaseStatus.PAUSED
+          : CancellationCaseStatus.RETAINED
+      const finalOutcome =
+        input.offer_type === RetentionOfferType.PAUSE_OFFER
+          ? CancellationFinalOutcome.PAUSED
+          : CancellationFinalOutcome.RETAINED
 
-    const appliedAt = new Date()
-    const finalCaseStatus =
-      input.offer_type === RetentionOfferType.PAUSE_OFFER
-        ? CancellationCaseStatus.PAUSED
-        : CancellationCaseStatus.RETAINED
-    const finalOutcome =
-      input.offer_type === RetentionOfferType.PAUSE_OFFER
-        ? CancellationFinalOutcome.PAUSED
-        : CancellationFinalOutcome.RETAINED
-
-    const createdEvent = (await cancellationModule.createRetentionOfferEvents({
-      cancellation_case_id: cancellationCase.id,
-      offer_type: input.offer_type,
-      offer_payload: input.offer_payload,
-      decision_status: RetentionOfferDecisionStatus.APPLIED,
-      decision_reason: input.decision_reason ?? null,
-      decided_at: appliedAt,
-      decided_by: input.decided_by ?? null,
-      applied_at: appliedAt,
-      metadata: {
-        ...(input.metadata ?? {}),
-        source: "apply_retention_offer_workflow",
-      },
-    } as any)) as RetentionOfferEventRecord
-
-    if (input.offer_type === RetentionOfferType.PAUSE_OFFER) {
-      await subscriptionModule.updateSubscriptions({
-        id: subscription.id,
-        status: SubscriptionStatus.PAUSED,
-        paused_at: appliedAt,
-        cancel_effective_at: null,
-        metadata: buildAppliedRetentionMetadata(subscription, input, appliedAt),
-      })
-    } else {
-      await subscriptionModule.updateSubscriptions({
-        id: subscription.id,
-        metadata: buildAppliedRetentionMetadata(subscription, input, appliedAt),
-      })
-    }
-
-    await cancellationModule.updateCancellationCases({
-      id: cancellationCase.id,
-      status: finalCaseStatus,
-      final_outcome: finalOutcome,
-      finalized_at: appliedAt,
-      finalized_by: input.decided_by ?? null,
-      metadata: appendCancellationManualAction(
-        {
-          ...(cancellationCase.metadata ?? {}),
+      const createdEvent = (await cancellationModule.createRetentionOfferEvents({
+        cancellation_case_id: cancellationCase.id,
+        offer_type: input.offer_type,
+        offer_payload: input.offer_payload,
+        decision_status: RetentionOfferDecisionStatus.APPLIED,
+        decision_reason: input.decision_reason ?? null,
+        decided_at: appliedAt,
+        decided_by: input.decided_by ?? null,
+        applied_at: appliedAt,
+        metadata: {
           ...(input.metadata ?? {}),
-          applied_retention_offer: {
-            event_id: createdEvent.id,
-            offer_type: input.offer_type,
-            final_outcome: finalOutcome,
-            applied_at: appliedAt.toISOString(),
+          source: "apply_retention_offer_workflow",
+        },
+      } as any)) as RetentionOfferEventRecord
+
+      if (input.offer_type === RetentionOfferType.PAUSE_OFFER) {
+        await subscriptionModule.updateSubscriptions({
+          id: subscription.id,
+          status: SubscriptionStatus.PAUSED,
+          paused_at: appliedAt,
+          cancel_effective_at: null,
+          metadata: buildAppliedRetentionMetadata(subscription, input, appliedAt),
+        })
+      } else {
+        await subscriptionModule.updateSubscriptions({
+          id: subscription.id,
+          metadata: buildAppliedRetentionMetadata(subscription, input, appliedAt),
+        })
+      }
+
+      await cancellationModule.updateCancellationCases({
+        id: cancellationCase.id,
+        status: finalCaseStatus,
+        final_outcome: finalOutcome,
+        finalized_at: appliedAt,
+        finalized_by: input.decided_by ?? null,
+        metadata: appendCancellationManualAction(
+          {
+            ...(cancellationCase.metadata ?? {}),
+            ...(input.metadata ?? {}),
+            applied_retention_offer: {
+              event_id: createdEvent.id,
+              offer_type: input.offer_type,
+              final_outcome: finalOutcome,
+              applied_at: appliedAt.toISOString(),
+            },
           },
+          {
+            action: "apply_offer",
+            who: input.decided_by ?? null,
+            when: appliedAt.toISOString(),
+            why: input.decision_reason ?? null,
+            data: {
+              event_id: createdEvent.id,
+              offer_type: input.offer_type,
+              final_outcome: finalOutcome,
+            },
+          }
+        ),
+      } as any)
+
+      const updatedCase = (await cancellationModule.retrieveCancellationCase(
+        cancellationCase.id
+      )) as CancellationCaseRecord
+
+      return new StepResponse<
+        ApplyRetentionOfferStepOutput,
+        ApplyRetentionOfferCompensation
+      >(
+        {
+          current: updatedCase,
+          previous: cancellationCase,
+          subscription: subscription as CancellationSubscriptionDisplayRecord,
+          cancellation_case_id: cancellationCase.id,
+          retention_offer_event_id: createdEvent.id,
+          subscription_id: subscription.id,
+          offer_type: input.offer_type,
+          final_case_status: finalCaseStatus,
+          final_outcome: finalOutcome,
         },
         {
-          action: "apply_offer",
-          who: input.decided_by ?? null,
-          when: appliedAt.toISOString(),
-          why: input.decision_reason ?? null,
-          data: {
-            event_id: createdEvent.id,
-            offer_type: input.offer_type,
-            final_outcome: finalOutcome,
-          },
+          previous_case: cancellationCase,
+          previous_subscription: subscription,
+          created_event_id: createdEvent.id,
         }
-      ),
-    } as any)
+      )
+    }
 
-    const updatedCase = (await cancellationModule.retrieveCancellationCase(
-      cancellationCase.id
-    )) as CancellationCaseRecord
-
-    return new StepResponse<
-      ApplyRetentionOfferStepOutput,
-      ApplyRetentionOfferCompensation
-    >(
-      {
-        current: updatedCase,
-        previous: cancellationCase,
-        subscription: subscription as CancellationSubscriptionDisplayRecord,
-        cancellation_case_id: cancellationCase.id,
-        retention_offer_event_id: createdEvent.id,
-        subscription_id: subscription.id,
-        offer_type: input.offer_type,
-        final_case_status: finalCaseStatus,
-        final_outcome: finalOutcome,
-      },
-      {
-        previous_case: cancellationCase,
-        previous_subscription: subscription,
-        created_event_id: createdEvent.id,
-      }
-    )
+    // Pausing is the write a renewal run races, so the pause offer applies under the run's lock.
+    return input.offer_type === RetentionOfferType.PAUSE_OFFER
+      ? await withNoChargeInFlight(container, subscription.id, apply)
+      : await apply()
   },
   async function (compensation, { container }) {
     if (!compensation) {

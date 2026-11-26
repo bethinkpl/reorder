@@ -12,6 +12,7 @@ import {
   SubscriptionWorkflowStepResult,
 } from "./pause-subscription"
 import type { FrequencyInterval } from "../../common/types/frequency-interval"
+import { withNoChargeInFlight } from "../utils/assert-no-charge-in-flight"
 
 export type ScheduleSubscriptionPlanChangeStepInput = {
   id: string
@@ -103,26 +104,29 @@ export const scheduleSubscriptionPlanChangeStep = createStep(
 
     const requestedAt = new Date().toISOString()
 
-    const updated = await subscriptionModuleService.updateSubscriptions({
-      id: input.id,
-      pending_update_data: {
-        variant_id: variant.id,
-        variant_title: variant.title,
-        sku: variant.sku ?? null,
-        frequency_interval: input.frequency_interval,
-        frequency_value: input.frequency_value,
-        effective_at: input.effective_at ?? null,
-        requested_at: requestedAt,
-        requested_by: input.requested_by ?? null,
-      },
-      metadata: {
-        ...(subscription.metadata ?? {}),
-        scheduled_plan_change_context: {
+    // A charge in flight that applied an earlier change would clear this one when it settles.
+    const updated = await withNoChargeInFlight(container, input.id, () =>
+      subscriptionModuleService.updateSubscriptions({
+        id: input.id,
+        pending_update_data: {
+          variant_id: variant.id,
+          variant_title: variant.title,
+          sku: variant.sku ?? null,
+          frequency_interval: input.frequency_interval,
+          frequency_value: input.frequency_value,
+          effective_at: input.effective_at ?? null,
           requested_at: requestedAt,
           requested_by: input.requested_by ?? null,
         },
-      },
-    })
+        metadata: {
+          ...(subscription.metadata ?? {}),
+          scheduled_plan_change_context: {
+            requested_at: requestedAt,
+            requested_by: input.requested_by ?? null,
+          },
+        },
+      })
+    )
 
     return new StepResponse<SubscriptionWorkflowStepResult, SubscriptionWorkflowRecord>(
       {

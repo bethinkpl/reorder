@@ -3,6 +3,8 @@ import {
   transform,
   WorkflowResponse,
 } from "@medusajs/framework/workflows-sdk"
+import { acquireLockStep, releaseLockStep } from "@medusajs/medusa/core-flows"
+import { renewalSubscriptionLockKey } from "../modules/renewal/utils/lock-key"
 import { createSubscriptionLogEventStep } from "./steps/create-subscription-log-event"
 import { ensureNextRenewalCycleStep } from "./steps/ensure-next-renewal-cycle"
 import {
@@ -19,6 +21,21 @@ import { toISOStringOrNull } from "./utils/date-output"
 export const cancelSubscriptionWorkflow = createWorkflow(
   "cancel-subscription",
   function (input: CancelSubscriptionStepInput) {
+    const renewalLockKey = transform({ input }, function ({ input }) {
+      return renewalSubscriptionLockKey(input.id)
+    })
+
+    // A renewal run charging right now would settle the cycle after the cancel, so the cancel waits
+    // briefly for it and otherwise fails, for the caller to retry.
+    acquireLockStep({
+      key: renewalLockKey,
+      timeout: 5,
+      ttl: 120,
+      executeOnSubWorkflow: true,
+    }).config({
+      name: "acquire-cancel-subscription-renewal-lock",
+    })
+
     const subscriptionChange = cancelSubscriptionStep(input)
     const logInput = transform(
       { subscriptionChange, input },
@@ -83,6 +100,13 @@ export const cancelSubscriptionWorkflow = createWorkflow(
       }
     })
     const renewal_cycle = ensureNextRenewalCycleStep(ensureInput)
+
+    releaseLockStep({
+      key: renewalLockKey,
+      executeOnSubWorkflow: true,
+    }).config({
+      name: "release-cancel-subscription-renewal-lock",
+    })
 
     return new WorkflowResponse({
       subscription: subscriptionChange.current,

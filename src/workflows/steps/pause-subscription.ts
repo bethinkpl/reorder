@@ -8,7 +8,7 @@ import {
 } from "../../modules/subscription/types"
 import { subscriptionErrors } from "../../modules/subscription/utils/errors"
 import type { FrequencyInterval } from "../../common/types/frequency-interval"
-import { assertNoChargeInFlight } from "../utils/assert-no-charge-in-flight"
+import { withNoChargeInFlight } from "../utils/assert-no-charge-in-flight"
 
 export type PauseSubscriptionStepInput = {
   id: string
@@ -84,25 +84,25 @@ export const pauseSubscriptionStep = createStep(
       )
     }
 
-    await assertNoChargeInFlight(container, input.id)
-
     const pausedAt = input.effective_at
       ? new Date(input.effective_at)
       : new Date()
 
-    const updated = await subscriptionModuleService.updateSubscriptions({
-      id: input.id,
-      status: SubscriptionStatus.PAUSED,
-      paused_at: pausedAt,
-      metadata: {
-        ...(subscription.metadata ?? {}),
-        pause_context: {
-          reason: input.reason ?? null,
-          effective_at: pausedAt.toISOString(),
-          triggered_by: input.triggered_by ?? null,
+    const updated = await withNoChargeInFlight(container, input.id, () =>
+      subscriptionModuleService.updateSubscriptions({
+        id: input.id,
+        status: SubscriptionStatus.PAUSED,
+        paused_at: pausedAt,
+        metadata: {
+          ...(subscription.metadata ?? {}),
+          pause_context: {
+            reason: input.reason ?? null,
+            effective_at: pausedAt.toISOString(),
+            triggered_by: input.triggered_by ?? null,
+          },
         },
-      },
-    })
+      })
+    )
 
     return new StepResponse<SubscriptionWorkflowStepResult, SubscriptionWorkflowRecord>(
       {

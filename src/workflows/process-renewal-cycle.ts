@@ -20,6 +20,7 @@ import {
 } from "./steps/process-renewal-cycle"
 import { labelSubscriptionOrderAdjustmentsStep } from "./steps/label-subscription-order-adjustments"
 import { buildAnalyticsIncrementalRebuildInput } from "./utils/analytics-incremental"
+import { renewalSubscriptionLockKey } from "../modules/renewal/utils/lock-key"
 
 export const setPaymentSessionDataResult = z
   .record(z.string(), z.unknown())
@@ -64,7 +65,7 @@ export const processRenewalCycleWorkflow = createWorkflow(
     const scope = resolveRenewalCycleSubscriptionStep(input)
 
     const lockKey = transform({ scope }, function ({ scope }) {
-      return `renewal:subscription:${scope.subscription_id}`
+      return renewalSubscriptionLockKey(scope.subscription_id)
     })
 
     acquireLockStep({

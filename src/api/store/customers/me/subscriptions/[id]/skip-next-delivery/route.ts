@@ -7,6 +7,7 @@ import {
   getOwnedSubscriptionForAction,
   getStoreSubscriptionDetailResponse,
   requireStoreCustomer,
+  respondChargeInFlight,
   sendStoreJson,
 } from "../../utils"
 
@@ -16,12 +17,16 @@ export const POST = async (
 ) => {
   await getOwnedSubscriptionForAction(req, req.params.id)
 
-  await skipNextDeliveryWorkflow(req.scope).run({
-    input: {
-      id: req.params.id,
-      triggered_by: req.auth_context.actor_id,
-    },
-  })
+  try {
+    await skipNextDeliveryWorkflow(req.scope).run({
+      input: {
+        id: req.params.id,
+        triggered_by: req.auth_context.actor_id,
+      },
+    })
+  } catch (error) {
+    return respondChargeInFlight(res, error)
+  }
 
   const customerId = await requireStoreCustomer(req)
   const response = await getStoreSubscriptionDetailResponse(req.scope, {

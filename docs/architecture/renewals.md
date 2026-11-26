@@ -321,11 +321,12 @@ It is responsible for:
 When the provider answers `authorizePaymentSession` with `null`, the run keeps the charge's order and attempt, sets the cycle to `awaiting_payment` and returns without settling. `awaiting_payment` and `processing` count as in flight (`CHARGE_IN_FLIGHT_RENEWAL_CYCLE_STATUSES`).
 
 - the attempt's `metadata.charge_context` holds what settling or failing needs later, and the payment session carries `context.renewal_attempt_id`
-- `payment.captured` and failed or canceled `payment.webhook_received` events, and the sweep, all end in `reconcileCharge`, which takes `renewal:subscription:<subscription_id>` and applies one decision table
+- `payment.captured` and failed or canceled `payment.webhook_received` events, and the sweep, all end in `reconcileCharge`, which takes `renewal:subscription:<subscription_id>` and decides per signal (`decideChargeActions`)
 - a capture settles the cycle, a failure records a renewal failure and opens dunning, as on the synchronous path
 - a run that submitted its charge is never marked failed by compensation
 - a cycle is refused while another cycle of the subscription is in flight, and while the subscription has an active dunning case
 - a cycle ended by a terminal subscription is written `failed`, which is what a host releasing credits applied by `applyRenewalCredits` should react to
+- pause, resume, skip and plan change take the same lock without waiting and are refused while a charge is in flight, because settling resets `skip_next_cycle` and clears a plan change the cycle applied; a cancellation takes it too, waiting up to 5 seconds
 
 ## 7. Scheduled Processing
 

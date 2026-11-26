@@ -329,7 +329,26 @@ describe("activateSubscriptionOnPaymentCaptured", () => {
     ])
     expect(recoverDunningRun).toHaveBeenCalledTimes(1)
     expect(recoverDunningRun).toHaveBeenCalledWith({
-      input: { dunning_case_id: "dun_1", payment_id: "pay_1" },
+      input: { dunning_case_id: "dun_1", payment_id: "pay_1", source: "customer_payment" },
+    })
+  })
+
+  it("recovers a dunning retry's own late capture as the retry's", async () => {
+    const staged = pastDueStaged()
+    staged.payment = [
+      { id: "pay_1", payment_collection_id: "paycol_1", payment_session: { context: { dunning_attempt_id: "dunatt_1" } } },
+    ]
+    const container = buildContainer({
+      staged,
+      paymentMethods: [],
+      captured: [],
+      dunningCases: [{ id: "dun_1", status: DunningCaseStatus.AWAITING_PAYMENT }],
+    })
+
+    await activateSubscriptionOnPaymentCaptured(container, "pay_1")
+
+    expect(recoverDunningRun).toHaveBeenCalledWith({
+      input: { dunning_case_id: "dun_1", payment_id: "pay_1", source: "dunning_retry" },
     })
   })
 
@@ -347,7 +366,7 @@ describe("activateSubscriptionOnPaymentCaptured", () => {
     await activateSubscriptionOnPaymentCaptured(container, "pay_1")
 
     expect(recoverDunningRun).toHaveBeenCalledWith({
-      input: { dunning_case_id: "dun_2", payment_id: "pay_1" },
+      input: { dunning_case_id: "dun_2", payment_id: "pay_1", source: "customer_payment" },
     })
   })
 
@@ -419,7 +438,7 @@ describe("activateSubscriptionOnPaymentCaptured", () => {
     await activateSubscriptionOnPaymentCaptured(container, "pay_1")
 
     expect(recoverDunningRun).toHaveBeenCalledWith({
-      input: { dunning_case_id: "dun_1", payment_id: "pay_1" },
+      input: { dunning_case_id: "dun_1", payment_id: "pay_1", source: "customer_payment" },
     })
     // The step's own alert names `reverseInvoluntaryChurnWorkflow`; the generic one does not.
     expect(errorLogs).toEqual([])

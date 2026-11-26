@@ -4,6 +4,7 @@ import { markDunningUnrecoveredWorkflow } from "../mark-dunning-unrecovered"
 import { recoverDunningFromCapturedPaymentWorkflow } from "../recover-dunning-from-captured-payment"
 import { runDunningRetryWorkflow } from "../run-dunning-retry"
 import { startDunningWorkflow } from "../start-dunning"
+import { dunningRetryOutcomeEvents } from "../utils/dunning-retry-events"
 
 function stepHandlers(workflowId: string) {
   const workflow = WorkflowManager.getWorkflow(workflowId)
@@ -31,17 +32,38 @@ describe("dunning lifecycle events", () => {
     expect(typeof recoverDunningFromCapturedPaymentWorkflow).toBe("function")
   })
 
-  it("registers all four retry emits under distinct step names", () => {
-    const handlers = stepHandlers("run-dunning-retry")
-    const emits = [
-      "emit-dunning-attempt-failed-event",
-      "emit-dunning-payment-failed-event",
-      "emit-dunning-parked-event",
-      "emit-dunning-retry-recovered-event",
-    ].map((name) => handlers.get(name))
+  it("registers the retry's outcome emit", () => {
+    expect(stepHandlers("run-dunning-retry").get("emit-dunning-retry-events")).toBeDefined()
+  })
 
-    expect(emits.every(Boolean)).toBe(true)
-    expect(new Set(emits).size).toBe(emits.length)
+  describe("dunningRetryOutcomeEvents", () => {
+    const result = {
+      subscription_id: "sub_1",
+      dunning_case_id: "dun_1",
+      renewal_order_id: "order_1",
+      attempt_no: 2,
+      error_code: "insufficient_funds",
+      next_retry_at: null,
+      recovery_reason: null,
+      park_reason: null,
+      attempt_counted: false,
+      recovered_now: false,
+      settled_now: false,
+    }
+
+    it.each([
+      ["a counted reschedule", { outcome: "retry_scheduled", attempt_counted: true }, [DunningEvents.ATTEMPT_FAILED]],
+      ["a reschedule that charged nothing", { outcome: "retry_scheduled" }, []],
+      ["the run that recovered the case", { outcome: "recovered", recovered_now: true }, [DunningEvents.RECOVERED]],
+      ["a run finding the case already recovered", { outcome: "recovered" }, []],
+      ["the run that settled the subscription", { outcome: "unrecovered", settled_now: true }, [DunningEvents.PAYMENT_FAILED]],
+      ["a park", { outcome: "awaiting_manual_resolution" }, [DunningEvents.PARKED]],
+      ["a charge awaiting payment", { outcome: "awaiting_payment" }, []],
+    ])("emits for %s: %j", (_, overrides, expected) => {
+      const events = dunningRetryOutcomeEvents({ ...result, ...overrides } as never)
+
+      expect(events.map(({ eventName }) => eventName)).toEqual(expected)
+    })
   })
 
   it("registers the started and admin emits", () => {

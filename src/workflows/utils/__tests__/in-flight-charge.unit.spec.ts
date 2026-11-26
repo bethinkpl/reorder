@@ -9,7 +9,6 @@ import { SubscriptionStatus } from "../../../modules/subscription/types"
 import {
   type ChargeFacts,
   decideChargeActions,
-  ranTenMinutesAgo,
   type RawChargeFacts,
   reconcileCharge,
   toChargeFacts,
@@ -20,14 +19,16 @@ jest.mock("../settle-renewal-cycle-succeeded", () => ({
   ...jest.requireActual("../settle-renewal-cycle-succeeded"),
   settleRenewalCycleSucceeded: jest.fn(async () => ({ reason: null })),
 }))
+const mockEnsureRun = jest.fn(async () => ({}))
 jest.mock("../../ensure-next-renewal-cycle", () => ({
   ...jest.requireActual("../../ensure-next-renewal-cycle"),
-  ensureNextRenewalCycleWorkflow: () => ({ run: async () => ({}) }),
+  ensureNextRenewalCycleWorkflow: () => ({ run: mockEnsureRun }),
 }))
 const mockRecovery = { recovered: true }
+const mockRecoveryRun = jest.fn(async (_args: { input: object }) => ({ result: { ...mockRecovery } }))
 jest.mock("../../recover-dunning-from-captured-payment", () => ({
   ...jest.requireActual("../../recover-dunning-from-captured-payment"),
-  recoverDunningFromCapturedPaymentWorkflow: () => ({ run: async () => ({ result: { ...mockRecovery } }) }),
+  recoverDunningFromCapturedPaymentWorkflow: () => ({ run: mockRecoveryRun }),
 }))
 
 const NOW = new Date("2026-03-10T12:00:00.000Z")
@@ -42,7 +43,7 @@ const raw: RawChargeFacts = {
   order_has_dunning_case: false,
   order_pending: 10,
   captured_payment_id: null,
-  alert_hours: 6,
+  overdue_before: new Date(NOW.getTime() - 6 * 60 * 60 * 1000),
 }
 
 const startedAgo = (ms: number) => ({ ...raw.attempt, started_at: new Date(NOW.getTime() - ms) })
@@ -65,39 +66,30 @@ describe("toChargeFacts", () => {
     ["active", {}, { subscription: "active" }],
     ["past due", { subscription_status: SubscriptionStatus.PAST_DUE }, { subscription: "active" }],
     ["paused", { subscription_status: SubscriptionStatus.PAUSED }, { subscription: "active" }],
-    ["pending -0.01", { order_pending: -0.01 }, { order: "overpaid" }],
+    ["pending -0.01, overpaid counting as paid", { order_pending: -0.01 }, { order: "paid" }],
     ["pending 0", { order_pending: 0 }, { order: "paid" }],
     ["pending 0.01", { order_pending: 0.01 }, { order: "unpaid" }],
     ["pending not a number", { order_pending: NaN }, { order: "unpaid" }],
-    ["started exactly the alert hours ago", { attempt: startedAgo(6 * HOUR_MS) }, { overdue: true }],
-    ["started 1 ms under the alert hours ago", { attempt: startedAgo(6 * HOUR_MS - 1) }, { overdue: false }],
+    ["started exactly at the overdue cutoff", { attempt: startedAgo(6 * HOUR_MS) }, { overdue: true }],
+    ["started 1 ms after the overdue cutoff", { attempt: startedAgo(6 * HOUR_MS - 1) }, { overdue: false }],
     [
-      "markers naming this payment",
+      "a report marker naming this payment",
       {
         captured_payment_id: "pay_1",
-        attempt: { ...raw.attempt, metadata: { late_payment_captured: { payment_id: "pay_1" }, paid_twice_alerted: { payment_id: "pay_1" } } },
+        attempt: { ...raw.attempt, metadata: { late_payment_captured: { payment_id: "pay_1" } } },
       },
-      { captured: true, reported: true, twice_alerted: true },
+      { captured: true, reported: true },
     ],
     [
-      "markers naming another payment",
+      "a report marker naming another payment",
       {
         captured_payment_id: "pay_2",
-        attempt: { ...raw.attempt, metadata: { late_payment_captured: { payment_id: "pay_1" }, paid_twice_alerted: { payment_id: "pay_1" } } },
+        attempt: { ...raw.attempt, metadata: { late_payment_captured: { payment_id: "pay_1" } } },
       },
-      { captured: true, reported: false, twice_alerted: false },
+      { captured: true, reported: false },
     ],
   ] as const)("derives %s", (_, overrides, expected) => {
-    expect(toChargeFacts({ ...raw, ...overrides }, NOW)).toMatchObject(expected)
-  })
-})
-
-describe("ranTenMinutesAgo", () => {
-  it.each([
-    [10 * 60 * 1000, true],
-    [10 * 60 * 1000 - 1, false],
-  ])("answers %s ms after the start with %s", (ms, expected) => {
-    expect(ranTenMinutesAgo(new Date(NOW.getTime() - ms), NOW)).toBe(expected)
+    expect(toChargeFacts({ ...raw, ...overrides })).toMatchObject(expected)
   })
 })
 
@@ -110,7 +102,6 @@ describe("decideChargeActions", () => {
     attempt: "processing",
     captured: false,
     reported: false,
-    twice_alerted: false,
     overdue: false,
     alerted: false,
   }
@@ -131,35 +122,40 @@ describe("decideChargeActions", () => {
     ["a capture on a churned subscription", "captured", { ...capture, parent: "closed", subscription: "churned", attempt: "failed" }, ["mark_captured"]],
     ["a capture that pays the order", "captured", { ...capture, order: "paid" }, ["settle"]],
     ["a sweep that found the attempt's own capture", "sweep", { ...capture, order: "paid" }, ["settle"]],
-    ["a capture that overpays the order", "captured", { ...capture, order: "overpaid" }, ["settle", "paid_twice"]],
     ["a failure on an order paid another way", "failed", { order: "paid" }, []],
     ["a failure in flight", "failed", {}, ["fail"]],
     ["a failure redelivered after its attempt failed, parent awaiting payment", "failed", { attempt: "failed" }, ["fail"]],
     ["a failure of a finished attempt whose parent is processing or retrying, never failing it", "failed", { attempt: "failed", awaiting: false }, []],
-    ["a sweep of an order paid another way", "sweep", { order: "overpaid" }, ["settle_foreign"]],
+    ["a sweep of an order paid another way", "sweep", { order: "paid" }, ["settle_foreign"]],
     ["a sweep of a failed attempt on an order paid another way, settling first", "sweep", { attempt: "failed", order: "paid" }, ["settle_foreign"]],
     ["a sweep of a failed attempt whose parent still awaits payment", "sweep", { attempt: "failed" }, ["fail"]],
     ["a sweep of a finished attempt whose parent is processing or retrying, never failing it", "sweep", { attempt: "failed", awaiting: false }, []],
     ["an overdue sweep", "sweep", { overdue: true }, ["overdue_alert"]],
     ["a partial capture of an overdue charge", "captured", { ...capture, overdue: true }, ["overdue_alert"]],
     ["an overdue sweep already alerted, before closing stale", "sweep", { overdue: true, alerted: true }, []],
-    ["a capture overpaying a settled parent", "captured", { ...capture, parent: "settled", order: "overpaid", attempt: "succeeded" }, ["paid_twice"]],
     ["a failure after the parent closed", "failed", { parent: "closed" }, ["close_attempt_failed"]],
     ["a capture of a settled parent's open attempt", "captured", { ...capture, parent: "settled", order: "paid" }, ["mark_applied"]],
+    ["a capture of a closed parent's open attempt on an active subscription, never swept again", "sweep", { ...capture, parent: "closed" }, ["mark_captured"]],
+    ["a capture of a settled parent's finished attempt", "captured", { ...capture, parent: "settled", order: "paid", attempt: "succeeded" }, []],
     ["an overdue sweep of a closed parent's open attempt", "sweep", { parent: "closed", overdue: true }, ["close_attempt_failed"]],
     ["an overdue sweep of a settled parent, never settling", "sweep", { parent: "settled", order: "paid", overdue: true }, ["close_attempt_failed"]],
-    ["a paid-twice capture already alerted", "captured", { ...capture, parent: "settled", order: "overpaid", attempt: "succeeded", twice_alerted: true }, []],
   ] as const)("decides %s", (_, signal, overrides, expected) => {
     expect(decideChargeActions({ ...facts, ...overrides }, signal)).toEqual(expected)
   })
 })
 
 describe("reconcileCharge of a renewal attempt without a charge context", () => {
+  beforeEach(() => {
+    mockEnsureRun.mockClear()
+  })
+
   function setup(pending: number) {
+    const logger = { error: jest.fn(), warn: jest.fn(), info: jest.fn() }
     const rows = {
       attempt: { id: "att_1", renewal_cycle_id: "cyc_1", status: "processing", attempt_no: 1, started_at: NOW, order_id: "order_1", metadata: null },
       cycle: { id: "cyc_1", subscription_id: "sub_1", status: RenewalCycleStatus.AWAITING_PAYMENT, scheduled_for: NOW },
     }
+    const locking = { acquire: jest.fn(async () => {}), release: jest.fn(async () => {}) }
     const services: Record<string, object> = {
       [RENEWAL_MODULE]: {
         retrieveRenewalAttempt: async () => ({ ...rows.attempt }),
@@ -171,21 +167,64 @@ describe("reconcileCharge of a renewal attempt without a charge context", () => 
       [SUBSCRIPTION_MODULE]: { retrieveSubscription: async () => ({ id: "sub_1", status: SubscriptionStatus.ACTIVE }) },
       [DUNNING_MODULE]: {},
       [Modules.PAYMENT]: { retrievePayment: async () => ({ id: "pay_1", captures: [{ amount: 10 }] }) },
-      [Modules.LOCKING]: { acquire: async () => {}, release: async () => {} },
+      [Modules.LOCKING]: locking,
       [ContainerRegistrationKeys.QUERY]: {
         graph: async () => ({ data: [{ id: "order_1", total: 10, summary: { pending_difference: pending } }] }),
       },
+      logger,
     }
 
-    return { rows, container: { resolve: (key: string) => services[key] } as unknown as MedusaContainer }
+    return { rows, logger, locking, container: { resolve: (key: string) => services[key] } as unknown as MedusaContainer }
   }
+
+  const capture = { kind: "renewal", attempt_id: "att_1", signal: "captured", payment_id: "pay_1" } as const
+
+  it.each([
+    ["names this payment", "pay_1", true],
+    ["names another payment", "pay_2", false],
+  ])("answers a capture of a settled cycle's finished attempt whose report marker %s without taking the lock", async (_, reportedPaymentId, reported) => {
+    const { container, rows, locking } = setup(0)
+    Object.assign(rows.attempt, {
+      status: RenewalAttemptStatus.SUCCEEDED,
+      metadata: { late_payment_captured: { payment_id: reportedPaymentId } },
+    })
+    rows.cycle.status = RenewalCycleStatus.SUCCEEDED
+
+    await expect(reconcileCharge(container, capture)).resolves.toEqual({ actions: [], reported })
+    expect(locking.acquire).not.toHaveBeenCalled()
+  })
+
+  it("settles an overpaid order and raises an alert for it", async () => {
+    const { container, logger } = setup(-10)
+
+    await expect(reconcileCharge(container, capture)).resolves.toMatchObject({ actions: ["settle"] })
+    expect(logger.error.mock.calls.map(([line]) => JSON.parse(line))).toEqual([
+      expect.objectContaining({ event: "charge_paid_twice", alertable: true, order_id: "order_1" }),
+    ])
+  })
+
+  it.each([
+    [null, 1],
+    ["cycle_superseded", 0],
+  ])("after a settle answering %s, derives the next cycle %s time(s)", async (reason, runs) => {
+    jest.mocked(settleRenewalCycleSucceeded).mockResolvedValueOnce({ reason } as never)
+    const { container, rows } = setup(0)
+
+    await reconcileCharge(container, capture)
+
+    expect(mockEnsureRun).toHaveBeenCalledTimes(runs)
+    if (reason) {
+      expect(rows).toMatchObject({
+        attempt: { status: RenewalAttemptStatus.SUCCEEDED },
+        cycle: { status: RenewalCycleStatus.SUCCEEDED },
+      })
+    }
+  })
 
   it("settles a capture as a recovery, without the run's audit", async () => {
     const { container } = setup(0)
 
-    await expect(
-      reconcileCharge(container, { kind: "renewal", attempt_id: "att_1", signal: "captured", payment_id: "pay_1" })
-    ).resolves.toMatchObject({ actions: ["settle"] })
+    await expect(reconcileCharge(container, capture)).resolves.toMatchObject({ actions: ["settle"] })
     expect(settleRenewalCycleSucceeded).toHaveBeenCalledWith(
       container,
       expect.objectContaining({ attempt_id: "att_1", audit: undefined })
@@ -231,5 +270,8 @@ describe("reconcileCharge of a dunning retry whose capture pays the order", () =
     await reconcileCharge(container, { kind: "dunning", attempt_id: "datt_1", signal: "captured", payment_id: "pay_1" })
 
     expect(attempt.status).toEqual(status)
+    expect(mockRecoveryRun).toHaveBeenLastCalledWith({
+      input: { dunning_case_id: "dc_1", payment_id: "pay_1", source: "dunning_retry" },
+    })
   })
 })

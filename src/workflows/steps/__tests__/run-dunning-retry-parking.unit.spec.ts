@@ -948,6 +948,13 @@ describe("runDunningRetry - parking instead of churning", () => {
         { outcome: "retry_scheduled", attempt_no: 2 },
         { next_retry_at: expect.any(Date), recovery_reason: null },
       ],
+      [
+        "card the provider no longer knows",
+        "instrument_unknown",
+        DunningCaseStatus.UNRECOVERED,
+        { outcome: "unrecovered", attempt_no: 2 },
+        { recovery_reason: "permanent_payment_failure" },
+      ],
     ])(
       "answers a reported %s by its code alone",
       async (_label, code, caseStatus, expectedOutput, expectedCase) => {

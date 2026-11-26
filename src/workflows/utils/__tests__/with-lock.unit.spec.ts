@@ -95,8 +95,11 @@ describe("withLock", () => {
 
 describe("isLockBusy", () => {
   it.each([
-    [new MedusaError(MedusaError.Types.CONFLICT, "anything"), true],
+    [new MedusaError(MedusaError.Types.CONFLICT, "Failed to acquire lock for key \"k\""), true],
     [new Error("Failed to acquire lock for key \"k\""), true],
+    [new MedusaError(MedusaError.Types.CONFLICT, "Timed-out acquiring lock."), true],
+    [new Error("\"k\" is already locked."), true],
+    [new MedusaError(MedusaError.Types.CONFLICT, "Renewal 'rc_1' is already processing"), false],
     [new MedusaError(MedusaError.Types.NOT_FOUND, "missing"), false],
     [new Error("connection reset"), false],
   ])("classifies %s as busy: %s", (error, busy) => {

@@ -15,6 +15,7 @@ import type DunningModuleService from "../../src/modules/dunning/service"
 import { DunningAttemptStatus, DunningCaseStatus } from "../../src/modules/dunning/types"
 import { dunningErrors } from "../../src/modules/dunning/utils/errors"
 import { RetryBlockedReason } from "../../src/modules/dunning/utils/retry-eligibility"
+import { PlanOfferScope } from "../../src/modules/plan-offer/types"
 import { RENEWAL_MODULE } from "../../src/modules/renewal"
 import type RenewalModuleService from "../../src/modules/renewal/service"
 import { RenewalAttemptStatus, RenewalCycleStatus } from "../../src/modules/renewal/types"
@@ -25,6 +26,7 @@ import type SubscriptionModuleService from "../../src/modules/subscription/servi
 import { SubscriptionStatus } from "../../src/modules/subscription/types"
 import {
   cancelSubscriptionByCustomerWorkflow,
+  cancelSubscriptionWorkflow,
   ensureNextRenewalCycleWorkflow,
   forceRenewalCycleWorkflow,
   startDunningWorkflow,
@@ -39,6 +41,7 @@ import {
   seedDunningCase,
 } from "../helpers/async-payment-fixtures"
 import { createCancellationCaseSeed } from "../helpers/cancellation-fixtures"
+import { createPlanOfferSeed, createProductWithVariant } from "../helpers/plan-offer-fixtures"
 import {
   RENEWAL_AMOUNT,
   answerAuthorizationWithNull,
@@ -537,13 +540,13 @@ medusaIntegrationTestRunner({
         await deliverCapture(container, capture.id)
 
         expect(await readDunningState(container, parked.dunningCase.id)).toMatchObject({
-          dunningCase: { status: DunningCaseStatus.RECOVERED, recovery_reason: "customer_payment", next_retry_at: null },
+          dunningCase: { status: DunningCaseStatus.RECOVERED, recovery_reason: "payment_recovered", next_retry_at: null },
           attempts: [{ id: parked.attempt.id, status: DunningAttemptStatus.SUCCEEDED, finished_at: expect.any(Date) }],
           subscription: { status: SubscriptionStatus.ACTIVE },
           cycle: { status: RenewalCycleStatus.SUCCEEDED },
         })
         expect(emitted(DunningEvents.RECOVERED).map(({ data }) => data)).toEqual([
-          expect.objectContaining({ dunning_case_id: parked.dunningCase.id }),
+          expect.objectContaining({ dunning_case_id: parked.dunningCase.id, recovery_reason: "payment_recovered" }),
         ])
         expect(emitted(SubscriptionEvents.LATE_PAYMENT_CAPTURED)).toEqual([])
       })
@@ -1008,7 +1011,7 @@ medusaIntegrationTestRunner({
       ])("$name", sweepRow)
     })
 
-    describe("pause, resume and the pause offer while a charge is in flight", () => {
+    describe("subscription changes while a charge is in flight", () => {
       type GuardedCall = { id: string, store: { headers: Record<string, string> }, offerCaseId: string }
       const storeUrl = "/store/customers/me/subscriptions"
       const pauseOffer = {
@@ -1023,27 +1026,58 @@ medusaIntegrationTestRunner({
         "an admin resume with a date": ({ id }: GuardedCall) =>
           api.post(`/admin/subscriptions/${id}/resume`, { resume_at: RESUME_AT.toISOString() }, admin),
         "a store resume": ({ id, store }: GuardedCall) => api.post(`${storeUrl}/${id}/resume`, {}, store),
+        "a store skip": ({ id, store }: GuardedCall) => api.post(`${storeUrl}/${id}/skip-next-delivery`, {}, store),
+        "a store frequency change": ({ id, store }: GuardedCall) =>
+          api.post(`${storeUrl}/${id}/change-frequency`, { frequency_interval: "month", frequency_value: 2 }, store),
       }
       const adminRefusal = { type: MedusaError.Types.CONFLICT }
       const storeRefusal = { ...adminRefusal, code: RENEWAL_PAYMENT_IN_PROGRESS }
+      const paused = { status: SubscriptionStatus.PAUSED }
+      const resumed = { status: SubscriptionStatus.ACTIVE }
+
+      async function offerTwoMonthly(container: MedusaContainer, subscriptionId: string) {
+        const { product, variant } = await createProductWithVariant(container)
+
+        await createPlanOfferSeed(container, {
+          name: `PLAN-${subscriptionId}`,
+          scope: PlanOfferScope.VARIANT,
+          product_id: product.id,
+          variant_id: variant.id,
+          is_enabled: true,
+          allowed_frequencies: [{ interval: FrequencyInterval.MONTH, value: 2 }],
+        })
+        await subscriptions().updateSubscriptions({ id: subscriptionId, product_id: product.id, variant_id: variant.id })
+      }
 
       it.each([
-        { call: "an admin pause", charge: "dunning", paused: false, refusal: adminRefusal },
-        { call: "a store pause", charge: "renewal", paused: false, refusal: storeRefusal },
-        { call: "a pause offer", charge: "renewal", paused: false, refusal: adminRefusal },
-        { call: "an admin resume with a date", charge: "renewal", paused: true, refusal: adminRefusal },
-        { call: "a store resume", charge: "renewal", paused: true, refusal: storeRefusal },
+        { call: "an admin pause", charge: "dunning", from: "active", refusal: adminRefusal, then: paused },
+        { call: "a store pause", charge: "renewal", from: "active", refusal: storeRefusal, then: paused },
+        { call: "a pause offer", charge: "renewal", from: "active", refusal: adminRefusal, then: paused },
+        { call: "an admin resume with a date", charge: "renewal", from: "paused", refusal: adminRefusal, then: resumed },
+        { call: "a store resume", charge: "renewal", from: "paused", refusal: storeRefusal, then: resumed },
+        { call: "a store skip", charge: "renewal", from: "active", refusal: storeRefusal, then: { skip_next_cycle: true } },
+        {
+          call: "a store frequency change",
+          charge: "renewal",
+          from: "active",
+          refusal: storeRefusal,
+          then: { pending_update_data: expect.objectContaining({ frequency_value: 2 }) },
+        },
       ] as const)(
         "refuses $call while a $charge charge is in flight, writing nothing, and allows it once the charge settled",
-        async ({ call, charge, paused, refusal }) => {
+        async ({ call, charge, from, refusal, then }) => {
           const container = getContainer()
           const parked = charge === "dunning"
             ? await seedParkedDunningCase(container, "SUB-ASYNC-GUARD").then((seeded) => ({ ...seeded, order_id: seeded.order.id }))
             : await seedAwaitingRenewal(container, { reference: "SUB-ASYNC-GUARD" })
           const id = parked.subscription.id
 
-          if (paused) {
+          if (from === "paused") {
             await subscriptions().updateSubscriptions({ id, status: SubscriptionStatus.PAUSED, paused_at: new Date() })
+          }
+
+          if (call === "a store frequency change") {
+            await offerTwoMonthly(container, id)
           }
 
           const offerCase = await createCancellationCaseSeed(container, {
@@ -1065,11 +1099,41 @@ medusaIntegrationTestRunner({
           await deliverCapture(container, (await captureOnOrder(container, parked.order_id, parked.session.id)).id)
 
           expect((await request()).status).toEqual(200)
-          expect((await subscriptions().retrieveSubscription(id)).status).toEqual(
-            paused ? SubscriptionStatus.ACTIVE : SubscriptionStatus.PAUSED
-          )
+          expect(await subscriptions().retrieveSubscription(id)).toMatchObject(then)
         }
       )
+
+      it("refuses a store pause while a renewal run holds the subscription's lock, and allows it after", async () => {
+        const container = getContainer()
+        const seeded = await seedDueRenewal(container, { reference: "SUB-ASYNC-GUARD-LOCK", due_at: DUE_AT })
+        const id = seeded.subscription.id
+        const store = { headers: await createStoreCustomerHeaders(container, seeded.subscription.customer_id) }
+        const pause = () => api.post(`${storeUrl}/${id}/pause`, {}, store)
+
+        await whileLockHeld(container, `renewal:subscription:${id}`, async () => {
+          await expect(pause()).rejects.toMatchObject({ response: { status: 409, data: storeRefusal } })
+        })
+
+        expect((await subscriptions().retrieveSubscription(id)).status).toEqual(SubscriptionStatus.ACTIVE)
+        expect((await pause()).status).toEqual(200)
+      })
+
+      it("fails a cancellation while a renewal run holds the subscription's lock, and cancels once it is released", async () => {
+        const container = getContainer()
+        const seeded = await seedDueRenewal(container, { reference: "SUB-ASYNC-CANCEL-LOCK", due_at: DUE_AT })
+        const id = seeded.subscription.id
+        const key = `renewal:subscription:${id}`
+        const cancel = () =>
+          cancelSubscriptionWorkflow(container).run({ input: { id, reason: "account_erasure", effective_at: "immediately" } })
+
+        await whileLockHeld(container, key, async () => {
+          await expect(cancel()).rejects.toMatchObject({ message: `Failed to acquire lock for key "${key}"` })
+        })
+
+        expect((await subscriptions().retrieveSubscription(id)).status).toEqual(SubscriptionStatus.ACTIVE)
+        await cancel()
+        expect((await subscriptions().retrieveSubscription(id)).status).toEqual(SubscriptionStatus.CANCELLED)
+      })
     })
   },
 })

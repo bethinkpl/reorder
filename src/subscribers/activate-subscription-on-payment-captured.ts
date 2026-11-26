@@ -94,6 +94,8 @@ async function runDunningRecovery(
     payment_id: string
     /** Only a churned subscription wants the settled case: the step's log names its remedy. */
     include_unrecovered?: boolean
+    /** A dunning retry's own charge, confirmed after the retry returned. */
+    retry_charge?: boolean
   }
 ) {
   const dunningCase = await findDunningCaseForOrder(
@@ -108,7 +110,11 @@ async function runDunningRecovery(
 
   try {
     await recoverDunningFromCapturedPaymentWorkflow(container).run({
-      input: { dunning_case_id: dunningCase.id, payment_id: input.payment_id },
+      input: {
+        dunning_case_id: dunningCase.id,
+        payment_id: input.payment_id,
+        source: input.retry_charge ? "dunning_retry" : "customer_payment",
+      },
     })
   } catch (error) {
     container.resolve("logger").error(
@@ -239,6 +245,7 @@ export async function activateSubscriptionOnPaymentCaptured(
     order_id: orderId,
     subscription_id: subscription.id,
     payment_id: paymentId,
+    retry_charge: marker?.kind === "dunning",
   })
 
   if (marker?.kind === "dunning") {

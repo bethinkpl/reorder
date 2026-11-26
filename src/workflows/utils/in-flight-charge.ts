@@ -1,7 +1,6 @@
 import type { IPaymentModuleService, MedusaContainer } from "@medusajs/framework/types"
 import { MathBN, MedusaError, Modules } from "@medusajs/framework/utils"
 import { DUNNING_MODULE } from "../../modules/dunning"
-import { DunningEvents } from "../../modules/dunning/events"
 import type DunningModuleService from "../../modules/dunning/service"
 import {
   CHARGE_IN_FLIGHT_DUNNING_CASE_STATUSES,
@@ -16,6 +15,7 @@ import {
   RenewalAttemptStatus,
   RenewalCycleStatus,
 } from "../../modules/renewal/types"
+import { renewalSubscriptionLockKey } from "../../modules/renewal/utils/lock-key"
 import { getRenewalErrorMessage } from "../../modules/renewal/utils/observability"
 import { SUBSCRIPTION_MODULE } from "../../modules/subscription"
 import {
@@ -40,18 +40,20 @@ import {
   settleNonRetryableCase,
 } from "../steps/run-dunning-retry"
 import { ChargeSessionMarker, findChargeSession, type RenewalChargeContext } from "./charge-session"
+import { dunningRetryOutcomeEvents } from "./dunning-retry-events"
 import { settleRenewalCycleSucceeded } from "./settle-renewal-cycle-succeeded"
 import { isLockBusy, withLock } from "./with-lock"
 
 const SIGNAL_LOCK_WAIT_SECONDS = 45
+const LOCK_TTL_SECONDS = 120
 const DEFAULT_ALERT_HOURS = 96
+const HOUR_MS = 60 * 60 * 1000
 const CAPTURED_AFTER_CLOSE = "captured_after_close"
-const RUN_HELD_PARENT_STATUSES: readonly string[] = [RenewalCycleStatus.PROCESSING, DunningCaseStatus.RETRYING]
 
 export type ChargeKind = "renewal" | "dunning"
 export type ChargeSignal = "captured" | "failed" | "sweep"
 export type ChargeAction =
-  | "settle" | "settle_foreign" | "paid_twice" | "fail" | "end_parent"
+  | "settle" | "settle_foreign" | "fail" | "end_parent"
   | "late_capture" | "mark_captured" | "mark_applied" | "overdue_alert" | "close_attempt_failed"
 export type ChargeMarker = { kind: ChargeKind, attempt_id: string }
 export type ReportedChargeFailure = { session_id: string | null, code: string, message: string }
@@ -62,6 +64,24 @@ export type ReconcileChargeInput = ChargeMarker & (
 )
 export type ReconcileChargeResult = { actions: readonly ChargeAction[], reported: boolean }
 
+type ParentStatuses = { inFlight: readonly string[], awaiting: string, settled: string, runHeld: string }
+
+/** What the statuses of a renewal cycle and of a dunning case say about the charge they carry. */
+const PARENT_STATUSES: Record<ChargeKind, ParentStatuses> = {
+  renewal: {
+    inFlight: CHARGE_IN_FLIGHT_RENEWAL_CYCLE_STATUSES,
+    awaiting: RenewalCycleStatus.AWAITING_PAYMENT,
+    settled: RenewalCycleStatus.SUCCEEDED,
+    runHeld: RenewalCycleStatus.PROCESSING,
+  },
+  dunning: {
+    inFlight: CHARGE_IN_FLIGHT_DUNNING_CASE_STATUSES,
+    awaiting: DunningCaseStatus.AWAITING_PAYMENT,
+    settled: DunningCaseStatus.RECOVERED,
+    runHeld: DunningCaseStatus.RETRYING,
+  },
+}
+
 export type RawChargeFacts = {
   kind: ChargeKind
   attempt: { id: string, status: string, started_at: Date | string, metadata: Record<string, unknown> | null }
@@ -71,92 +91,129 @@ export type RawChargeFacts = {
   order_has_dunning_case: boolean
   order_pending: number | null
   captured_payment_id: string | null
-  alert_hours: number
+  /** An attempt started at or before this has waited too long for its answer. */
+  overdue_before: Date
 }
 
 export type ChargeFacts = {
   parent: "in_flight" | "settled" | "closed"
   awaiting: boolean
   subscription: "churned" | "terminal" | "active"
-  order: "overpaid" | "paid" | "unpaid"
+  order: "paid" | "unpaid"
   attempt: "processing" | "failed" | "succeeded"
   captured: boolean
   reported: boolean
-  twice_alerted: boolean
   overdue: boolean
   alerted: boolean
 }
 
-const ageMs = (startedAt: Date | string, now: Date) => now.getTime() - new Date(startedAt).getTime()
-
-export function ranTenMinutesAgo(startedAt: Date | string, now: Date) {
-  return ageMs(startedAt, now) >= 10 * 60 * 1000
-}
-
-export function toChargeFacts(raw: RawChargeFacts, now: Date): ChargeFacts {
-  const renewal = raw.kind === "renewal"
-  const inFlight: readonly string[] = renewal
-    ? CHARGE_IN_FLIGHT_RENEWAL_CYCLE_STATUSES
-    : CHARGE_IN_FLIGHT_DUNNING_CASE_STATUSES
-  const settled: string = renewal ? RenewalCycleStatus.SUCCEEDED : DunningCaseStatus.RECOVERED
+export function toChargeFacts(raw: RawChargeFacts): ChargeFacts {
+  const statuses = PARENT_STATUSES[raw.kind]
   const { order_pending: pending, captured_payment_id: paymentId } = raw
   const { status, metadata } = raw.attempt
-  const marks = (key: string) =>
-    paymentId !== null && (metadata?.[key] as { payment_id?: unknown } | undefined)?.payment_id === paymentId
+  const reportedPaymentId = (metadata?.late_payment_captured as { payment_id?: unknown } | undefined)?.payment_id
 
   return {
-    parent: inFlight.includes(raw.parent_status) && raw.newest_attempt_id === raw.attempt.id
+    parent: statuses.inFlight.includes(raw.parent_status) && raw.newest_attempt_id === raw.attempt.id
       ? "in_flight"
-      : raw.parent_status === settled ? "settled" : "closed",
-    awaiting: raw.parent_status === (renewal ? RenewalCycleStatus.AWAITING_PAYMENT : DunningCaseStatus.AWAITING_PAYMENT),
+      : raw.parent_status === statuses.settled ? "settled" : "closed",
+    awaiting: raw.parent_status === statuses.awaiting,
     subscription: raw.subscription_status === SubscriptionStatus.PAYMENT_FAILED && raw.order_has_dunning_case
       ? "churned"
       : TERMINAL_SUBSCRIPTION_STATUSES.includes(raw.subscription_status) ? "terminal" : "active",
-    order: pending === null || !Number.isFinite(pending) || pending > 0 ? "unpaid" : pending < 0 ? "overpaid" : "paid",
+    order: pending !== null && Number.isFinite(pending) && pending <= 0 ? "paid" : "unpaid",
     attempt: status === RenewalAttemptStatus.PROCESSING
       ? "processing"
       : status === RenewalAttemptStatus.SUCCEEDED ? "succeeded" : "failed",
     captured: paymentId !== null,
-    reported: marks("late_payment_captured"),
-    twice_alerted: marks("paid_twice_alerted"),
-    overdue: ageMs(raw.attempt.started_at, now) >= raw.alert_hours * 60 * 60 * 1000,
+    reported: paymentId !== null && reportedPaymentId === paymentId,
+    overdue: new Date(raw.attempt.started_at) <= raw.overdue_before,
     alerted: Boolean(metadata?.overdue_alerted_at),
   }
 }
 
-const inFlight = (f: ChargeFacts) => f.parent === "in_flight"
+const overdueAlert = (f: ChargeFacts): ChargeAction[] => (f.overdue && !f.alerted ? ["overdue_alert"] : [])
 
-const DECISION_TABLE: readonly [readonly ChargeSignal[], (f: ChargeFacts) => boolean, readonly ChargeAction[]][] = [
-  [["captured"], (f) => f.reported && inFlight(f) && f.subscription !== "active", ["end_parent"]],
-  [["captured"], (f) => f.reported, []],
-  [["failed"], (f) => f.attempt === "succeeded", []],
-  [["captured"], (f) => inFlight(f) && f.subscription === "terminal", ["late_capture", "end_parent"]],
-  [["failed"], (f) => inFlight(f) && f.subscription !== "active", ["close_attempt_failed", "end_parent"]],
-  [["sweep"], (f) => inFlight(f) && f.subscription !== "active", ["end_parent"]],
-  [
-    ["captured"],
-    (f) => f.parent === "closed" && f.subscription === "terminal" && f.attempt !== "succeeded",
-    ["late_capture"],
-  ],
-  [["captured"], (f) => f.subscription === "churned" && f.attempt !== "succeeded", ["mark_captured"]],
-  [["captured"], (f) => inFlight(f) && f.order === "paid", ["settle"]],
-  [["captured"], (f) => inFlight(f) && f.order === "overpaid", ["settle", "paid_twice"]],
-  [["failed"], (f) => inFlight(f) && f.order !== "unpaid", []],
-  [["failed"], (f) => inFlight(f) && (f.awaiting || f.attempt === "processing"), ["fail"]],
-  [["sweep"], (f) => inFlight(f) && f.order !== "unpaid", ["settle_foreign"]],
-  [["sweep"], (f) => inFlight(f) && f.awaiting && f.attempt === "failed", ["fail"]],
-  [["captured", "sweep"], (f) => inFlight(f) && f.overdue && !f.alerted, ["overdue_alert"]],
-  [["captured", "sweep"], inFlight, []],
-  [["captured"], (f) => f.parent === "settled" && f.order === "overpaid" && !f.twice_alerted, ["paid_twice"]],
-  [["failed"], (f) => f.attempt === "processing", ["close_attempt_failed"]],
-  [["captured"], (f) => f.parent === "settled" && f.attempt === "processing", ["mark_applied"]],
-  [["sweep"], (f) => f.attempt === "processing" && f.overdue, ["close_attempt_failed"]],
-]
+/** The charge's own payment was captured: its event arrived, or the sweep found it. */
+function decideCapture(f: ChargeFacts): ChargeAction[] {
+  const inFlight = f.parent === "in_flight"
+
+  if (f.reported) {
+    return inFlight && f.subscription !== "active" ? ["end_parent"] : []
+  }
+
+  if (inFlight && f.subscription === "terminal") {
+    return ["late_capture", "end_parent"]
+  }
+
+  if (f.parent === "closed" && f.subscription === "terminal" && f.attempt !== "succeeded") {
+    return ["late_capture"]
+  }
+
+  if (f.subscription === "churned" && f.attempt !== "succeeded") {
+    return ["mark_captured"]
+  }
+
+  if (inFlight) {
+    return f.order === "paid" ? ["settle"] : overdueAlert(f)
+  }
+
+  if (f.attempt !== "processing") {
+    return []
+  }
+
+  // The parent this capture settled, or a closed one whose dunning recovery applies the money: either
+  // way the attempt is done, and left open the sweep would reload it for ever.
+  return f.parent === "settled" ? ["mark_applied"] : ["mark_captured"]
+}
+
+function decideFailure(f: ChargeFacts): ChargeAction[] {
+  if (f.attempt === "succeeded") {
+    return []
+  }
+
+  if (f.parent !== "in_flight") {
+    return f.attempt === "processing" ? ["close_attempt_failed"] : []
+  }
+
+  if (f.subscription !== "active") {
+    return ["close_attempt_failed", "end_parent"]
+  }
+
+  // The order was paid another way, which the sweep settles.
+  if (f.order === "paid") {
+    return []
+  }
+
+  return f.awaiting || f.attempt === "processing" ? ["fail"] : []
+}
+
+/** The sweep found no capture of the charge's own. */
+function decideSweep(f: ChargeFacts): ChargeAction[] {
+  if (f.parent !== "in_flight") {
+    return f.attempt === "processing" && f.overdue ? ["close_attempt_failed"] : []
+  }
+
+  if (f.subscription !== "active") {
+    return ["end_parent"]
+  }
+
+  if (f.order === "paid") {
+    return ["settle_foreign"]
+  }
+
+  // A failure recorded on the attempt whose parent never got to fail.
+  if (f.awaiting && f.attempt === "failed") {
+    return ["fail"]
+  }
+
+  return overdueAlert(f)
+}
 
 export function decideChargeActions(facts: ChargeFacts, signal: ChargeSignal): readonly ChargeAction[] {
   const on = signal === "sweep" && facts.captured ? "captured" : signal
 
-  return DECISION_TABLE.find(([signals, when]) => signals.includes(on) && when(facts))?.[2] ?? []
+  return on === "captured" ? decideCapture(facts) : on === "failed" ? decideFailure(facts) : decideSweep(facts)
 }
 
 async function loadChargeParent(container: MedusaContainer, input: ChargeMarker) {
@@ -181,6 +238,13 @@ async function loadChargeParent(container: MedusaContainer, input: ChargeMarker)
   return { attempt, newest, parent, owner: dunningCase, order_id: dunningCase.renewal_order_id }
 }
 
+type ChargeParent = Awaited<ReturnType<typeof loadChargeParent>>["parent"]
+
+const lockKeyOf = (parent: ChargeParent) =>
+  parent.kind === "renewal"
+    ? renewalSubscriptionLockKey(parent.cycle.subscription_id)
+    : `dunning:${parent.dunning_case.id}`
+
 async function loadCharge(container: MedusaContainer, input: ReconcileChargeInput, now: Date) {
   const { attempt, newest, parent, owner, order_id: orderId } = await loadChargeParent(container, input)
   const subscription = (await container
@@ -204,6 +268,7 @@ async function loadCharge(container: MedusaContainer, input: ReconcileChargeInpu
         .listDunningCases({ renewal_order_id: orderId }, { select: ["id"], take: 1 })
     : []
   const alertHours = Number(process.env.RENEWAL_AWAITING_PAYMENT_ALERT_HOURS)
+  const orderPending = orderId ? (await loadOrderAmounts(container, orderId)).pending : null
 
   const facts = toChargeFacts({
     kind: input.kind,
@@ -212,78 +277,66 @@ async function loadCharge(container: MedusaContainer, input: ReconcileChargeInpu
     newest_attempt_id: newest?.id ?? null,
     subscription_status: subscription.status,
     order_has_dunning_case: input.kind === "dunning" || churnCases.length > 0,
-    order_pending: orderId ? (await loadOrderAmounts(container, orderId)).pending : null,
+    order_pending: orderPending,
     captured_payment_id: payment?.id ?? null,
-    alert_hours: alertHours > 0 ? alertHours : DEFAULT_ALERT_HOURS,
-  }, now)
-  const lockKey = parent.kind === "renewal" ? `renewal:subscription:${owner.subscription_id}` : `dunning:${owner.id}`
+    overdue_before: new Date(now.getTime() - (alertHours > 0 ? alertHours : DEFAULT_ALERT_HOURS) * HOUR_MS),
+  })
 
-  return { attempt, parent, parent_status: owner.status, subscription, order_id: orderId, lock_key: lockKey, payment, facts }
+  return { attempt, parent, subscription, order_id: orderId, order_pending: orderPending, payment, facts }
 }
+
+type Charge = Awaited<ReturnType<typeof loadCharge>>
+type RenewalCycle = Extract<ChargeParent, { kind: "renewal" }>["cycle"]
 
 type AttemptUpdate = { status?: "succeeded" | "failed", error_code?: string, error_message?: string, marker?: object }
 
-async function applyChargeActions(
-  container: MedusaContainer,
-  charge: Awaited<ReturnType<typeof loadCharge>>,
-  actions: readonly ChargeAction[],
-  failure: ReportedChargeFailure | null,
-  now: Date
-) {
-  const { attempt, facts, parent, subscription, order_id: orderId } = charge
-  const payment = charge.payment!
-  const chargeContext = attempt.metadata?.charge_context as RenewalChargeContext | undefined
+/** What settling, failing and ending a charge do on the kind of parent that carries it. */
+type ChargeOps = {
+  updateAttempt(update: AttemptUpdate): Promise<unknown>
+  /** A dunning case settles through its recovery workflow once the lock is released. */
+  settle(own: boolean): Promise<unknown>
+  fail(failure: ReportedChargeFailure): Promise<unknown>
+  end(): Promise<unknown>
+  lateCaptureRefs: Pick<LatePaymentCapturedEventData, "renewal_cycle_id" | "dunning_case_id" | "dunning_attempt_id">
+}
+
+const attemptFields = (charge: Charge, now: Date, { status, error_code, error_message, marker }: AttemptUpdate) => ({
+  id: charge.attempt.id,
+  ...(status && { finished_at: now, error_code: error_code ?? null, error_message: error_message ?? null }),
+  ...(marker && { metadata: { ...charge.attempt.metadata, ...marker } }),
+})
+
+function renewalOps(container: MedusaContainer, charge: Charge, cycle: RenewalCycle, now: Date): ChargeOps {
   const renewalModule = container.resolve<RenewalModuleService>(RENEWAL_MODULE)
-  const dunningModule = container.resolve<DunningModuleService>(DUNNING_MODULE)
-  let reported = facts.reported
+  const { attempt, order_id: orderId, subscription } = charge
+  const chargeContext = attempt.metadata?.charge_context as RenewalChargeContext | undefined
+  const updateAttempt = (update: AttemptUpdate) => renewalModule.updateRenewalAttempts({
+    ...attemptFields(charge, now, update),
+    ...(update.status && {
+      status: update.status === "succeeded" ? RenewalAttemptStatus.SUCCEEDED : RenewalAttemptStatus.FAILED,
+    }),
+  })
 
-  const update = async ({ status, error_code, error_message, marker }: AttemptUpdate) => {
-    const fields = {
-      id: attempt.id,
-      ...(status && { finished_at: now, error_code: error_code ?? null, error_message: error_message ?? null }),
-      ...(marker && { metadata: { ...attempt.metadata, ...marker } }),
-    }
-    const succeeded = status === "succeeded"
-
-    if (parent.kind === "renewal") {
-      await renewalModule.updateRenewalAttempts({
-        ...fields,
-        ...(status && { status: succeeded ? RenewalAttemptStatus.SUCCEEDED : RenewalAttemptStatus.FAILED }),
+  return {
+    updateAttempt,
+    settle: async (own) => {
+      const { reason } = await settleRenewalCycleSucceeded(container, {
+        renewal_cycle_id: cycle.id,
+        subscription_id: cycle.subscription_id,
+        order_id: orderId,
+        finished_at: now,
+        attempt_id: own ? attempt.id : null,
+        source: own ? "renewal" : "customer_payment",
+        source_snapshot: chargeContext?.source_snapshot,
+        audit: chargeContext && { ...chargeContext, attempt_no: attempt.attempt_no },
       })
-    } else {
-      await dunningModule.updateDunningAttempts({
-        ...fields,
-        ...(status && { status: succeeded ? DunningAttemptStatus.SUCCEEDED : DunningAttemptStatus.FAILED }),
-      })
-    }
-  }
-  const alert = (event: string, message: string) => container.resolve("logger").error(JSON.stringify({
-    domain: "subscriptions",
-    event,
-    attempt_id: attempt.id,
-    subscription_id: subscription.id,
-    order_id: orderId,
-    alertable: true,
-    message,
-  }))
-  const settleRenewal = async (own: boolean) => {
-    if (parent.kind !== "renewal") {
-      return
-    }
 
-    const { cycle } = parent
-    const { reason } = await settleRenewalCycleSucceeded(container, {
-      renewal_cycle_id: cycle.id,
-      subscription_id: cycle.subscription_id,
-      order_id: orderId,
-      finished_at: now,
-      attempt_id: own ? attempt.id : null,
-      source: own ? "renewal" : "customer_payment",
-      source_snapshot: chargeContext?.source_snapshot,
-      audit: chargeContext && { ...chargeContext, attempt_no: attempt.attempt_no },
-    })
+      if (reason !== "cycle_superseded") {
+        return await ensureNextRenewalCycleWorkflow(container).run({ input: { subscription_id: cycle.subscription_id } })
+      }
 
-    if (reason === "cycle_superseded") {
+      // Billing already moved past this cycle: its payment closes it without moving the dates, and
+      // the cycle that is actually due is left alone.
       await renewalModule.updateRenewalCycles({
         id: cycle.id,
         status: RenewalCycleStatus.SUCCEEDED,
@@ -293,149 +346,176 @@ async function applyChargeActions(
       })
 
       if (own) {
-        await update({ status: "succeeded" })
+        await updateAttempt({ status: "succeeded" })
       }
+    },
+    fail: async (failure) => {
+      if (!chargeContext) {
+        await updateAttempt({ status: "failed", error_code: failure.code, error_message: failure.message })
+
+        return await renewalModule.updateRenewalCycles({
+          id: cycle.id,
+          status: RenewalCycleStatus.FAILED,
+          processed_at: now,
+          last_error: failure.message,
+        })
+      }
+
+      const error = Object.assign(new Error(failure.message), { code: failure.code })
+
+      return await recordRenewalFailure(container, {
+        ...chargeContext,
+        renewal_cycle_id: cycle.id,
+        subscription_id: cycle.subscription_id,
+        attempt_id: attempt.id,
+        attempt_no: attempt.attempt_no,
+        applied_pending_changes: cycle.applied_pending_update_data as RenewalAppliedPendingUpdateData | null,
+        scheduled_for: new Date(cycle.scheduled_for).toISOString(),
+        subscription,
+        cycle_previous_state: chargeContext.previous_state,
+      }, createPaymentQualifiedRenewalError(error, "payment_provider", orderId!))
+    },
+    end: () => renewalModule.updateRenewalCycles({
+      id: cycle.id,
+      status: RenewalCycleStatus.FAILED,
+      processed_at: now,
+      last_error: `Subscription '${subscription.id}' is ${subscription.status}, so its pending renewal charge was ended`,
+    }),
+    lateCaptureRefs: { renewal_cycle_id: cycle.id },
+  }
+}
+
+function dunningOps(container: MedusaContainer, charge: Charge, dunningCase: DunningCaseRecord, now: Date): ChargeOps {
+  const dunningModule = container.resolve<DunningModuleService>(DUNNING_MODULE)
+  const { attempt } = charge
+
+  return {
+    updateAttempt: (update) => dunningModule.updateDunningAttempts({
+      ...attemptFields(charge, now, update),
+      ...(update.status && {
+        status: update.status === "succeeded" ? DunningAttemptStatus.SUCCEEDED : DunningAttemptStatus.FAILED,
+      }),
+    }),
+    settle: async () => undefined,
+    fail: async (failure) => {
+      const { output } = await runDunningRetry(container, {
+        dunning_case_id: dunningCase.id,
+        reported_failure: { dunning_attempt_id: attempt.id, ...failure },
+      })
+
+      for (const event of dunningRetryOutcomeEvents(output)) {
+        await emitDunningEvent(container, event)
+      }
+    },
+    end: () => settleNonRetryableCase(dunningModule, dunningCase, charge.subscription.status, now),
+    lateCaptureRefs: {
+      renewal_cycle_id: dunningCase.renewal_cycle_id,
+      dunning_case_id: dunningCase.id,
+      dunning_attempt_id: attempt.id,
+    },
+  }
+}
+
+function toLatePaymentCapturedEvent(
+  { payment, subscription, order_id: orderId }: Charge,
+  refs: ChargeOps["lateCaptureRefs"]
+): LatePaymentCapturedEventData {
+  if (!payment) {
+    throw new MedusaError(MedusaError.Types.UNEXPECTED_STATE, "A late capture has no captured payment to report")
+  }
+
+  return {
+    subscription_id: subscription.id,
+    payment_id: payment.id,
+    order_id: orderId,
+    payment_collection_id: payment.payment_collection_id,
+    ...refs,
+    reason: LatePaymentCapturedReason.SUBSCRIPTION_TERMINAL,
+    refund_amount: MathBN.sum(0, ...(payment.captures ?? []).map(({ amount }) => amount)).toNumber(),
+    currency_code: payment.currency_code,
+  }
+}
+
+/** Reports a capture the plugin will not apply, so the host refunds it. True once it went out. */
+async function emitLateCapture(container: MedusaContainer, charge: Charge, ops: ChargeOps) {
+  const data = toLatePaymentCapturedEvent(charge, ops.lateCaptureRefs)
+  const { output } = await emitDunningEvent(container, { eventName: SubscriptionEvents.LATE_PAYMENT_CAPTURED, data })
+
+  if (!output.emitted) {
+    return false
+  }
+
+  await ops.updateAttempt({
+    status: "succeeded",
+    error_code: CAPTURED_AFTER_CLOSE,
+    marker: { late_payment_captured: { payment_id: data.payment_id } },
+  })
+
+  return true
+}
+
+function alert(container: MedusaContainer, charge: Charge, event: string, message: string) {
+  container.resolve("logger").error(JSON.stringify({
+    domain: "subscriptions",
+    event,
+    attempt_id: charge.attempt.id,
+    subscription_id: charge.subscription.id,
+    order_id: charge.order_id,
+    alertable: true,
+    message,
+  }))
+}
+
+/** Applies the decided actions in order and says whether the charge's capture has been reported. */
+async function applyChargeActions(
+  container: MedusaContainer,
+  charge: Charge,
+  actions: readonly ChargeAction[],
+  failure: ReportedChargeFailure | null,
+  now: Date
+) {
+  const { attempt, parent } = charge
+  const ops = parent.kind === "renewal"
+    ? renewalOps(container, charge, parent.cycle, now)
+    : dunningOps(container, charge, parent.dunning_case, now)
+  const settle = (own: boolean) => {
+    // Both apps refuse to take a paid order's money again, so an overpaid one needs a look.
+    if (charge.order_pending !== null && charge.order_pending < 0) {
+      alert(container, charge, "charge_paid_twice", `Order '${charge.order_id}' is overpaid after its charge settled`)
     }
 
-    await ensureNextRenewalCycleWorkflow(container).run({ input: { subscription_id: cycle.subscription_id } })
+    return ops.settle(own)
   }
 
   const handlers: Record<ChargeAction, () => Promise<unknown>> = {
-    settle: () => settleRenewal(true),
-    settle_foreign: () => settleRenewal(false),
-    fail: async () => {
-      const failed = failure ?? {
-        session_id: attempt.payment_reference,
-        code: attempt.error_code ?? "payment_failed",
-        message: attempt.error_message ?? "Payment failed",
-      }
-
-      if (parent.kind === "renewal") {
-        const { cycle } = parent
-
-        if (!chargeContext) {
-          await update({ status: "failed", error_code: failed.code, error_message: failed.message })
-
-          return await renewalModule.updateRenewalCycles({
-            id: cycle.id,
-            status: RenewalCycleStatus.FAILED,
-            processed_at: now,
-            last_error: failed.message,
-          })
-        }
-
-        const error = Object.assign(new Error(failed.message), { code: failed.code })
-
-        return await recordRenewalFailure(container, {
-          ...chargeContext,
-          renewal_cycle_id: cycle.id,
-          subscription_id: cycle.subscription_id,
-          attempt_id: attempt.id,
-          attempt_no: attempt.attempt_no,
-          applied_pending_changes: cycle.applied_pending_update_data as RenewalAppliedPendingUpdateData | null,
-          scheduled_for: new Date(cycle.scheduled_for).toISOString(),
-          subscription,
-          cycle_previous_state: chargeContext.previous_state,
-        }, createPaymentQualifiedRenewalError(error, "payment_provider", orderId!))
-      }
-
-      const { output: result } = await runDunningRetry(container, {
-        dunning_case_id: parent.dunning_case.id,
-        reported_failure: { dunning_attempt_id: attempt.id, ...failed },
-      })
-      const { subscription_id, dunning_case_id, attempt_no, error_code } = result
-      const events: [boolean, string, Record<string, unknown>][] = [
-        [
-          result.outcome === "retry_scheduled" && result.attempt_counted === true,
-          DunningEvents.ATTEMPT_FAILED,
-          { subscription_id, dunning_case_id, attempt_no, error_code, next_retry_at: result.next_retry_at },
-        ],
-        [
-          result.outcome === "unrecovered" && result.settled_now === true,
-          DunningEvents.PAYMENT_FAILED,
-          { subscription_id, dunning_case_id, recovery_reason: result.recovery_reason },
-        ],
-        [
-          result.outcome === "awaiting_manual_resolution",
-          DunningEvents.PARKED,
-          { subscription_id, dunning_case_id, attempt_no, park_reason: result.park_reason, error_code },
-        ],
-      ]
-
-      for (const [due, eventName, data] of events) {
-        if (due) {
-          await emitDunningEvent(container, { eventName, data })
-        }
-      }
-    },
-    end_parent: () => parent.kind === "dunning"
-      ? settleNonRetryableCase(dunningModule, parent.dunning_case, subscription.status, now)
-      : renewalModule.updateRenewalCycles({
-          id: parent.cycle.id,
-          status: RenewalCycleStatus.FAILED,
-          processed_at: now,
-          last_error: `Subscription '${subscription.id}' is ${subscription.status}, so its pending renewal charge was ended`,
-        }),
-    late_capture: async () => {
-      const data: LatePaymentCapturedEventData = {
-        subscription_id: subscription.id,
-        payment_id: payment.id,
-        order_id: orderId,
-        payment_collection_id: payment.payment_collection_id,
-        ...(parent.kind === "renewal"
-          ? { renewal_cycle_id: parent.cycle.id }
-          : {
-              renewal_cycle_id: parent.dunning_case.renewal_cycle_id,
-              dunning_case_id: parent.dunning_case.id,
-              dunning_attempt_id: attempt.id,
-            }),
-        reason: LatePaymentCapturedReason.SUBSCRIPTION_TERMINAL,
-        refund_amount: MathBN.sum(0, ...(payment.captures ?? []).map(({ amount }) => amount)).toNumber(),
-        currency_code: payment.currency_code,
-      }
-      const { output } = await emitDunningEvent(container, { eventName: SubscriptionEvents.LATE_PAYMENT_CAPTURED, data })
-
-      if (output.emitted) {
-        reported = true
-        await update({
-          status: "succeeded",
-          error_code: CAPTURED_AFTER_CLOSE,
-          marker: { late_payment_captured: { payment_id: payment.id } },
-        })
-      }
-    },
-    paid_twice: async () => {
-      if (facts.twice_alerted) {
-        return
-      }
-
-      alert("charge_paid_twice", `Payment '${payment.id}' paid order '${orderId}' a second time`)
-      await update({
-        ...(facts.attempt === "processing" && !actions.includes("settle") && {
-          status: "succeeded",
-          error_code: CAPTURED_AFTER_CLOSE,
-        }),
-        marker: { paid_twice_alerted: { payment_id: payment.id } },
-      })
-    },
-    mark_captured: () => update({ status: "succeeded", error_code: CAPTURED_AFTER_CLOSE }),
-    mark_applied: () => update({ status: "succeeded" }),
+    settle: () => settle(true),
+    settle_foreign: () => settle(false),
+    fail: () => ops.fail(failure ?? {
+      session_id: attempt.payment_reference,
+      code: attempt.error_code ?? "payment_failed",
+      message: attempt.error_message ?? "Payment failed",
+    }),
+    end_parent: () => ops.end(),
+    late_capture: () => emitLateCapture(container, charge, ops),
+    mark_captured: () => ops.updateAttempt({ status: "succeeded", error_code: CAPTURED_AFTER_CLOSE }),
+    mark_applied: () => ops.updateAttempt({ status: "succeeded" }),
     overdue_alert: async () => {
-      alert("charge_awaiting_payment_overdue", `Attempt '${attempt.id}' still has no payment answer`)
-      await update({ marker: { overdue_alerted_at: now.toISOString() } })
+      alert(container, charge, "charge_awaiting_payment_overdue", `Attempt '${attempt.id}' still has no payment answer`)
+      await ops.updateAttempt({ marker: { overdue_alerted_at: now.toISOString() } })
     },
-    close_attempt_failed: () => update({
+    close_attempt_failed: () => ops.updateAttempt({
       status: "failed",
       error_code: failure?.code ?? "no_payment_signal",
       error_message: failure?.message,
     }),
   }
+  const results = new Map<ChargeAction, unknown>()
 
   for (const action of actions) {
-    await handlers[action]()
+    results.set(action, await handlers[action]())
   }
 
-  return reported
+  return charge.facts.reported || results.get("late_capture") === true
 }
 
 /** The dunning recovery workflow takes the case's lock itself, so it runs after the release. */
@@ -443,28 +523,30 @@ export async function reconcileCharge(
   container: MedusaContainer,
   input: ReconcileChargeInput
 ): Promise<ReconcileChargeResult> {
-  const { facts, parent_status: parentStatus, lock_key: lockKey } = await loadCharge(container, input, new Date())
+  // Only what picks the lock and its wait; everything the decision reads is loaded under the lock.
+  const { attempt, newest, parent, owner } = await loadChargeParent(container, input)
+  const inFlight = PARENT_STATUSES[input.kind].inFlight.includes(owner.status) && newest?.id === attempt.id
 
-  if (
-    !decideChargeActions(facts, input.signal).length &&
-    facts.attempt !== "processing" &&
-    facts.parent !== "in_flight" &&
-    facts.order !== "overpaid"
-  ) {
-    return { actions: [], reported: facts.reported }
+  // A finished attempt whose parent is no longer in flight has nothing left to apply on any signal,
+  // so a capture event landing after its run settled doesn't wait for that run's lock.
+  if (attempt.status === RenewalAttemptStatus.SUCCEEDED && !inFlight) {
+    const reportedPaymentId = (attempt.metadata?.late_payment_captured as { payment_id?: unknown } | undefined)?.payment_id
+
+    return { actions: [], reported: input.signal === "captured" && reportedPaymentId === input.payment_id }
   }
 
+  // A run holding the lock settles a capture it got straight back, and one it parked is the sweep's.
   const noWait =
     input.signal === "sweep" ||
-    (input.signal === "captured" && RUN_HELD_PARENT_STATUSES.includes(parentStatus))
+    (input.signal === "captured" && owner.status === PARENT_STATUSES[input.kind].runHeld)
   const failure = input.signal === "failed" ? input.failure : null
-  let locked: ReconcileChargeResult & { charge: Awaited<ReturnType<typeof loadCharge>> }
+  let locked: ReconcileChargeResult & { charge: Charge }
 
   try {
     locked = await withLock(
       container,
-      lockKey,
-      { wait_seconds: noWait ? 0 : SIGNAL_LOCK_WAIT_SECONDS, ttl_seconds: 120 },
+      lockKeyOf(parent),
+      { wait_seconds: noWait ? 0 : SIGNAL_LOCK_WAIT_SECONDS, ttl_seconds: LOCK_TTL_SECONDS },
       async () => {
         const now = new Date()
         const charge = await loadCharge(container, input, now)
@@ -486,7 +568,11 @@ export async function reconcileCharge(
 
   if (charge.parent.kind === "dunning" && (settle || actions.includes("settle_foreign"))) {
     const { result } = await recoverDunningFromCapturedPaymentWorkflow(container).run({
-      input: { dunning_case_id: charge.parent.dunning_case.id, payment_id: settle ? charge.payment!.id : null },
+      input: {
+        dunning_case_id: charge.parent.dunning_case.id,
+        payment_id: settle ? charge.payment?.id ?? null : null,
+        source: settle ? "dunning_retry" : "customer_payment",
+      },
     })
 
     if (settle && result.recovered && charge.facts.attempt === "processing") {

@@ -74,3 +74,16 @@ export const emitDunningEventStep = createStep(
     return await emitDunningEvent(container, input)
   }
 )
+
+export const emitDunningEventsStep = createStep(
+  "emit-dunning-events",
+  async function (events: EmitDunningEventStepInput[], { container }) {
+    const emitted: { eventName: string, emitted: boolean }[] = []
+
+    for (const event of events) {
+      emitted.push((await emitDunningEvent(container, event)).output)
+    }
+
+    return new StepResponse(emitted)
+  }
+)

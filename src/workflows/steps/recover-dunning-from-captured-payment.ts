@@ -18,8 +18,6 @@ import { settleDunningCaseRecovered } from "../utils/settle-dunning-recovery"
 import { settleRenewalCycleSucceeded } from "../utils/settle-renewal-cycle-succeeded"
 import { loadOrderAmounts } from "./run-dunning-retry"
 
-const RECOVERY_REASON = "customer_payment"
-
 type DunningCaseRecord = {
   id: string
   subscription_id: string
@@ -39,6 +37,8 @@ export type RecoverDunningFromCapturedPaymentStepInput = {
   dunning_case_id: string
   /** Null when the reconciler found the order paid without an event naming the payment. */
   payment_id: string | null
+  /** Who took the payment: the customer (the default) or the retry's own charge confirmed later. */
+  source?: "customer_payment" | "dunning_retry"
 }
 
 export type RecoverDunningFromCapturedPaymentStepOutput = {
@@ -95,6 +95,9 @@ export async function recoverDunningFromCapturedPayment(
     container,
     dunningCase.subscription_id
   )
+  const source = input.source ?? "customer_payment"
+  // What a synchronous retry records when its own charge recovers the case.
+  const recoveryReason = source === "dunning_retry" ? "payment_recovered" : "customer_payment"
 
   const answer = (
     recovered: boolean,
@@ -105,7 +108,7 @@ export async function recoverDunningFromCapturedPayment(
       subscription_id: subscription.id,
       dunning_case_id: dunningCase.id,
       renewal_order_id: dunningCase.renewal_order_id,
-      recovery_reason: recovered ? RECOVERY_REASON : null,
+      recovery_reason: recovered ? recoveryReason : null,
       reason,
     })
 
@@ -133,7 +136,7 @@ export async function recoverDunningFromCapturedPayment(
         subscription_id: subscription.id,
         order_id: dunningCase.renewal_order_id,
         finished_at: now,
-        source: RECOVERY_REASON,
+        source,
       })
 
       // Billing already moved past this cycle, so the upcoming cycle is somebody else's and
@@ -195,7 +198,7 @@ export async function recoverDunningFromCapturedPayment(
     dunning_case: dunningCase,
     subscription,
     finished_at: now,
-    recovery_reason: RECOVERY_REASON,
+    recovery_reason: recoveryReason,
     payment_reference: input.payment_id,
   })
 

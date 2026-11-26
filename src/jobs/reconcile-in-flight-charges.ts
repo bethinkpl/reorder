@@ -9,7 +9,6 @@ import { CHARGE_IN_FLIGHT_RENEWAL_CYCLE_STATUSES, RenewalAttemptStatus, RenewalC
 import {
   type ChargeMarker,
   handleChargeReconcileFailure,
-  ranTenMinutesAgo,
   reconcileCharge,
 } from "../workflows/utils/in-flight-charge"
 import { isLockBusy } from "../workflows/utils/with-lock"
@@ -17,6 +16,8 @@ import { isLockBusy } from "../workflows/utils/with-lock"
 const JOB_NAME = "reconcile-in-flight-charges"
 const JOB_LOCK_KEY = "jobs:reconcile-in-flight-charges"
 const PAGE_SIZE = 200
+// How long a renewal or dunning run may still be charging, so the sweep leaves its attempt to it.
+const RUN_MAY_STILL_BE_ACTIVE_MS = 10 * 60 * 1000
 
 type Row = { id: string }
 type Page<T extends Row> = (after: string | undefined, take: number) => Promise<T[]>
@@ -47,23 +48,30 @@ async function collectCharges(container: MedusaContainer, now: Date) {
   const renewal = container.resolve<RenewalModuleService>(RENEWAL_MODULE)
   const dunning = container.resolve<DunningModuleService>(DUNNING_MODULE)
   const charges = new Map<string, ChargeMarker>()
+  const settledBefore = new Date(now.getTime() - RUN_MAY_STILL_BE_ACTIVE_MS)
   const add = (kind: ChargeMarker["kind"], row: Row | undefined) => {
     if (row) {
       charges.set(row.id, { kind, attempt_id: row.id })
     }
   }
   const unlessLive = <T extends Row & { started_at: Date }>(parked: boolean, newest: T | undefined) =>
-    newest && (parked || ranTenMinutesAgo(newest.started_at, now)) ? newest : undefined
+    newest && (parked || new Date(newest.started_at) <= settledBefore) ? newest : undefined
 
   await forEachPage(
     (after, take) =>
-      renewal.listRenewalAttempts({ status: RenewalAttemptStatus.PROCESSING, ...cursor(after) }, { ...byId, take }),
-    async (attempt) => add("renewal", ranTenMinutesAgo(attempt.started_at, now) ? attempt : undefined)
+      renewal.listRenewalAttempts(
+        { status: RenewalAttemptStatus.PROCESSING, started_at: { $lte: settledBefore }, ...cursor(after) },
+        { ...byId, take }
+      ),
+    async (attempt) => add("renewal", attempt)
   )
   await forEachPage(
     (after, take) =>
-      dunning.listDunningAttempts({ status: DunningAttemptStatus.PROCESSING, ...cursor(after) }, { ...byId, take }),
-    async (attempt) => add("dunning", ranTenMinutesAgo(attempt.started_at, now) ? attempt : undefined)
+      dunning.listDunningAttempts(
+        { status: DunningAttemptStatus.PROCESSING, started_at: { $lte: settledBefore }, ...cursor(after) },
+        { ...byId, take }
+      ),
+    async (attempt) => add("dunning", attempt)
   )
   await forEachPage(
     (after, take) =>
